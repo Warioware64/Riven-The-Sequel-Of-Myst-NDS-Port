@@ -1,3 +1,6 @@
 [submodule "libvaht"]
 	path = thirdparty/libvaht
 	url = https://github.com/agrif/libvaht.git
+[submodule "thirdparty/libvaht"]
+	path = thirdparty/libvaht
+	url = https://github.com/agrif/libvaht.git
