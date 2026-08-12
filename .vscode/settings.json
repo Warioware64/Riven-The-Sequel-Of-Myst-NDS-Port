@@ -1,0 +1,43 @@
+{
+    // Without this every file in the project reports "'RivenData.hpp' file not
+    // found": the schema lives in shared/ and yas in thirdparty/, and neither is
+    // beside the sources that include them. compile_commands.json (written by
+    // the Configure task) carries the real flags for everything the converter
+    // builds; the fallback flags below cover the ARM9 sources in source/, which
+    // are not in that database because they are built by build.py.
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build/convert",
+        "--header-insertion=never",
+        "--background-index"
+    ],
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/convert/compile_commands.json",
+    "C_Cpp.default.cppStandard": "c++20",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/shared",
+        "${workspaceFolder}/thirdparty",
+        "${workspaceFolder}/source",
+        "${workspaceFolder}/tools/riven-convert/core/include",
+        "${workspaceFolder}/thirdparty/libvaht/include"
+    ],
+    "cmake.sourceDirectory": "${workspaceFolder}/tools/riven-convert",
+    "cmake.buildDirectory": "${workspaceFolder}/build/convert",
+    // The converter is configured by the tasks above; letting the CMake Tools
+    // extension configure on open would race with them over the same build tree.
+    "cmake.configureOnOpen": false,
+    "files.associations": {
+        "*.hpp": "cpp",
+        "*.mhk": "binary"
+    },
+    // helpSrc/ is 400 MB of reference material (ScummVM, FastVideoDS, the Myst
+    // port). It is deliberately searchable -- it is cited constantly -- but
+    // excluding it from the file watcher keeps the editor responsive.
+    "files.watcherExclude": {
+        "**/helpSrc/**": true,
+        "**/build/**": true,
+        "**/env/**": true
+    },
+    "search.exclude": {
+        "**/build/**": true,
+        "**/env/**": true
+    }
+}

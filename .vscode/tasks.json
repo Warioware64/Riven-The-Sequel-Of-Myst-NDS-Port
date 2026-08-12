@@ -1,0 +1,44 @@
+{
+    // Two things get built in this repo and they use completely different
+    // toolchains: the converter is an ordinary host CMake project, and the ROM
+    // is built by build.py through the Wonderful/BlocksDS toolchain. make.sh
+    // already exports that environment itself, so the ROM tasks just call it.
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Configure converter",
+            "type": "shell",
+            "command": "cmake -S tools/riven-convert -B build/convert -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "detail": "cmake configure; also refreshes build/convert/compile_commands.json"
+        },
+        {
+            "label": "Build converter",
+            "type": "shell",
+            "command": "cmake --build build/convert -j",
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": { "kind": "build", "isDefault": true },
+            "dependsOn": "Configure converter",
+            "problemMatcher": ["$gcc"],
+            "detail": "riven-convert, riven-convert-gui and the tests"
+        },
+        {
+            "label": "Build ROM",
+            "type": "shell",
+            "command": "./make.sh",
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": ["$gcc"],
+            "detail": "riven-nds-port.nds, via build.py in ./env"
+        },
+        {
+            "label": "Clean ROM",
+            "type": "shell",
+            "command": "./clean.sh",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "detail": "removes the architectds build tree"
+        }
+    ]
+}

@@ -1,0 +1,125 @@
+# Builds and tests the asset converter on Linux and Windows.
+#
+# The Windows binary can only come from a Windows runner: there is no Qt-for-
+# MinGW on the dev machine and building one is hours of work for no benefit
+# over this. The Myst port reached the same conclusion for its PyInstaller
+# build and used the same two-runner matrix.
+#
+# The tests run on both platforms and need no game data -- every test that
+# wants a Riven install skips and passes without RIVEN_TEST_DATA.
+
+name: converter
+
+on:
+  push:
+    paths:
+      - 'tools/riven-convert/**'
+      - 'shared/**'
+      - 'thirdparty/libvaht'
+      - '.github/workflows/build-converter.yml'
+  pull_request:
+    paths:
+      - 'tools/riven-convert/**'
+      - 'shared/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported runner on purpose: the binary then also runs
+          # against older glibc than the runner's own.
+          - os: ubuntu-22.04
+            name: linux
+            artifact: riven-convert-linux
+          - os: windows-latest
+            name: windows
+            artifact: riven-convert-windows
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # libvaht; the build hard-errors without it
+
+      # 6.5 rather than the newest: it is what CMakeLists asks for, and pinning
+      # low keeps the binary usable on older distributions.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.5.*'
+          cache: true
+
+      - name: Configure
+        run: >
+          cmake -S tools/riven-convert -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DRIVEN_BUILD_GUI=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -eux
+          mkdir -p dist/riven-convert
+          cp build/riven-convert dist/riven-convert/
+          cp build/gui/riven-convert-gui dist/riven-convert/
+          cp README.md docs/licensing.md dist/riven-convert/
+          # linuxdeploy bundles the Qt runtime, so the AppImage does not depend
+          # on the user's distribution shipping a matching Qt 6.
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+          cat > riven-convert.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Riven DS Converter
+          Exec=riven-convert-gui
+          Icon=riven-convert
+          Categories=Utility;
+          EOF
+          convert -size 256x256 xc:#204060 riven-convert.png 2>/dev/null || \
+            python3 -c "import struct,zlib,sys;
+w=h=256;raw=b''.join(b'\x00'+bytes([32,64,96])*w for _ in range(h));
+chunk=lambda t,d:struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d));
+open('riven-convert.png','wb').write(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))"
+          ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
+            --appdir AppDir \
+            --executable build/gui/riven-convert-gui \
+            --desktop-file riven-convert.desktop \
+            --icon-file riven-convert.png \
+            --plugin qt --output appimage
+          mv Riven*.AppImage dist/riven-convert/ 2>/dev/null || mv *.AppImage dist/riven-convert/
+          tar czf riven-convert-linux.tar.gz -C dist riven-convert
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\riven-convert | Out-Null
+          Copy-Item build\Release\riven-convert.exe dist\riven-convert\
+          Copy-Item build\gui\Release\riven-convert-gui.exe dist\riven-convert\
+          Copy-Item README.md, docs\licensing.md dist\riven-convert\
+          # windeployqt copies the Qt DLLs and plugins next to the exe, which is
+          # also what keeps the LGPL dynamic-linking requirement satisfied.
+          windeployqt --release --no-translations dist\riven-convert\riven-convert-gui.exe
+          Compress-Archive -Path dist\riven-convert\* -DestinationPath riven-convert-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            riven-convert-linux.tar.gz
+            riven-convert-windows.zip
+          if-no-files-found: error

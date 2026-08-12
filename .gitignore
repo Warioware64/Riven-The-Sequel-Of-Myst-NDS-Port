@@ -43,7 +43,13 @@
 build/
 Build/
 build-*/
+.codegraph/
+helpSrc/
 
+# architectds emits its ninja files at the repo root
+build.ninja
+.ninja_deps
+.ninja_log
 # CMake generated files
 CMakeFiles/
 CMakeCache.txt

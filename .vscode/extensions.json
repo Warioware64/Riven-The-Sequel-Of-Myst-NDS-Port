@@ -1,0 +1,10 @@
+{
+    "recommendations": [
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-vscode.cmake-tools"
+    ],
+    // The Microsoft C/C++ extension's IntelliSense fights clangd over the same
+    // files; settings.json configures both so either works, but running both at
+    // once produces duplicate and contradictory diagnostics.
+    "unwantedRecommendations": []
+}

@@ -1,0 +1,12 @@
+-gt -ob -v -f palette256 -cm 8 -t0x
+# NOTE: architectds only reads the first line of a .ptxc, so the arguments must
+# come first and everything below is just documentation.
+#
+# Black variant of the menu font, converted for the top-screen text layer (see
+# TopScreenText). palette256 output is a linear 8bpp index map — the same layout
+# an 8bpp bitmap BG and libdsf's DSF_BMP_RGB256 expect — unlike the tex4x4 build
+# of DejaVuSans-Bold_0.png, which is a 3D texture for the bottom-screen menu.
+# The glyph shape lives in the PNG's alpha channel (its RGB is black
+# everywhere), and paletted DS formats carry 1-bit alpha, so -t0x pins index 0
+# as the transparent slot and the glyphs come out hard-edged (alpha >= 128).
+# -ob (not -og) yields _tex.bin + _pal.bin, which TopScreenText freads directly.

@@ -1,0 +1,47 @@
+From: Riven DS port
+Subject: [PATCH] pack the tWAV Data-chunk header to its 20-byte on-disc size
+
+Same class of bug as 0001, in the sound reader this time.
+
+A tWAV Data chunk begins with a 20-byte big-endian header: uint16 sampleRate,
+uint32 sampleCount, uint8 bitsPerSample, uint8 channels, uint16 encoding,
+uint16 loop, uint32 loopStart, uint32 loopEnd. Declared without packing it
+lays out as 24 bytes on every normal ABI -- two bytes of padding after
+sampleRate to align sampleCount, and two more after loop to align loopStart.
+
+vaht_wav.c:110 then does vaht_resource_read(res, sizeof(header), &header),
+so every field after sampleRate is read from the wrong offset. `encoding`
+lands on unrelated bytes, fails the tWAV_ADPCM test at vaht_wav.c:201, and
+vaht_wav_open returns NULL with "Unsupported format..." for EVERY sound in
+the game. data_seek is also left four bytes past the true start.
+
+Upstream never sees this because its autotools build compiles everything with
+-fpack-struct=1 (src/Makefile.am:8). Any consumer that builds the sources
+directly -- as this project's CMake does, to stay cross-compilable to Windows
+without autotools -- gets the padded layout instead.
+
+#pragma pack rather than __attribute__((packed)), for the same reason as 0001:
+the converter is built with MSVC on Windows.
+
+diff --git a/src/vaht_wav.c b/src/vaht_wav.c
+index ce96f2f..a42754b 100644
+--- a/src/vaht_wav.c
++++ b/src/vaht_wav.c
+@@ -95,6 +95,7 @@ static inline void handle_data(vaht_wav* wav, uint32_t chunk_size)
+     /* this chunk_size LIES, so fix it up */
+     chunk_size -= 8;
+     
++#pragma pack(push, 1)
+     struct
+     {
+         uint16_t sample_rate;
+@@ -106,7 +107,8 @@ static inline void handle_data(vaht_wav* wav, uint32_t chunk_size)
+         uint32_t loop_start;
+         uint32_t loop_end;
+     } header;
+-    
++#pragma pack(pop)
++
+     vaht_resource_read(wav->res, sizeof(header), &header);
+     VAHT_SWAP_U16(header.sample_rate);
+     VAHT_SWAP_U32(header.sample_count);

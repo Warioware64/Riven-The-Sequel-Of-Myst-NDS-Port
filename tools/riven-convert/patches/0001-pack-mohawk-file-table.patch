@@ -1,0 +1,42 @@
+From: Riven DS port
+Subject: [PATCH] pack struct vaht_mohawk_file_table to its 10-byte on-disc size
+
+A Mohawk file-table entry is 10 bytes on disc: uint32 offset, uint16 size-low,
+uint8 size-mid, uint8 flags, uint16 unknown. Declared without packing, every
+normal C ABI rounds that to 12 (the uint32 forces 4-byte alignment, so the
+struct is padded to a multiple of 4).
+
+That breaks vaht_archive_open in two ways:
+
+  * vaht_archive.c:63 validates the entry count as
+    (file_table_size - 4) / sizeof(struct vaht_mohawk_file_table). With a
+    12-byte struct this never matches, so EVERY Riven archive is rejected --
+    b_Data.MHK has 4607 entries and a 46074-byte table: (46074-4)/10 = 4607
+    exactly, but /12 = 3839.
+
+  * vaht_resource.c:61 and :77 fread() straight into the struct, so even past
+    the check the offset and size of every resource would be read from the
+    wrong bytes.
+
+#pragma pack rather than __attribute__((packed)) so the fix also holds under
+MSVC, which the DS port's converter is built with on Windows.
+
+--- a/src/vaht_intern.h
++++ b/src/vaht_intern.h
+@@ -66,13 +66,15 @@ struct vaht_mohawk_name_table
+     uint16_t file_table_index; /* starting from 1 */
+ };
+
++#pragma pack(push, 1)
+ struct vaht_mohawk_file_table
+ {
+     uint32_t data_offset; /* absolute */
+     uint16_t data_size_1; /* bits 15-0 */
+     uint8_t data_size_2; /* bits 23-16 */
+     uint8_t u0;
+     uint16_t u1;
+ };
++#pragma pack(pop)
+
+ struct vaht_resource_s
+ {
