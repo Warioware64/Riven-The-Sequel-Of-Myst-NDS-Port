@@ -147,7 +147,7 @@ void Inventory::update(Engine &e)
     // Hidden on aspit -- that is the menu and the journals themselves, and the
     // original hides it there too (riven_inventory.cpp:168-193). Hidden while a
     // fullscreen movie owns the screen, because it is a cutscene.
-    const bool hide = forcedHidden_ || e.stack().id == StackId::Aspit
+    const bool hide = forcedHidden_ || suppressed_ || e.stack().id == StackId::Aspit
                       || e.fullscreenMoviePlaying();
 
     if (want != shown_ || hide != hidden_)
@@ -199,6 +199,25 @@ void Inventory::setForcedHidden(bool on)
         return;
     forcedHidden_ = on;
     dirty_ = true;
+}
+
+void Inventory::setSuppressed(bool on)
+{
+    if (on == suppressed_)
+        return;
+    suppressed_ = on;
+    dirty_ = true;
+
+    // Hiding is settled here; showing again is left to update().
+    //
+    // The asymmetry is the point. A port screen owns the frame while it is up,
+    // so update() is not running and cannot be relied on to hide the strip
+    // before the screen draws over it -- but it IS running again by the time
+    // anything could see the strip come back, and it is the only thing that
+    // knows the rest of the answer (the stack, a movie). Deciding "visible"
+    // here would mean duplicating that test and getting to disagree with it.
+    if (on)
+        hidden_ = true;
 }
 
 void Inventory::flush()

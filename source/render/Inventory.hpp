@@ -67,7 +67,20 @@ public:
 
     /// ospit's cage sequence forces it visible; the menu and the journals
     /// themselves force it hidden (aspit.cpp:441, :450).
+    ///
+    /// FOR RIVEN'S SCRIPTS ONLY. See setSuppressed.
     void setForcedHidden(bool on);
+
+    /// Hide it because one of the PORT's own screens is up -- the zoom viewer,
+    /// the settings screen -- and put it back afterwards.
+    ///
+    /// A second flag rather than a second caller of setForcedHidden, because
+    /// the two have different owners and a shared boolean cannot serve both: a
+    /// screen that set the script's flag and cleared it on the way out would
+    /// clear it whatever the script had wanted, and did -- leaving the zoom
+    /// viewer was making Atrus's journal reachable on a card whose script had
+    /// hidden it.
+    void setSuppressed(bool on);
 
     /// Push to OAM. Vblank only, like every other upload here.
     void flush();
@@ -91,7 +104,8 @@ private:
     NEA_Hw2DOBJAsset *assets_[kMaxItems] = {};
     Item items_[kMaxItems];
     int shown_ = 0;
-    bool forcedHidden_ = false;
+    bool forcedHidden_ = false; ///< set by Riven's scripts
+    bool suppressed_ = false;   ///< set by the port's own screens
     bool hidden_ = false;
     bool dirty_ = true;
 };

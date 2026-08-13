@@ -784,13 +784,14 @@ void Engine::toggleZoom()
         zoomView.close();
         mode_ = Mode::Card;
         // The card was parked untouched while the viewer had the screen, so
-        // this is a rebind. The buffer that comes back is the one the viewer
-        // scribbled on, and the card surface has to know not to trust it.
-        const int stale = bgs.endMovieTakeover();
-        surface_.invalidate(stale);
+        // this is a rebind. Every buffer that is not the parked one holds zoom
+        // pixels, not just the one endMovieTakeover names, so none of them may
+        // be trusted (CardSurface::invalidateAll).
+        (void)bgs.endMovieTakeover();
+        surface_.invalidateAll();
         applyScreenUpdate(true);
         cursor_.setVisible(true);
-        inventory_.setForcedHidden(false);
+        inventory_.setSuppressed(false);
         setStatus("");
         return;
     }
@@ -820,7 +821,7 @@ void Engine::toggleZoom()
 
     mode_ = Mode::Zoom;
     cursor_.setVisible(false);
-    inventory_.setForcedHidden(true);
+    inventory_.setSuppressed(true);
     setStatus("zoom: D-pad or stylus to pan, B to leave");
 }
 

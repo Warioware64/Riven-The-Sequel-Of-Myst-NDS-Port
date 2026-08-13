@@ -77,6 +77,22 @@ public:
     /// Used when a fullscreen movie hands a buffer back.
     void invalidate(int buf) { dirty_[buf] = kAllDirty; }
 
+    /// The same for every buffer, for a screen that drew over more than the one
+    /// handed back.
+    ///
+    /// A movie writes one buffer at a time and endMovieTakeover names it, so
+    /// invalidate(stale) is enough there. The port's own screens are not so
+    /// tidy: the zoom viewer draws each buffer as it becomes the back one and
+    /// so has written TWO by the time it is left, and the settings screen the
+    /// same. Which of them is the spare afterwards depends on how many times
+    /// the screen happened to flip, and reasoning about that per caller is how
+    /// a buffer gets missed.
+    void invalidateAll()
+    {
+        for (std::uint32_t &d : dirty_)
+            d = kAllDirty;
+    }
+
     /// Copy this buffer's outstanding rows into it. Unlike the texture path this
     /// replaces, there is no upload window and no partial write: the buffer is
     /// not the one being scanned out, so the whole 84 KB can go at once whenever

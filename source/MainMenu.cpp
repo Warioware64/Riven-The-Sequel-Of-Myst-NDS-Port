@@ -9,6 +9,7 @@
 #include "global_header.hpp"
 #include "render/BgSurface.hpp"
 #include "render/Cursor.hpp"
+#include "render/Inventory.hpp"
 #include "render/TextLayer.hpp"
 
 namespace rivenrt
@@ -104,6 +105,19 @@ namespace
         c.setVisible(on);
         c.flush();
     }
+
+    /// The same for the inventory strip, which is sprites too and would
+    /// otherwise float over a settings screen opened from Riven's own Options
+    /// button. setSuppressed and not setForcedHidden: that flag belongs to the
+    /// scripts (Inventory.hpp).
+    void showInventory(bool on)
+    {
+        Inventory &inv = engine.inventory();
+        if (!inv.exists())
+            return;
+        inv.setSuppressed(!on);
+        inv.flush();
+    }
 } // namespace
 
 void MainMenu::runSettings()
@@ -139,6 +153,7 @@ void MainMenu::runSettings()
         bgs.beginMovieTakeover();
     bgs.setLetterbox(false);
     showPointer(false);
+    showInventory(false);
 
     while (true)
     {
@@ -247,13 +262,17 @@ void MainMenu::runSettings()
     bgs.setLetterbox(true);
     if (inGame)
     {
-        // Hands the card back and names the buffer this screen scribbled on, so
-        // the card view can rebuild it rather than trusting what is there.
-        const int stale = bgs.endMovieTakeover();
-        engine.surface().invalidate(stale);
+        // Hands the card back. Everything else this screen drew on has to be
+        // rebuilt, and it drew on more than the one buffer endMovieTakeover
+        // names -- see CardSurface::invalidateAll.
+        (void)bgs.endMovieTakeover();
+        engine.surface().invalidateAll();
         engine.applyScreenUpdate(true);
         showPointer(true);
     }
+    // Outside the inGame branch: the strip is suppressed on the way in whether
+    // or not a game is running, so it has to be released either way.
+    showInventory(true);
 }
 
 void MainMenu::run()

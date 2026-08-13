@@ -15,11 +15,21 @@ ZoomView zoomView;
 
 namespace
 {
-    /// The window is the whole screen, not the 256x165 card view: there is no
-    /// reason to letterbox a 1:1 crop of a bigger picture, and the caller turns
-    /// BgSurface's letterbox off while this is up.
-    constexpr int kWindowW = rivendata::kScreenW;
-    constexpr int kWindowH = rivendata::kScreenH;
+    /// The window is the CARD VIEW, not the whole screen, and the letterbox
+    /// stays on while the viewer is up.
+    ///
+    /// The obvious thing is to use all 192 rows -- it is a 1:1 crop of a bigger
+    /// picture, so why frame it -- and it is wrong, because rows kViewH..255 of
+    /// every buffer are reserved. BgSurface fills them transparent ONCE and
+    /// never again (BgSurface.hpp:32-40), and CardSurface's republish is bounded
+    /// by kViewH, so anything written there is permanent: the band under the
+    /// card kept the zoom's pixels for the rest of the run.
+    ///
+    /// Framing the window as the card view means those rows are never written
+    /// and there is nothing to put back. The 27 rows are not lost, only moved --
+    /// the pannable range grows by exactly as much.
+    constexpr int kWindowW = rivendata::kViewW;
+    constexpr int kWindowH = rivendata::kViewH;
 
     static_assert(kMaxRpizW == rivendata::kCardW && kMaxRpizH == rivendata::kCardH,
                   "the .rpiz cap and the card size have drifted apart");
@@ -44,7 +54,7 @@ bool ZoomView::open(const std::string &path)
     {
         // A picture smaller than the window has nothing to pan and nothing to
         // show that the card view is not already showing.
-        DebugLog::warn("zoom: %dx%d is not bigger than the screen", img.width, img.height);
+        DebugLog::warn("zoom: %dx%d is not bigger than the view", img.width, img.height);
         return false;
     }
 
@@ -64,7 +74,6 @@ bool ZoomView::open(const std::string &path)
     DebugLog::log("ZOOM %dx%d, window at %d,%d", width_, height_, originX_, originY_);
 
     bgs.beginMovieTakeover();
-    bgs.setLetterbox(false);
     return true;
 }
 
@@ -79,8 +88,6 @@ void ZoomView::close()
     indices_.shrink_to_fit();
     width_ = height_ = 0;
     redrawsLeft_ = 0;
-
-    bgs.setLetterbox(true);
 }
 
 void ZoomView::pan(int dx, int dy)

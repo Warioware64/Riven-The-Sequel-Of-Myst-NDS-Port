@@ -195,10 +195,17 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
         e.inventory().setForcedHidden(false);
         return;
     }
-    // tspit hides the strip around the opening cutscene (tspit.cpp).
     if (key == "xthideinventory")
     {
-        e.inventory().setForcedHidden(true);
+        // EMPTY, and matching ScummVM's, which is also empty (tspit.cpp:190).
+        //
+        // The name invites forceHidden(true) and this port had it, with no
+        // counterpart anywhere -- so from the opening cutscene onwards the strip
+        // was hidden for the rest of the game and Atrus's journal, which nothing
+        // else reaches, was unreachable. Nothing needs it: the strip is already
+        // hidden during the cutscene by fullscreenMoviePlaying() and on aspit by
+        // the stack test (Inventory::update), which is why ScummVM can afford to
+        // leave it empty too.
         return;
     }
     if (key == "xaoptions")

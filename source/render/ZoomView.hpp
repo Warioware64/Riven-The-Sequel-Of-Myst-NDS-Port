@@ -14,11 +14,13 @@
 // before anything could -- "decodes one image on demand into a 238 KB scratch
 // buffer and windows 256x192 out of it". This is that.
 //
-// The window is 1:1, so it covers 42% of the card's width and 49% of its
-// height, and the D-pad or the stylus moves it. There is no intermediate zoom
-// level: the hardware could scale the background, but everything between 0.42x
-// and 1.0x is an interpolation of pixels that already exist at both ends, and
-// the point of the mode is the ones that do not.
+// The window is 1:1 and is the card view's own 256x165, so it covers 42% of the
+// card's width and its height, and the D-pad or the stylus moves it. Framing it
+// as the card view rather than as the whole screen is not cosmetic -- see the
+// note on kWindowH in the .cpp. There is no intermediate zoom level either: the
+// hardware could scale the background, but everything between 0.42x and 1.0x is
+// an interpolation of pixels that already exist at both ends, and the point of
+// the mode is the ones that do not.
 //
 // THE SCREEN. Taken with BgSurface::beginMovieTakeover, which is the mechanism
 // a fullscreen movie already uses and which exists precisely for this: the card
