@@ -34,6 +34,7 @@
 #include "render/CardSurface.hpp"
 #include "render/Cursor.hpp"
 #include "render/Inventory.hpp"
+#include "render/ZoomView.hpp"
 #include "rvid/RvidPlayer.hpp"
 
 namespace rivenrt
@@ -153,6 +154,28 @@ public:
     /// load script knows not to (riven_card.cpp:690-694).
     bool activatedPlst() const { return activatedPlst_; }
     bool activatedSlst() const { return activatedSlst_; }
+
+    // --- the zoom viewer ----------------------------------------------------
+    //
+    // The engine has exactly one mode otherwise: a card is up. This is the
+    // second, and it is deliberately a flag on the frame loop rather than a
+    // state machine -- there are two states, and a machine for two states is a
+    // machine that has to be read before either can be understood.
+
+    enum class Mode
+    {
+        Card,
+        Zoom,
+    };
+
+    /// Open the zoom viewer on the card's own picture, or close it. Refused,
+    /// with a line saying why, while a movie or a transition owns the screen
+    /// and when the card was converted without its zoom twin.
+    void toggleZoom();
+
+    /// The tBMP the last full-card PLST record drew, which is the picture the
+    /// zoom viewer opens. Zero until a card has drawn one.
+    std::uint16_t cardPicture() const { return cardPicture_; }
 
     /// The card the engine is on, and its RMAP global id -- the pair the
     /// inventory has to record before it links away, so a journal's back
@@ -327,6 +350,11 @@ private:
     /// it is the converter's output, shared by every visit to the card.
     std::vector<bool> hotspotEnabled_;
     const rivendata::Hotspot *currentHotspot_ = nullptr;
+    Mode mode_ = Mode::Card;
+    /// The tBMP of the last PLST record that covered the whole card view. Only
+    /// full-card pictures are recorded: the overlays a script draws on top are
+    /// PLST records too, and zooming into a 39x76 button would be nothing.
+    std::uint16_t cardPicture_ = 0;
     /// Every zip destination visited this game. Small: 22 cards in the whole of
     /// Riven carry a non-zero zipModePlace.
     std::vector<ZipDest> zipDests_;

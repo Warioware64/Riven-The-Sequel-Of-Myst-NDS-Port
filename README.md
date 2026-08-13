@@ -9,11 +9,12 @@ own copy of Riven into files the DS can read.
 
 > **Status: early, but it runs.** The converter is complete: it reads a Riven
 > install and produces the card graph, the artwork, the sound and the movies the
-> DS reads, with a Qt GUI and a CLI. The DS engine now boots into Riven's main
-> menu, draws cards, runs the scripts, plays the fullscreen movies with sound and
-> follows hotspots between cards and stacks. Most of the game's machinery — the
-> inventory, the zoom viewer, saves, the water effects and the per-stack puzzle
-> commands — is not there yet. See [Milestones](#milestones).
+> DS reads, with a Qt GUI and a CLI. The DS engine has a menu and a settings
+> screen, boots into Riven's own main menu, draws cards, runs the scripts, plays
+> the fullscreen movies with sound, follows hotspots between cards and stacks,
+> and zooms into any card at its original resolution. Saves, the water effects
+> and most of the per-stack puzzle commands are not there yet. See
+> [Milestones](#milestones).
 
 ## How it relates to the Myst port
 
@@ -128,7 +129,7 @@ Two stacks are enough to see the game start, and they are much quicker to conver
 than all eight:
 
 ```bash
-./build/convert/riven-convert --stack aspit --stack tspit --no-hires \
+./build/convert/riven-convert --stack aspit --stack tspit \
     /path/to/riven /path/to/sd
 ```
 
@@ -147,13 +148,25 @@ Riven's cursor shapes are for. The cursors are the game's own, read out of
 The books you carry sit in the band under the card view and are touchable.
 That band is the only route to Atrus's journal, in this port as in the original.
 
-**The top screen is the log.** Every diagnostic the engine produces goes there:
-a movie that is not on the card, a card a script asked for that does not exist,
-an external command nobody has written yet. On hardware those used to go
-nowhere, which made every failure look like the game simply not doing something.
+**The top screen is the log, over Riven's own splash.** Every diagnostic the
+engine produces goes there: a movie that is not on the card, a card a script
+asked for that does not exist, an external command nobody has written yet. On
+hardware those used to go nowhere, which made every failure look like the game
+simply not doing something. Behind them is `Autorun/AUTORUN.BMP`, the picture the
+CD's autorun shell put behind its buttons — extracted from your copy like
+everything else, because the ROM ships no art. An install without one (it belongs
+to the disc, not to the game) gets the black screen it had before.
 
-`--no-hires` skips the zoom art, which is the largest single thing on the card and
-which nothing reads yet.
+**X zooms.** Riven's stills are 608x392 and the card view shows all of them at
+0.42x, which turns a good deal of what the game asks you to read into a smudge.
+**X** opens the full-resolution twin at 1:1 and the D-pad or the stylus pans it;
+**B** leaves. This is what `pics_hi/` has been for, so **do not pass
+`--no-hires`** if you want it — without that stage the button says so and does
+nothing.
+
+**Settings** live behind the menu the ROM starts on, and behind Riven's own
+Options button. Zip mode (off by default, as in the original), transitions, water
+and a master volume, kept in `_nds/riven_nds/data/settings.dat`.
 
 ### Tests
 
@@ -225,18 +238,20 @@ partial the converter salvages what it can and says how much it lost.
 4. ✅ Converter: card art (`.rpic`) and zoom art (`.rpiz`), water effects, Qt GUI
 5. ✅ DS engine: stills and navigation — boots into aspit card 1, draws the card,
    hit-tests hotspots in original coordinates, changes card and stack
-6. 🔨 Scripts — the whole simple-opcode table is implemented; the per-stack
-   external commands are only aspit's menu and books plus the two tspit's opening
-   cutscene calls. The rest report their name and do nothing
+6. 🔨 Scripts — the whole simple-opcode table is implemented, zip mode (45)
+   included; the per-stack external commands are only aspit's menu, books and
+   options plus the two tspit's opening cutscene calls. The rest report their
+   name and do nothing
 7. ✅ Audio — `sound/<stack>/<id>.rsnd`, lossless PCM16 where it fits and
    bit-exact ADPCM passthrough where it does not, played on the DS's hardware
    channels with SLST volume and balance
 8. ✅ Video — the converter (QuickTime demuxer, Cinepak, QuickTime RLE, IMA4,
    [raw frames](docs/video.md)) **and** the DS player: no codec, the soundtrack as
    the clock, and a skipped frame that costs a seek
-9. 🔨 Inventory, zoom viewer, saves, menus, water effects — the inventory strip
-   and both journals' route in are built; the zoom viewer, saves and the water
-   effects are not
+9. 🔨 Inventory, zoom viewer, saves, menus, water effects — the inventory strip,
+   both journals' route in, the port's menu and settings screen, the top-screen
+   picture and the zoom viewer are built. **Saves and the water effects are
+   not**, and they are what is left of this milestone
 
 ## Credits and licensing
 

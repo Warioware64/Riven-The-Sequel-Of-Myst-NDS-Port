@@ -161,6 +161,15 @@ void Engine::activatePlst(std::uint16_t index)
     for (const PictureRec &p : card_->plst)
         if (p.index == index)
         {
+            // A PLST record that covers the whole card is the card's picture,
+            // and that is the one the zoom viewer opens. The rest are overlays
+            // -- a lever in one position, a button lit -- and zooming into a
+            // 39x76 twin of one would show nothing the card view does not.
+            if (p.rect.left <= 0 && p.rect.top <= 0 && p.rect.right >= kCardW
+                && p.rect.bottom >= kCardH)
+            {
+                cardPicture_ = p.id;
+            }
             drawBitmap(p.id, p.rect);
             return;
         }
@@ -711,6 +720,9 @@ void Engine::resetCardState()
 
     insideHotspot_ = -1;
     pressedHotspot_ = -1;
+    // The new card has not drawn its picture yet, and offering the old card's
+    // zoom twin would be showing the player somewhere they have left.
+    cardPicture_ = 0;
     // Otherwise an opcode-13 shape from the last card is still on screen until
     // the pointer happens to cross a hotspot.
     cursor_.setShape(rivendata::kCursorMain);
@@ -739,6 +751,57 @@ void Engine::refreshCard()
 {
     if (card_ != nullptr)
         enterCard();
+}
+
+// ---------------------------------------------------------------------------
+// The zoom viewer
+// ---------------------------------------------------------------------------
+
+void Engine::toggleZoom()
+{
+    if (mode_ == Mode::Zoom)
+    {
+        zoomView.close();
+        mode_ = Mode::Card;
+        // The card was parked untouched while the viewer had the screen, so
+        // this is a rebind. The buffer that comes back is the one the viewer
+        // scribbled on, and the card surface has to know not to trust it.
+        const int stale = bgs.endMovieTakeover();
+        surface_.invalidate(stale);
+        applyScreenUpdate(true);
+        cursor_.setVisible(true);
+        inventory_.setForcedHidden(false);
+        setStatus("");
+        return;
+    }
+
+    // Refused rather than queued. All three of these mean something else owns
+    // the buffers, and the viewer's whole screen-handling is "take the two the
+    // card is not using" -- which is exactly what they are already doing.
+    if (fullscreenMoviePlaying() || bgs.transitionActive() || bgs.movieTakeover())
+    {
+        std::printf("zoom: not while the screen is busy\n");
+        return;
+    }
+    if (cardPicture_ == 0)
+    {
+        std::printf("zoom: this card has no picture of its own\n");
+        return;
+    }
+
+    const std::string path = global.picsHiDir() + stackName(stack_.id) + "/"
+                             + std::to_string(cardPicture_) + ".rpiz";
+    if (!zoomView.open(path))
+    {
+        // open() has already said which of the two it was: no pics_hi/ at all
+        // (converted with --no-hires) or no twin for this one picture.
+        return;
+    }
+
+    mode_ = Mode::Zoom;
+    cursor_.setVisible(false);
+    inventory_.setForcedHidden(true);
+    setStatus("zoom: D-pad or stylus to pan, B to leave");
 }
 
 // ---------------------------------------------------------------------------
@@ -876,6 +939,64 @@ void Engine::processInput()
     scanKeys();
     touchPosition touch;
     touchRead(&touch);
+
+    // X opens and closes the zoom viewer. It is the only free face button --
+    // A clicks, B skips a cutscene, and Y is left alone as the one thing a
+    // player can press without changing anything.
+    if ((keysDown() & KEY_X) != 0)
+    {
+        toggleZoom();
+        return;
+    }
+
+    // While the viewer is up it owns the input, and nothing below runs: the
+    // hotspots under the pointer belong to a card that is not on screen.
+    if (mode_ == Mode::Zoom)
+    {
+        const std::uint32_t held = keysHeld();
+        const std::uint32_t down = keysDown();
+        if ((down & (KEY_B | KEY_START)) != 0)
+        {
+            toggleZoom();
+            return;
+        }
+
+        // Slow for the first quarter second, then fast -- the same shape as the
+        // pointer's D-pad nudge below, and for the same reason: a single press
+        // should move a pixel and a held one should cross the picture.
+        ++padHeld_;
+        if ((held & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN)) == 0)
+            padHeld_ = 0;
+        const int step = padHeld_ > 15 ? 8 : 2;
+
+        int dx = 0;
+        int dy = 0;
+        if ((held & KEY_LEFT) != 0)
+            dx -= step;
+        if ((held & KEY_RIGHT) != 0)
+            dx += step;
+        if ((held & KEY_UP) != 0)
+            dy -= step;
+        if ((held & KEY_DOWN) != 0)
+            dy += step;
+
+        // Stylus drag: the picture follows the finger, so dragging left pulls
+        // the window right. Only while the stylus stays down -- a fresh touch
+        // seeds the anchor instead of jumping the view to it.
+        if ((held & KEY_TOUCH) != 0)
+        {
+            if ((down & KEY_TOUCH) == 0)
+            {
+                dx += pointerX_ - touch.px;
+                dy += pointerY_ - touch.py;
+            }
+            pointerX_ = touch.px;
+            pointerY_ = touch.py;
+        }
+
+        zoomView.pan(dx, dy);
+        return;
+    }
 
     // SELECT + a direction replays the current card with that transition, and
     // SELECT + A dissolves it. A developer aid: the shipped data only reaches
@@ -1120,6 +1241,12 @@ void Engine::flushUploads()
         }
     }
 
+    // The zoom viewer publishes through the same door as everything else, and
+    // after the card's own publish is skipped above -- movieTakeover() is true
+    // while it is up, which is how it took the buffers in the first place.
+    if (mode_ == Mode::Zoom)
+        zoomView.publish();
+
     // The one place video registers are written, and the reason it belongs here:
     // the caller has just come back from NEA_WaitForVBL.
     bgs.vblank();
@@ -1144,6 +1271,12 @@ void Engine::frame()
     pumpMovies();
 
     processInput();
+
+    // Nothing below this belongs to a card that is not on screen. A queued
+    // command list would draw into buffers the viewer owns, and a CardFrame
+    // handler is an animation nobody can see.
+    if (mode_ == Mode::Zoom)
+        return;
 
     if (!queued_.empty() && !runningQueued_)
     {
