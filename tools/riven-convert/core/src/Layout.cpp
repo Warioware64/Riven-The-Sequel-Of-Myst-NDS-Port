@@ -254,6 +254,11 @@ Source detectSource(const fs::path &root)
     src.executable = findFileCI(allFiles, "riven.exe");
     if (src.executable.empty())
         src.executable = findFileCI(allFiles, "rivendmo.exe");
+    // The autorun splash, which the port draws on the top screen. Looked up by
+    // name rather than at Autorun/AUTORUN.BMP because the case of BOTH halves
+    // differs between pressings -- the English disc has AUTORUN/AUTORUN.BMP and
+    // the French one Autorun/AUTORUN.BMP -- and there is only ever one of it.
+    src.autorunBitmap = findFileCI(allFiles, "autorun.bmp");
 
     return src;
 }

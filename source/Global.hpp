@@ -46,6 +46,10 @@ public:
     std::string cursorsDir() const { return dataDir() + "cursors/"; }
     /// Inventory / marble / credits art, recovered from extras.MHK or arcriven.z.
     std::string extrasDir() const { return dataDir() + "extras/"; }
+    /// The port's own UI art: topbg.rpiz, the top-screen picture. Separate from
+    /// extras/ because nothing in it is a Mohawk resource -- it is built from
+    /// AUTORUN.BMP, which sits loose on the disc.
+    std::string uiDir() const { return dataDir() + "ui/"; }
     /// Written by the game, never by the converter.
     std::string savesDir() const { return dataDir() + "saves/"; }
     std::string dataPath(const std::string &rel) const { return dataDir() + rel; }

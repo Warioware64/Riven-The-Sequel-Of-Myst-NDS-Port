@@ -4,6 +4,7 @@
 #include "RivenData.hpp"
 #include "audio/RivenAudio.hpp"
 #include "engine/Engine.hpp"
+#include "render/TopBg.hpp"
 
 namespace
 {
@@ -41,6 +42,12 @@ int main(int argc, char *argv[])
     // What is missing but not fatal, said once, before anything can be blamed on
     // it. The console is up by now, so this is the first thing the player reads.
     global.ReportOptionalData();
+
+    // The top screen's picture, behind everything the console has just printed
+    // and everything it prints from here on. After ReportOptionalData rather
+    // than before it only so that a card with no ui/ says so in the same place
+    // as the rest of what is missing.
+    rivenrt::topBg.load();
 
     RivenAudio::initSystem();
 

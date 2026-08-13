@@ -20,6 +20,7 @@
 #include "riven/ImagePipeline.hpp"
 #include "riven/MovieList.hpp"
 #include "riven/SoundPipeline.hpp"
+#include "riven/TopBg.hpp"
 #include "riven/VideoPipeline.hpp"
 #include "riven/WaterEffect.hpp"
 
@@ -340,6 +341,33 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                         result.extrasWritten = r.cels;
                         result.bytesWritten += r.bytes;
                         out.logf(Severity::Info, stage, "%d inventory images", r.cels);
+                    }
+                }
+
+                // --- the top-screen background ---------------------------
+                //
+                // Not from an archive at all: AUTORUN.BMP sits loose on the
+                // disc, put there by the autorun shell rather than by the
+                // game. It is here in the extras stage because it is the same
+                // kind of thing as the inventory art -- one picture that
+                // describes the port rather than an age -- and because that
+                // spares it a stage, a CLI flag and a preset entry for 34 KB.
+                stage = "top-screen background";
+                if (info.source.autorunBitmap.empty())
+                {
+                    out.warn(stage, "Autorun/AUTORUN.BMP was not found; the top "
+                                    "screen will be black behind the log");
+                }
+                else
+                {
+                    const auto r = convertTopBackground(info.source.autorunBitmap,
+                                                        root / "ui" / "topbg.rpiz");
+                    if (!r.ok)
+                        out.error(stage, r.error);
+                    else
+                    {
+                        result.bytesWritten += r.bytes;
+                        out.logf(Severity::Info, stage, "%d colours", r.colours);
                     }
                 }
             }

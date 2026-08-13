@@ -62,6 +62,12 @@ struct Source
     /// riven.exe / rivendmo.exe, when the install has it unpacked. Riven's
     /// cursors are PE resources in it and are nowhere else.
     std::filesystem::path executable;
+    /// Autorun/AUTORUN.BMP -- the CD shell's splash, which this port uses as
+    /// its top-screen background (riven/TopBg.hpp). Frequently ABSENT and that
+    /// is not an error: it belongs to the disc's autorun shell rather than to
+    /// the game, so an installed copy or a GOG download may not carry it. The
+    /// port simply runs with a black top screen.
+    std::filesystem::path autorunBitmap;
 
     bool valid() const { return layout != SourceLayout::Unknown && !stacks.empty(); }
     const StackSource *find(rivendata::StackId id) const;

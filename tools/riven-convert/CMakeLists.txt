@@ -99,8 +99,10 @@ add_library(riven_convert_core STATIC
     core/src/mhk/WaterEffect.cpp
     core/src/ffmpeg/FFmpeg.cpp
     core/src/rvid/VideoPipeline.cpp
+    core/src/image/Bmp.cpp
     core/src/image/ImagePipeline.cpp
     core/src/image/Lz77.cpp
+    core/src/image/TopBg.cpp
     core/src/audio/Ima.cpp
     core/src/audio/Mp2.cpp
     core/src/audio/SoundPipeline.cpp
@@ -169,7 +171,7 @@ endif()
 
 if(BUILD_TESTING)
     foreach(t schema_roundtrip archive atomic_write cards image sound video installer
-              transition)
+              transition topbg)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE riven_convert_core)
         add_test(NAME ${t} COMMAND test_${t})
