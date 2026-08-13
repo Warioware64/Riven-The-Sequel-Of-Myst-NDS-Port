@@ -33,6 +33,15 @@ public:
     /// the one-shot effects and the movie soundtrack.
     std::uint8_t masterVolume = 255;
 
+    /// Trace every card change and every asset load to the top screen and to
+    /// <data>/debug.log, and turn on the screenshot and VRAM-dump chords. Off,
+    /// and not a preference: it is loud enough to push the failures the console
+    /// exists to show off the screen. See DebugLog.hpp.
+    ///
+    /// Read once, at startup, by DebugLog::begin -- so unlike the others this
+    /// one takes effect at the next boot, and the settings screen says so.
+    bool debugMode = false;
+
     /// Read settings.dat. Missing or unreadable leaves every default in place,
     /// which is the correct first boot. No-op without FAT.
     void load();

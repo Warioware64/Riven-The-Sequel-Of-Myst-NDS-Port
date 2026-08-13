@@ -165,8 +165,16 @@ to the disc, not to the game) gets the black screen it had before.
 nothing.
 
 **Settings** live behind the menu the ROM starts on, and behind Riven's own
-Options button. Zip mode (off by default, as in the original), transitions, water
-and a master volume, kept in `_nds/riven_nds/data/settings.dat`.
+Options button. Zip mode (off by default, as in the original), transitions, water,
+a master volume and the debug log, kept in `_nds/riven_nds/data/settings.dat`.
+
+**Debug log** turns the top screen into a trace instead of a picture: the stack
+and card being entered with its PLST/HSPT/SLST/MLST counts, and a line for every
+picture, sound, movie and zoom twin as it is loaded, with the ids and rectangles
+the scripts asked for. It goes to the console, to `nocashMessage` (so an emulator
+gets it for free) and to `_nds/riven_nds/data/debug.log`. **SELECT+L** writes the
+bottom screen to `shotNNN.bmp`, **SELECT+R** dumps every mapped VRAM bank to
+`vramNNN/`. It is read once at startup, so it takes effect on the next boot.
 
 ### Tests
 

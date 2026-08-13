@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "DebugLog.hpp"
 #include "Global.hpp"
 #include "Settings.hpp"
 #include "audio/RivenAudio.hpp"
@@ -148,9 +149,17 @@ void Engine::drawBitmap(std::uint16_t tbmpId, const Rect &rect)
     if (!surface_.exists())
         return;
 
+    const std::string path = picPath(tbmpId);
     std::string err;
-    if (!surface_.drawPicture(picPath(tbmpId), rect, err))
-        std::printf("card %u: picture %u: %s\n", cardId_, tbmpId, err.c_str());
+    if (!surface_.drawPicture(path, rect, err))
+    {
+        DebugLog::warn("card %u: picture %u: %s", cardId_, tbmpId, err.c_str());
+        return;
+    }
+    // The destination rect as well as the file: a picture that loaded and went
+    // somewhere unexpected looks exactly like one that did not load.
+    DebugLog::log("  pic %u -> %d,%d %dx%d", tbmpId, rect.left, rect.top,
+                  rect.right - rect.left, rect.bottom - rect.top);
 }
 
 void Engine::activatePlst(std::uint16_t index)
@@ -173,7 +182,7 @@ void Engine::activatePlst(std::uint16_t index)
             drawBitmap(p.id, p.rect);
             return;
         }
-    std::printf("card %u: no PLST record %u\n", cardId_, index);
+    DebugLog::warn("card %u: no PLST record %u", cardId_, index);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,13 +206,15 @@ void Engine::playSlst(const SoundRec &rec)
     {
         if (ambientCount_ >= RivenAudio::kSoundSlots)
         {
-            std::printf("card %u: SLST has more layers than there are channels\n", cardId_);
+            DebugLog::warn("card %u: SLST has more layers than channels", cardId_);
             break;
         }
         const int vol = i < rec.volumes.size() ? rec.volumes[i] : 255;
         const int bal = i < rec.balances.size() ? rec.balances[i] : 0;
         const int slot = RivenAudio::playSound(soundPath(rec.soundIds[i]),
                                                vol * global256 / 256, bal, rec.loop != 0);
+        DebugLog::log("  slst %u vol %d bal %d %s -> slot %d", rec.soundIds[i],
+                      vol * global256 / 256, bal, rec.loop != 0 ? "loop" : "once", slot);
         if (slot >= 0)
             ambientSlots_[ambientCount_++] = slot;
     }
@@ -229,6 +240,8 @@ void Engine::playEffect(std::uint16_t twavId, int volume)
     stopEffects();
     effectSlot_ = RivenAudio::playSound(soundPath(twavId), volume == 0 ? 255 : volume, 0,
                                         false);
+    DebugLog::log("  sfx %u vol %d -> slot %d", twavId, volume == 0 ? 255 : volume,
+                  effectSlot_);
 }
 
 void Engine::stopEffects()
@@ -344,12 +357,16 @@ bool Engine::ensureSlotOpen(std::int32_t slot)
     {
         // Named by stack and id rather than by full path: the console is 32
         // columns wide and the drive prefix is the part nobody needs.
-        std::printf("movie %s/%u: %s\n", stackName(stack_.id), ms.movieId,
-                    ms.player.error());
+        DebugLog::warn("movie %s/%u: %s", stackName(stack_.id), ms.movieId,
+                       ms.player.error());
         return false;
     }
     ms.player.setVolume(ms.volume);
     ms.open = true;
+    DebugLog::log("  mov %u %dx%d %lu frames at %d,%d %s", ms.movieId, ms.player.width(),
+                  ms.player.height(),
+                  static_cast<unsigned long>(ms.player.frameCount()), ms.left, ms.top,
+                  ms.loop ? "loop" : "once");
     return true;
 }
 
@@ -646,11 +663,14 @@ bool Engine::changeToStack(StackId id)
     if (!loadStackFile(path, loaded, err))
     {
         error_ = std::string(stackName(id)) + ": " + err;
-        std::printf("%s\n", error_.c_str());
+        DebugLog::warn("%s", error_.c_str());
         return false;
     }
     stack_ = std::move(loaded);
     booted_ = true;
+    DebugLog::log("STACK %s: %zu cards, %zu card names, %zu vars", stackName(id),
+                  stack_.cards.size(), stack_.names[kCardNames].names.size(),
+                  stack_.variableIds.size());
     return true;
 }
 
@@ -662,7 +682,7 @@ bool Engine::changeToCard(std::uint16_t cardId)
         // RMAP lists ids that have no CARD resource, and ScummVM skips those too
         // (riven_stack.cpp:164-177). Reaching one from a script is a bug in our
         // resolution, not in the data, so it is worth saying.
-        std::printf("%s: no card %u\n", stackName(stack_.id), cardId);
+        DebugLog::warn("%s: no card %u", stackName(stack_.id), cardId);
         return false;
     }
 
@@ -780,12 +800,12 @@ void Engine::toggleZoom()
     // card is not using" -- which is exactly what they are already doing.
     if (fullscreenMoviePlaying() || bgs.transitionActive() || bgs.movieTakeover())
     {
-        std::printf("zoom: not while the screen is busy\n");
+        DebugLog::warn("zoom: not while the screen is busy");
         return;
     }
     if (cardPicture_ == 0)
     {
-        std::printf("zoom: this card has no picture of its own\n");
+        DebugLog::warn("zoom: this card has no picture of its own");
         return;
     }
 
@@ -860,6 +880,19 @@ void Engine::enterCard()
 
     activatedPlst_ = false;
     activatedSlst_ = false;
+
+    // The card's shape before any of its scripts run, which is what makes a
+    // trace readable: everything logged after this line belongs to this card,
+    // and the counts say what it had to work with. nameFromList builds a
+    // std::string, so it is behind the gate rather than in the argument list.
+    if (DebugLog::enabled())
+    {
+        const std::string name = nameFromList(kCardNames, card_->nameIndex);
+        DebugLog::log("CARD %s/%u \"%s\" plst=%zu hspt=%zu slst=%zu mlst=%zu flst=%zu%s",
+                      stackName(stack_.id), cardId_, name.c_str(), card_->plst.size(),
+                      card_->hotspots.size(), card_->slst.size(), card_->mlst.size(),
+                      card_->flst.size(), card_->zipModePlace != 0 ? " zip" : "");
+    }
 
     // A load script can itself change the card, and then everything below is
     // about the card that is no longer current -- the new one has already had its
@@ -1006,6 +1039,21 @@ void Engine::processInput()
     if ((keysHeld() & KEY_SELECT) != 0)
     {
         const std::uint32_t down = keysDown();
+
+        // The shoulder buttons, which nothing else in the port uses. Both write
+        // to the card and take long enough to be felt, so they are on the same
+        // chord as the transition replay rather than on a bare press.
+        if ((down & KEY_L) != 0)
+        {
+            DebugLog::screenshot();
+            return;
+        }
+        if ((down & KEY_R) != 0)
+        {
+            DebugLog::vramDump();
+            return;
+        }
+
         Transition t = Transition::None;
         if ((down & KEY_LEFT) != 0)
             t = Transition::PanLeft;

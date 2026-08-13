@@ -96,6 +96,7 @@ public:
     rivendata::VideoProfile profile() const { return file_.profile(); }
     int width() const { return file_.header().width; }
     int height() const { return file_.header().height; }
+    std::uint32_t frameCount() const { return file_.frameCount(); }
 
     int viewX() const { return viewX_; }
     int viewY() const { return viewY_; }

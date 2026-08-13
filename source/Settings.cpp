@@ -12,7 +12,7 @@ Settings settings;
 namespace
 {
     // settings.dat: [0] = format version, [1] = zipMode, [2] = transitions,
-    // [3] = water, [4] = masterVolume (0..255).
+    // [3] = water, [4] = masterVolume (0..255), [5] = debugMode.
     //
     // APPEND ONLY. Every field is gated on the file being long enough AND the
     // version matching, so an older file simply leaves the options it does not
@@ -20,7 +20,7 @@ namespace
     // without a version bump and without invalidating a player's card. Never
     // write a default into a byte an old file lacks, and never repurpose a byte.
     constexpr std::uint8_t kVersion = 1;
-    constexpr std::size_t kBytes = 5;
+    constexpr std::size_t kBytes = 6;
 
     std::string path() { return global.dataDir() + "settings.dat"; }
 } // namespace
@@ -48,6 +48,8 @@ void Settings::load()
         water = buf[3] != 0;
     if (n >= 5)
         masterVolume = buf[4];
+    if (n >= 6)
+        debugMode = buf[5] != 0;
 }
 
 void Settings::save() const
@@ -67,6 +69,7 @@ void Settings::save() const
         static_cast<std::uint8_t>(transitions ? 1 : 0),
         static_cast<std::uint8_t>(water ? 1 : 0),
         masterVolume,
+        static_cast<std::uint8_t>(debugMode ? 1 : 0),
     };
     std::fwrite(buf, 1, sizeof(buf), f);
     std::fclose(f);

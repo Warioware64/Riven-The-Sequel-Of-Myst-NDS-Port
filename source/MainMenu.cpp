@@ -120,6 +120,7 @@ void MainMenu::runSettings()
         RowTransitions,
         RowWater,
         RowVolume,
+        RowDebug,
         RowBack,
         kRowCount,
     };
@@ -190,6 +191,10 @@ void MainMenu::runSettings()
                 settings.apply();
                 break;
             }
+            case RowDebug:
+                settings.debugMode = !settings.debugMode;
+                changed = true;
+                break;
             case RowBack:
                 // LEFT/RIGHT on "Back" is a cursor movement that landed on a
                 // row with nothing to toggle, not a request to leave.
@@ -217,6 +222,10 @@ void MainMenu::runSettings()
             std::string("Transitions: ") + onOff[settings.transitions],
             std::string("Water: ") + onOff[settings.water] + " (not yet animated)",
             "Volume: " + std::to_string((settings.masterVolume * 10 + 127) / 255),
+            // The only row that does not take effect where it is set:
+            // DebugLog::begin reads it once, at startup, because it takes the
+            // top screen away from the picture as it does so.
+            std::string("Debug log: ") + onOff[settings.debugMode] + " (on restart)",
             "Back",
         };
         for (int i = 0; i < kRowCount; ++i)

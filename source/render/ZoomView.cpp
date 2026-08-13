@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "DebugLog.hpp"
 #include "RivenData.hpp"
 #include "data/ImageFile.hpp"
 #include "render/BgSurface.hpp"
@@ -36,14 +37,14 @@ bool ZoomView::open(const std::string &path)
     std::string error;
     if (!loadRpizImage(path, img, error))
     {
-        std::printf("no zoom art: %s\n", error.c_str());
+        DebugLog::warn("no zoom art: %s", error.c_str());
         return false;
     }
     if (img.width < kWindowW || img.height < kWindowH)
     {
         // A picture smaller than the window has nothing to pan and nothing to
         // show that the card view is not already showing.
-        std::printf("zoom: %dx%d is not bigger than the screen\n", img.width, img.height);
+        DebugLog::warn("zoom: %dx%d is not bigger than the screen", img.width, img.height);
         return false;
     }
 
@@ -59,6 +60,8 @@ bool ZoomView::open(const std::string &path)
     originX_ = (width_ - kWindowW) / 2;
     originY_ = (height_ - kWindowH) / 2;
     redrawsLeft_ = kRedrawsPerMove;
+
+    DebugLog::log("ZOOM %dx%d, window at %d,%d", width_, height_, originX_, originY_);
 
     bgs.beginMovieTakeover();
     bgs.setLetterbox(false);

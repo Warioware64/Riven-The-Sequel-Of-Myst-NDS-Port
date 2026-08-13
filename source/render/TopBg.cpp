@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "DebugLog.hpp"
 #include "Global.hpp"
 #include "RivenImage.hpp"
 #include "data/ImageFile.hpp"
@@ -37,6 +38,17 @@ void TopBg::load()
     if (loaded() || !global.hasFat)
         return;
 
+    // The debug trace wants the top screen to itself: it is a wall of small
+    // text and a photograph behind it is not a background, it is noise. Not
+    // loaded rather than loaded-and-hidden, so the 64 KB and the read are saved
+    // too. Turning the trace off needs a restart, which is what the settings
+    // row says.
+    if (DebugLog::enabled())
+    {
+        DebugLog::log("TOPBG skipped: the trace has the top screen");
+        return;
+    }
+
     const std::string path = global.uiDir() + "topbg.rpiz";
 
     RpizImage img;
@@ -45,12 +57,13 @@ void TopBg::load()
     {
         // Not an error the player can act on beyond reconverting, and the game
         // is entirely playable without it, so this is one line and no more.
-        std::printf("no top-screen picture: %s\n", error.c_str());
+        DebugLog::warn("no top-screen picture: %s", error.c_str());
         return;
     }
     if (img.width != kBgW || img.height > kBgH)
     {
-        std::printf("top-screen picture is %dx%d, not %dx192\n", img.width, img.height, kBgW);
+        DebugLog::warn("top-screen picture is %dx%d, not %dx192", img.width, img.height,
+                       kBgW);
         return;
     }
 
@@ -60,7 +73,7 @@ void TopBg::load()
     bgId_ = bgInitHiddenSub(3, BgType_Bmp8, BgSize_B8_256x256, kBitmapBase, 0);
     if (bgId_ < 0)
     {
-        std::printf("top-screen picture: no free sub background\n");
+        DebugLog::warn("top-screen picture: no free sub background");
         return;
     }
 
@@ -79,6 +92,8 @@ void TopBg::load()
     // Only the picture's half of the palette. BG_PALETTE_SUB[240..255] holds the
     // console's ANSI colours, entry 255 being the white it actually prints in.
     tonccpy(BG_PALETTE_SUB, img.palette, kPictureColours * sizeof(rivendata::Texel));
+
+    DebugLog::log("TOPBG %dx%d", img.width, img.height);
 
     bgSetPriority(bgId_, kPriority);
     bgShow(bgId_);

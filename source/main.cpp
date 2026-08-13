@@ -1,5 +1,6 @@
 #include "global_header.hpp"
 
+#include "DebugLog.hpp"
 #include "Global.hpp"
 #include "RivenData.hpp"
 #include "Settings.hpp"
@@ -51,6 +52,10 @@ int main(int argc, char *argv[])
     // it. The console is up by now, so this is the first thing the player reads.
     global.ReportOptionalData();
 
+    // Before anything is loaded, so the trace covers the whole run -- and
+    // before the picture, which it takes the top screen away from.
+    rivenrt::DebugLog::begin();
+
     // The top screen's picture, behind everything the console has just printed
     // and everything it prints from here on. After ReportOptionalData rather
     // than before it only so that a card with no ui/ says so in the same place
@@ -89,5 +94,6 @@ int main(int argc, char *argv[])
         rivenrt::engine.frame();
     }
 
+    rivenrt::DebugLog::end();
     haltWith("Riven DS", "Thank you for playing.", "");
 }
