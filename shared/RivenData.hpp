@@ -54,7 +54,7 @@ using i32 = std::int32_t;
 /// Bump on ANY change to a struct below, including field order. yas binary
 /// archives are not self-describing: without this a converter/ROM mismatch
 /// deserializes garbage silently instead of failing.
-inline constexpr u16 kSchemaVersion = 2;
+inline constexpr u16 kSchemaVersion = 3;
 
 /// Fixed-size header written raw ahead of the yas payload in stacks/<stack>.bin.
 /// Read it with a plain fread before handing the rest to yas.

@@ -56,6 +56,12 @@ public:
     /// vblanks, so it must not block.
     void frame();
 
+    /// True once boot() has loaded a stack, so there is a game to come back to.
+    /// The settings screen asks, because it is reachable from both sides of it:
+    /// from the port's menu before there is one, and from Riven's own Options
+    /// button once there is.
+    bool booted() const { return booted_; }
+
     /// True once something has asked the game to stop.
     bool quitRequested() const { return quit_; }
     void requestQuit() { quit_ = true; }
@@ -108,6 +114,34 @@ public:
     /// The hotspot whose script is running, for opcode 45 (zip mode).
     const rivendata::Hotspot *currentHotspot() const { return currentHotspot_; }
 
+    // --- zip mode -----------------------------------------------------------
+    //
+    // Riven's fast travel: a card that names a "zip destination" is remembered
+    // as it is entered, and a hotspot flagged kHotspotZip somewhere else on the
+    // same island lights up once a card of the same NAME has been seen -- one
+    // click instead of walking back. Off by default; settings.zipMode is what
+    // VarId::AZip carries.
+    //
+    // ScummVM's _zipModeData (riven.cpp:732-748) is stack-BLIND and stores a
+    // bare local card id, which is only safe because no two stacks happen to
+    // reuse a card name. Storing the stack too costs eight bytes an entry and
+    // removes the coincidence from the argument; zip travel is within an island
+    // in the game anyway, so restricting the match to the current stack changes
+    // nothing a player can see.
+    struct ZipDest
+    {
+        rivendata::StackId stack = rivendata::StackId::None;
+        std::uint16_t cardId = 0;
+        std::string name;
+    };
+
+    /// Forget every zip destination. New game (riven.cpp:679).
+    void clearZipDests() { zipDests_.clear(); }
+
+    /// The card a zip hotspot called `name` leads to in the current stack, or
+    /// -1. Public because opcode 45 is the other half of this.
+    std::int32_t zipDestFor(const std::string &name) const;
+
     // --- pictures, sound, movies -------------------------------------------
 
     /// Opcode 39: draw a PLST record. Opcode 1 (DrawBitmap) also lands here,
@@ -137,6 +171,9 @@ public:
     /// cursor now, and a script that shapes it is shaping something real.
     void setCursor(std::uint16_t id) { cursor_.setShape(id); }
     Inventory &inventory() { return inventory_; }
+    /// For the screens that take the display away from the card view and have
+    /// to put the pointer away with it.
+    Cursor &cursor() { return cursor_; }
 
     void activateSlst(std::uint16_t index);
     void playSlst(const rivendata::SoundRec &rec);
@@ -233,6 +270,11 @@ private:
     void enterCard();
     /// The card's CardLeave script, run before it stops being the current card.
     void leaveCard();
+
+    /// Remember the current card as a zip destination if it names itself one,
+    /// then enable or disable this card's zip hotspots against what has been
+    /// seen. RivenCard::initializeZipMode (riven_card.cpp:652-670).
+    void initializeZipMode();
     void processInput();
     void pumpMovies();
 
@@ -285,6 +327,9 @@ private:
     /// it is the converter's output, shared by every visit to the card.
     std::vector<bool> hotspotEnabled_;
     const rivendata::Hotspot *currentHotspot_ = nullptr;
+    /// Every zip destination visited this game. Small: 22 cards in the whole of
+    /// Riven carry a non-zero zipModePlace.
+    std::vector<ZipDest> zipDests_;
     /// Which hotspot the stylus is inside, for the enter/leave pair.
     std::int32_t insideHotspot_ = -1;
     /// Which hotspot the press landed on, latched until the stylus lifts. The

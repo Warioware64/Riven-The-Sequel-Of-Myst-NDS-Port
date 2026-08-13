@@ -20,6 +20,7 @@
 #include <cstring>
 #include <string>
 
+#include "MainMenu.hpp"
 #include "engine/Engine.hpp"
 #include "engine/Script.hpp"
 
@@ -200,17 +201,29 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
         e.inventory().setForcedHidden(true);
         return;
     }
-    if (key == "xarestoregame" || key == "xasavegame" || key == "xaresumegame"
-        || key == "xaoptions")
+    if (key == "xaoptions")
     {
-        // Saves, the options screen and resuming all want milestone 9. Reported
-        // rather than silently ignored so a dead menu button is explained.
+        // Riven's own menu has an Options button, and this is what it is wired
+        // to. The screen it opens is the port's, not the original's -- the
+        // original's is a card whose controls are for a mouse and a CD -- but
+        // it is reached from the button the player expects.
+        mainMenu.runSettings();
+        return;
+    }
+    if (key == "xarestoregame" || key == "xasavegame" || key == "xaresumegame")
+    {
+        // Saves are the other half of milestone 9. Reported rather than
+        // silently ignored so a dead menu button is explained.
         std::printf("external command: %s needs saves (milestone 9)\n", name.c_str());
         return;
     }
     if (key == "xanewgame")
     {
         e.vars().startNewGame();
+        // Zip destinations are visited-card history, not a variable, so
+        // startNewGame cannot clear them and this has to (riven.cpp:679).
+        // Without it a new game would start with the last one's shortcuts.
+        e.clearZipDests();
         return;
     }
     if (key == "xalaunchbrowser")

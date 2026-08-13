@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "Global.hpp"
+#include "Settings.hpp"
 #include "audio/RivenAudio.hpp"
 #include "data/StackFile.hpp"
 #include "engine/Script.hpp"
@@ -546,7 +547,11 @@ void Engine::applyScreenUpdate(bool force)
 
 void Engine::scheduleTransition(Transition t)
 {
-    scheduledTransition_ = t;
+    // The player's setting is refused HERE rather than in
+    // runScheduledTransition, so that "off" means the request never existed:
+    // a transition that was scheduled and then skipped still costs the frame
+    // applyScreenUpdate spends asking, and still leaves the flag to clear.
+    scheduledTransition_ = settings.transitions ? t : Transition::None;
 }
 
 /// ScummVM blocks here too (riven_graphics.cpp:549-609): it spins its own
@@ -736,6 +741,52 @@ void Engine::refreshCard()
         enterCard();
 }
 
+// ---------------------------------------------------------------------------
+// Zip mode
+// ---------------------------------------------------------------------------
+
+std::int32_t Engine::zipDestFor(const std::string &name) const
+{
+    if (name.empty())
+        return -1;
+    for (const ZipDest &z : zipDests_)
+        if (z.stack == stack_.id && z.name == name)
+            return z.cardId;
+    return -1;
+}
+
+/// riven_card.cpp:652-670. Two halves that look unrelated and are not: a card
+/// records itself on the way in, and every zip hotspot on it is enabled against
+/// what has been recorded so far -- so a zip shortcut appears the moment its
+/// other end has been seen, which is exactly the affordance.
+void Engine::initializeZipMode()
+{
+    if (card_ == nullptr)
+        return;
+
+    if (card_->zipModePlace != 0)
+    {
+        const std::string name = nameFromList(rivendata::kCardNames, card_->nameIndex);
+        // An unnamed zip place cannot be matched by any hotspot, so recording it
+        // would only grow the list (riven.cpp:733-734).
+        if (!name.empty() && zipDestFor(name) < 0)
+            zipDests_.push_back(ZipDest{stack_.id, cardId_, name});
+    }
+
+    const bool enabled = vars_.get(rivendata::VarId::AZip) != 0;
+    for (std::size_t i = 0; i < card_->hotspots.size(); ++i)
+    {
+        const Hotspot &h = card_->hotspots[i];
+        if ((h.flags & kHotspotZip) == 0)
+            continue;
+        // With zip mode off, a zip hotspot is off whatever its BLST said --
+        // otherwise the shortcut would still be clickable, just invisible.
+        const bool reachable =
+            enabled && zipDestFor(nameFromList(rivendata::kHotspotNames, h.nameRes)) >= 0;
+        enableHotspotByIndex(i, reachable);
+    }
+}
+
 /// RivenCard::enter (riven_card.cpp:632-650), in order: the card variable, the
 /// load script, the default picture if the load script did not draw one, zip
 /// mode, the screen update, then the enter script.
@@ -762,6 +813,11 @@ void Engine::enterCard()
     if (!activatedPlst_ && !card_->plst.empty())
         activatePlst(1);
 
+    // After the load script, before the screen update: the load script may have
+    // enabled or disabled hotspots, and zip mode has the last word on the ones
+    // it owns (riven_card.cpp:640-643).
+    initializeZipMode();
+
     applyScreenUpdate(true);
     if (card_ != entered)
         return;
@@ -782,6 +838,7 @@ void Engine::enterCard()
 bool Engine::boot()
 {
     vars_.startNewGame();
+    zipDests_.clear();
 
     if (!bgs.create())
     {

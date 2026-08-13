@@ -20,11 +20,14 @@
 //   * 163 distinct case-folded names across the eight stacks' NAME 4 resources
 //     (222 entries in total: aspit 2, bspit 48, gspit 29, jspit 52, ospit 17,
 //     pspit 24, rspit 7, tspit 43).
-//   * 17 names that appear in NO stack's NAME 4 list and are referenced only
+//   * 18 names that appear in NO stack's NAME 4 list and are referenced only
 //     from C++ -- ScummVM's initVars defaults (riven_vars.cpp:300-366), the two
-//     "where am I" variables Engine::enterCard writes, and this port's own
-//     inventory plumbing. The converter cannot discover these, which is why this
-//     file is hand-maintained rather than generated.
+//     "where am I" variables Engine::enterCard writes, this port's own
+//     inventory plumbing, and "azip", which is not a game variable at all: it
+//     is the player's Zip Mode setting, which ScummVM likewise keeps in the
+//     variable map because the card scripts read it (riven.cpp:803). The
+//     converter cannot discover these, which is why this file is hand-
+//     maintained rather than generated.
 //
 // ORDER IS STABLE and the strings are the contract. Append new names at the end;
 // never renumber, and never edit a string without bumping kSchemaVersion, because
@@ -221,7 +224,8 @@ namespace rivendata
     X(TViewer,           "tviewer")        \
     X(TWabrValve,        "twabrvalve")     \
     X(TWaffle,           "twaffle")        \
-    X(WaterEnabled,      "waterenabled")
+    X(WaterEnabled,      "waterenabled") \
+    X(AZip,              "azip")
 
 /// A variable's identity, stable across stacks and across builds of the data.
 ///
@@ -241,7 +245,7 @@ enum class VarId : std::uint16_t
 /// Including Unknown at index 0.
 inline constexpr int kVarCount = static_cast<int>(VarId::kCount);
 
-static_assert(kVarCount == 181, "the variable list changed -- bump kSchemaVersion");
+static_assert(kVarCount == 182, "the variable list changed -- bump kSchemaVersion");
 
 /// The case-folded on-disc name, or "" for Unknown. The inverse of parseVarName.
 inline const char *varName(VarId v)

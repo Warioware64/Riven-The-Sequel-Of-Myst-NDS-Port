@@ -2,6 +2,8 @@
 
 #include <cstdlib>
 
+#include "Settings.hpp"
+
 namespace rivenrt
 {
 namespace
@@ -101,6 +103,15 @@ void Vars::startNewGame()
     dome |= twoRandomDomePositions(11, 15);
     dome |= twoRandomDomePositions(16, 24);
     vars_[VarId::ADomeCombo] = dome;
+
+    // Two of the "variables" are not the game's state at all, they are the
+    // player's settings, and the scripts read them through the same map. They
+    // go in HERE rather than in the caller because every route to a new game
+    // ends up here -- Engine::boot and the xanewgame external -- and a route
+    // that forgot them would silently turn zip mode off.
+    // riven.cpp:803 (applyGameSettings) is the same idea in the same place.
+    vars_[VarId::AZip] = settings.zipMode ? 1 : 0;
+    vars_[VarId::WaterEnabled] = settings.water ? 1 : 0;
 }
 
 } // namespace rivenrt

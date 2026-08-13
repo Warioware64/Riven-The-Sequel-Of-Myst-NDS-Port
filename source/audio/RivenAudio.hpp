@@ -65,8 +65,19 @@ std::uint32_t streamQueued();
 /// How many samples the ring can still take.
 std::uint32_t streamFree();
 
-/// Output gain, 0..256 (256 = unity), applied as the samples are handed over.
+/// The movie soundtrack's own gain, 0..256 (256 = unity), applied as the
+/// samples are handed over. The player's master volume is applied on top and is
+/// not this: a caller sets what the movie asks for and forgets about it.
 void streamSetVolume(int volume);
+
+/// The player's master gain, 0..255 (255 = unity), applied to EVERYTHING --
+/// the ambient layers, the one-shot effects and the movie soundtrack.
+///
+/// Applied here rather than at the call sites so that no future caller can
+/// forget it, and applied to the sounds already playing rather than only to the
+/// next one, so that changing it from the in-game options screen is heard
+/// immediately instead of at the next card.
+void setMasterVolume(int volume);
 
 void streamClose();
 bool streamIsOpen();

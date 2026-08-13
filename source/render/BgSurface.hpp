@@ -87,6 +87,16 @@ public:
     /// picture into `buf`. Runs of adjacent blocks are copied in one go.
     void uploadRows(int buf, const rivendata::Texel *ram, std::uint32_t mask);
 
+    /// Rest the layers at row 0 instead of at the letterbox offset, so bitmap
+    /// row r is SCREEN row r and all 192 rows are usable.
+    ///
+    /// For the port's own screens -- the menu, the settings, the zoom viewer --
+    /// which are not 256x165 card views and have no reason to be letterboxed.
+    /// Safe only while no transition is running, which is the case for all
+    /// three: vblank() writes the scroll registers during a transition and
+    /// restores this rest position at the end of one.
+    void setLetterbox(bool on);
+
     /// Show the back buffer at the next vblank. Idempotent within a frame.
     void requestFlip() { flipPending_ = true; }
     bool flipPending() const { return flipPending_; }

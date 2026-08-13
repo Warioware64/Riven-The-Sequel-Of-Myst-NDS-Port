@@ -206,6 +206,16 @@ void BgSurface::beginTransition(Transition t)
     }
 }
 
+void BgSurface::setLetterbox(bool on)
+{
+    if (!exists())
+        return;
+    const int y = on ? kRestY : 0;
+    bgSetScroll(bgId_[0], 0, y);
+    bgSetScroll(bgId_[1], 0, y);
+    bgUpdate();
+}
+
 void BgSurface::vblank()
 {
     if (!exists())

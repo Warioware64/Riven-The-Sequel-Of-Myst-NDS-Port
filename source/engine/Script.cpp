@@ -336,11 +336,22 @@ namespace
         case Op::ActivateFLST: // 44
             break;
 
-        // 45: zip mode -- jump to a previously visited card with the same
-        // hotspot name. Zip destinations are recorded as cards are entered, and
-        // with none recorded this is correctly a no-op.
+        // 45: zip mode -- jump to the previously visited card whose NAME
+        // matches this hotspot's (riven_scripts.cpp:753-765). The hotspot is
+        // only clickable at all when initializeZipMode found that match, so the
+        // lookup failing here means the card changed underneath the script;
+        // doing nothing is then the right answer rather than a fallback.
         case Op::ZipMode: // 45
+        {
+            const Hotspot *const h = e.currentHotspot();
+            if (h == nullptr)
+                break;
+            const std::int32_t dest =
+                e.zipDestFor(e.nameFromList(rivendata::kHotspotNames, h->nameRes));
+            if (dest >= 0)
+                e.changeToCard(static_cast<std::uint16_t>(dest));
             break;
+        }
 
         case Op::ActivateMLST: // 46
             e.activateMlst(arg(c, 0), false);

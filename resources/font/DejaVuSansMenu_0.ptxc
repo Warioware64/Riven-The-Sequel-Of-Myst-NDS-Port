@@ -1,0 +1,22 @@
+-gt -ob -v -f direct
+# NOTE: architectds only reads the first line of a .ptxc, so the arguments must
+# come first and everything below is just documentation.
+#
+# The menu font, for text drawn onto the BOTTOM screen.
+#
+# The bottom screen is two 16-bit bitmap backgrounds (render/BgSurface.hpp), and
+# NEA's Hw2D text path wants an A1RGB5 texture for a BITMAP_16 destination --
+# which is what "direct" is. That is the whole reason this exists as a third
+# build of the same typeface: DejaVuSans-Bold_0 is tex4x4, a 3D texture for
+# NEA_RichTextRender3D, and NOTHING can use it any more, because this port
+# switched the card view onto bitmap backgrounds and shut the 3D engine down
+# (main.cpp:14-18). DejaVuSans-BoldBlack_0 is palette256, for an 8bpp
+# destination, and its glyphs are black.
+#
+# The pixels are DejaVuSans-Bold_0.png byte for byte: white glyphs carried in
+# the alpha channel. Paletted DS formats have 1-bit alpha and so does A1RGB5,
+# so the glyphs come out hard-edged either way; the copy exists only because
+# architectds pairs one .ptxc with one same-named .png.
+#
+# The .fnt metadata is format-independent, so there is no DejaVuSansMenu.fnt:
+# the layer loads font/DejaVuSans-Bold.fnt and pairs it with this texture.

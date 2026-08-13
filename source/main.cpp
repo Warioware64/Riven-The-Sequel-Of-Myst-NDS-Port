@@ -2,8 +2,12 @@
 
 #include "Global.hpp"
 #include "RivenData.hpp"
+#include "Settings.hpp"
+#include "MainMenu.hpp"
 #include "audio/RivenAudio.hpp"
 #include "engine/Engine.hpp"
+#include "render/BgSurface.hpp"
+#include "render/TextLayer.hpp"
 #include "render/TopBg.hpp"
 
 namespace
@@ -32,6 +36,10 @@ int main(int argc, char *argv[])
 
     global.Init();
 
+    // Before anything reads a setting, and harmless when the card cannot be
+    // written: an absent settings.dat is a first boot, not an error.
+    settings.load();
+
     const Global::DataStatus status = global.CheckData();
     if (status != Global::DataStatus::Ok)
     {
@@ -50,6 +58,17 @@ int main(int argc, char *argv[])
     rivenrt::topBg.load();
 
     RivenAudio::initSystem();
+    // The master gain, now that there is an audio system to set it on. The two
+    // game variables apply() also writes are put in place by startNewGame,
+    // which boot() is about to run.
+    settings.apply();
+
+    // The port's menu draws on the bottom screen through the card view's own
+    // backgrounds, so those have to exist before it and not after. boot() still
+    // calls create() and finds it done -- this is a move, not a duplicate.
+    rivenrt::bgs.create();
+    rivenrt::textLayer.create();
+    rivenrt::mainMenu.run();
 
     if (!rivenrt::engine.boot())
     {

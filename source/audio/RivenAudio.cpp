@@ -33,9 +33,17 @@ namespace
     volatile std::uint32_t g_ringOut = 0;
 
     volatile std::uint32_t g_samplesPlayed = 0;
+    /// What the movie asked for, and what the interrupt actually applies. Two
+    /// values rather than one because the master gain multiplies this and
+    /// either can change while a movie is playing: folding them together would
+    /// make each new master volume compound with the last.
+    int g_streamRequested = 256;
     int g_streamVolume = 256;
     bool g_streamOpen = false;
     int g_streamRate = 0;
+
+    /// The player's master gain, 0..255. Settings::apply owns it.
+    int g_master = 255;
 
     /// Decoder state carried across a movie's frames. Each RVID audio block
     /// begins with its own state word, so this is reseeded per block rather than
@@ -151,6 +159,12 @@ namespace
         /// per-channel "still playing" flag, so this is counted down in pump()
         /// from the sound's own length.
         unsigned framesLeft = 0;
+        /// The volume and balance the GAME asked for, before the master gain.
+        /// Kept so setMasterVolume can re-derive the channel volumes of a
+        /// sound that is already playing; without them, moving the slider
+        /// during a game would only be heard at the next card.
+        int volume = 255;
+        int balance = 0;
         bool looping = false;
         bool active = false;
     };
@@ -185,9 +199,14 @@ namespace
     }
 
     /// The slot's two channel volumes for an SLST volume (0..255) and balance.
+    ///
+    /// The master gain is applied HERE, which is the one place both playSound
+    /// and setSoundVolume pass through. Doing it at the call sites instead
+    /// would work today and quietly stop working the first time a fourth
+    /// caller is added.
     void slotVolumes(int volume, int balance, int &left, int &right)
     {
-        const int base = clampVolume(volume * 127 / 255);
+        const int base = clampVolume(volume * g_master / 255 * 127 / 255);
         int leftScale = 127;
         int rightScale = 127;
         panScaleFor(balance, leftScale, rightScale);
@@ -278,7 +297,21 @@ std::uint32_t RivenAudio::streamFree() { return kRingSamples - streamQueued(); }
 
 void RivenAudio::streamSetVolume(int volume)
 {
-    g_streamVolume = volume < 0 ? 0 : (volume > 256 ? 256 : volume);
+    g_streamRequested = volume < 0 ? 0 : (volume > 256 ? 256 : volume);
+    g_streamVolume = g_streamRequested * g_master / 255;
+}
+
+void RivenAudio::setMasterVolume(int volume)
+{
+    g_master = volume < 0 ? 0 : (volume > 255 ? 255 : volume);
+    g_streamVolume = g_streamRequested * g_master / 255;
+
+    // Everything already sounding, so the slider is heard while it moves rather
+    // than at the next card. setSoundVolume goes back through slotVolumes, which
+    // is where the master gain is applied.
+    for (int i = 0; i < kSoundSlots; ++i)
+        if (g_sounds[i].active)
+            setSoundVolume(i, g_sounds[i].volume, g_sounds[i].balance);
 }
 
 bool RivenAudio::streamPushIma(const std::uint8_t *block, std::size_t bytes)
@@ -427,6 +460,9 @@ int RivenAudio::playSound(const std::string &path, int volume, int balance, bool
     // ambient loops that repeat most.
     const int loopPoint = adpcm ? 1 : 0;
 
+    s.volume = volume;
+    s.balance = balance;
+
     int volL = 0;
     int volR = 0;
     slotVolumes(volume, balance, volL, volR);
@@ -478,6 +514,8 @@ void RivenAudio::setSoundVolume(int slot, int volume, int balance)
 {
     if (slot < 0 || slot >= kSoundSlots || !g_sounds[slot].active)
         return;
+    g_sounds[slot].volume = volume;
+    g_sounds[slot].balance = balance;
     int volL = 0;
     int volR = 0;
     slotVolumes(volume, balance, volL, volR);
