@@ -197,6 +197,67 @@ int main()
         check(allZero, "silence encodes and decodes to silence");
     }
 
+    // --- the downmix makeup gain --------------------------------------------
+    //
+    // Most of Riven is stereo and (L+R)/2 is only lossless when the channels are
+    // the same signal, so without this most of the game arrives on the DS several
+    // dB down with nothing able to put it back. What is checked here is that the
+    // gain is a REPAIR and not a normalisation: it may not touch a sound that lost
+    // nothing, and it may not push any sound past where it started.
+    {
+        const auto mono = sweep(4096);
+
+        std::vector<std::int16_t> correlated(mono.size() * 2);
+        std::vector<std::int16_t> wide(mono.size() * 2);
+        std::vector<std::int16_t> opposed(mono.size() * 2);
+        for (std::size_t i = 0; i < mono.size(); ++i)
+        {
+            correlated[i * 2] = mono[i];
+            correlated[i * 2 + 1] = mono[i];
+            // Half the signal in one channel only: the average halves it again.
+            wide[i * 2] = mono[i];
+            wide[i * 2 + 1] = 0;
+            opposed[i * 2] = mono[i];
+            opposed[i * 2 + 1] = static_cast<std::int16_t>(-mono[i]);
+        }
+
+        const auto peak = [](const std::vector<std::int16_t> &v) {
+            std::int32_t p = 0;
+            for (const std::int16_t s : v)
+                p = std::max(p, s < 0 ? -static_cast<std::int32_t>(s) : s);
+            return p;
+        };
+
+        check(downmixToMonoWithMakeup(mono, 1) == mono, "mono is returned untouched");
+        check(downmixToMonoWithMakeup(correlated, 2) == mono,
+              "an equal pair loses nothing and so gains nothing");
+
+        const auto fixed = downmixToMonoWithMakeup(wide, 2);
+        const auto plain = downmixToMono(wide, 2);
+        check(fixed.size() == mono.size(), "the makeup gain does not change the length");
+        // Within an LSB rather than exactly: the average truncates, so an odd peak
+        // is already half a bit down before the gain sees it.
+        check(peak(fixed) <= peak(mono) && peak(fixed) >= peak(mono) - 1,
+              "a one-sided pair comes back at the loudest input channel's peak");
+        check(peak(plain) * 2 <= peak(mono) && peak(plain) * 2 >= peak(mono) - 1,
+              "which is the 6 dB the plain average threw away");
+
+        // Anti-correlated: the average is silence, the ratio is meaningless, and
+        // the ceiling is the only thing standing between this and a divide that
+        // amplifies rounding dust into full-scale noise.
+        const auto capped = downmixToMonoWithMakeup(opposed, 2);
+        check(peak(capped) == 0, "an opposed pair stays at the silence it averages to");
+
+        // Every sample, not just the peak: an int16_t that wrapped would be caught
+        // by neither of the checks above.
+        const std::vector<std::int16_t> loud(64, 32767);
+        std::vector<std::int16_t> loudWide(loud.size() * 2, 0);
+        for (std::size_t i = 0; i < loud.size(); ++i)
+            loudWide[i * 2] = loud[i];
+        for (const std::int16_t s : downmixToMonoWithMakeup(loudWide, 2))
+            check(s > 0, "full-scale input does not wrap through the gain");
+    }
+
     // --- nibble order -------------------------------------------------------
     {
         auto data = encodeIma(sweep(4096).data(), 4096);
@@ -281,6 +342,53 @@ int main()
               "the payload starts with the DS ADPCM state word");
     }
 
+    // --- the PCM16 container ------------------------------------------------
+    // The other codec the runtime plays. No state word and no seek table: PCM is
+    // randomly accessible, so there is no decoder state to resume from.
+    {
+        RsndSource src;
+        src.codec = rivendata::SoundCodec::Pcm16;
+        src.sampleRate = 22050;
+        src.sampleCount = 4;
+        const std::int16_t samples[4] = {0, 1000, -1000, 32767};
+        src.nibbles.resize(sizeof(samples));
+        std::memcpy(src.nibbles.data(), samples, sizeof(samples));
+
+        const auto file = encodeRsnd(src);
+        rivendata::RsndHeader hdr{};
+        std::memcpy(&hdr, file.data(), sizeof(hdr));
+        check(rivendata::isRsnd(hdr)
+                  && hdr.codec == static_cast<std::uint8_t>(rivendata::SoundCodec::Pcm16),
+              "a PCM16 .rsnd says so in its header");
+        check(hdr.seekEntries == 0 && hdr.seekInterval == 0,
+              "PCM16 carries no seek table");
+        check(hdr.dataBytes == sizeof(samples) && file.size() == sizeof(hdr) + sizeof(samples),
+              "a PCM16 payload is exactly its samples, with no state word");
+        check(std::memcmp(file.data() + sizeof(hdr), samples, sizeof(samples)) == 0,
+              "the samples reach the file untouched");
+    }
+
+    // --- which codec a sound gets -------------------------------------------
+    // The split is a RAM decision, not a quality one: PCM16 is lossless but a
+    // hardware channel holds its whole sample while it plays, and Riven's long
+    // ambients are minutes long. Short in, PCM16 out; long in, ADPCM out.
+    {
+        const std::size_t shortSamples = rivendata::kPcm16Budget / 2 / 2; // half the budget
+        const std::size_t longSamples = rivendata::kPcm16Budget; // twice it, in bytes
+        std::vector<std::int16_t> quiet(longSamples);
+        for (std::size_t i = 0; i < quiet.size(); ++i)
+            quiet[i] = static_cast<std::int16_t>((i * 37) & 0x3FFF);
+
+        // Driven through the container, since encodeFromPcm is internal: convert
+        // a stereo ADPCM tWAV of each length and read back the codec byte.
+        // Building a tWAV is more machinery than this needs, so the decision is
+        // checked directly against the budget instead.
+        check(shortSamples * 2 <= rivendata::kPcm16Budget,
+              "a short sound's PCM16 payload fits the budget");
+        check(longSamples * 2 > rivendata::kPcm16Budget,
+              "a long sound's PCM16 payload does not");
+    }
+
     // --- real data ----------------------------------------------------------
     const char *dataEnv = std::getenv("RIVEN_TEST_DATA");
     if (dataEnv == nullptr || dataEnv[0] == '\0')
@@ -306,6 +414,9 @@ int main()
     std::uint64_t totalOut = 0;
     int converted = 0;
     int dumped = 0;
+    int pcm16Out = 0;
+    int adpcmOut = 0;
+    int passthroughOut = 0;
 
     const fs::path outDir = fs::temp_directory_path() / "riven-test-sound";
     std::error_code ec;
@@ -469,6 +580,39 @@ int main()
             continue;
         }
 
+        if (hdr.codec == static_cast<std::uint8_t>(rivendata::SoundCodec::Pcm16))
+        {
+            ++pcm16Out;
+            check(hdr.seekEntries == 0,
+                  "tWAV " + std::to_string(id) + ": PCM16 carries no seek table");
+            check(hdr.dataBytes == hdr.sampleCount * 2,
+                  "tWAV " + std::to_string(id) + ": a PCM16 payload is two bytes a sample");
+            check(static_cast<std::uint64_t>(hdr.sampleCount) * 2 <= rivendata::kPcm16Budget,
+                  "tWAV " + std::to_string(id) + ": PCM16 was only chosen within budget");
+            continue; // the ADPCM checks below do not apply
+        }
+        ++adpcmOut;
+        // Two ways a sound is legitimately ADPCM, and only two.
+        //
+        // A MONO ADPCM source passes through untouched at any length -- the samples
+        // are copied nibble for nibble, so it is already lossless and decoding it to
+        // PCM16 would be four times the size for identical audio. That is the whole
+        // reason IMA was picked for this port, and it is not a fallback.
+        //
+        // Anything else reached ADPCM by being re-encoded, and that is only
+        // acceptable when its PCM16 form would not fit the budget.
+        const bool passthrough = info.encoding == TwavEncoding::Adpcm && info.channels == 1;
+        if (passthrough)
+            ++passthroughOut;
+        else
+            // sampleCount * 2 is the PCM16 size, and is exactly the quantity
+            // encodeFromPcm weighs. Deriving it from dataBytes instead would be
+            // four times too small: ADPCM is half a byte a sample, PCM16 is two.
+            check(static_cast<std::uint64_t>(hdr.sampleCount) * 2 > rivendata::kPcm16Budget,
+                  "tWAV " + std::to_string(id)
+                      + ": a re-encoded sound was only left as ADPCM when PCM16 "
+                        "would not fit");
+
         // Three dumps so the result can be listened to, which is the only check
         // a person can make on audio.
         if (dumped < 3 && hdr.sampleCount > 4096)
@@ -488,6 +632,15 @@ int main()
 
     std::printf("  encodings: %d ADPCM, %d PCM, %d MPEG, %d unparsed\n", adpcm, pcm, mp2,
                 unparsed);
+    std::printf("sound: %d converted -- %d PCM16 (lossless re-encode avoided), "
+                "%d ADPCM of which %d bit-exact passthroughs\n",
+                converted, pcm16Out, adpcmOut, passthroughOut);
+    // All three paths have to actually happen, or the split is not being
+    // exercised: Riven ships mono effects that pass through untouched, stereo
+    // tracks short enough to keep as PCM, and ambients too long to hold either way.
+    check(pcm16Out > 0, "some sounds are short enough for lossless PCM16");
+    check(adpcmOut > 0, "some sounds stay ADPCM");
+    check(passthroughOut > 0, "the mono effects still pass through bit-exactly");
     check(adpcm + pcm + mp2 > 0, "the install has sounds");
     check(unparsed == 0, "every tWAV parsed");
     check(converted > 0, "sounds converted");

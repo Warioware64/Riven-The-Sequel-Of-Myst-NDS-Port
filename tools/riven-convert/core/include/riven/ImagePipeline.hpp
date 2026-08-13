@@ -38,6 +38,13 @@ std::vector<std::uint8_t> decompressLz77(const std::uint8_t *data, std::size_t s
 /// to 5 bands them visibly. A 4x4 Bayer threshold applied in LINEAR light (not
 /// on the sRGB values) breaks the bands up without the speckle that naive
 /// dithering in gamma space produces in dark areas.
+///
+/// This is the conversion's inner loop -- every movie frame in the game goes
+/// through it -- so the out-parameter form exists to be called in a loop with one
+/// reused buffer. The returning form is for callers that convert one image.
+void downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH, int dstW, int dstH,
+                       std::vector<rivendata::Texel> &out);
+
 std::vector<rivendata::Texel> downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH,
                                                 int dstW, int dstH);
 
@@ -61,8 +68,35 @@ struct ImageResult
     int height = 0;
 };
 
-/// Decode tBMP `id` from `set` and write whichever outputs are requested.
-/// Paths are the final ones; writes are atomic.
+/// One tBMP's pixels, copied out of libvaht.
+///
+/// The copy is what lets the image stage use more than one core. libvaht is not
+/// thread-safe and its Bitmap decodes lazily behind its accessors, so a worker
+/// cannot be handed one -- but plain buffers it can. A 608x392 tBMP is 715 KB of
+/// RGB and 238 KB of indices, which is nothing against the resampling that
+/// follows.
+struct BitmapPixels
+{
+    int width = 0;
+    int height = 0;
+    std::vector<std::uint8_t> rgb;     ///< width*height*3; empty if unavailable
+    std::vector<std::uint8_t> indices; ///< width*height; empty when truecolour
+    std::vector<std::uint8_t> palette; ///< 256*3; empty when truecolour
+
+    bool valid() const { return width > 0 && height > 0; }
+};
+
+/// Decode tBMP `id` from `set` and copy its pixels out. Call on the thread that
+/// owns the ArchiveSet.
+BitmapPixels readBitmapPixels(const ArchiveSet &set, std::uint16_t id, std::string &error);
+
+/// Convert already-read pixels and write whichever outputs are requested. Touches
+/// nothing shared, so this is the half that runs on a worker.
+ImageResult convertBitmapPixels(const BitmapPixels &px, std::uint16_t id,
+                                const std::filesystem::path &rpicPath, bool wantRpic,
+                                const std::filesystem::path &rpizPath, bool wantRpiz);
+
+/// Both halves together, for callers converting one image.
 ImageResult convertBitmap(const ArchiveSet &set, std::uint16_t id,
                           const std::filesystem::path &rpicPath, bool wantRpic,
                           const std::filesystem::path &rpizPath, bool wantRpiz);

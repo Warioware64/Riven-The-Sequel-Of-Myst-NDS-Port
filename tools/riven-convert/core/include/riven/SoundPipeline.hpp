@@ -177,6 +177,27 @@ std::vector<std::int16_t> decodeMpegAudio(const std::uint8_t *data, std::size_t 
 /// Average interleaved channels down to one. A no-op for mono.
 std::vector<std::int16_t> downmixToMono(const std::vector<std::int16_t> &pcm, int channels);
 
+/// The same, then give back the level the average threw away.
+///
+/// (L+R)/2 is only lossless when the two channels are the same signal. The wider
+/// they are, the more the average cancels, and Riven's ambient beds are wide:
+/// most of the game arrives on the DS several dB below where it started, with
+/// nothing downstream able to put it back -- the DS master volume is already at
+/// its maximum and the sample is already at its own peak. That is most of why the
+/// port is quiet.
+///
+/// The gain is not a normalisation. It restores the mono peak to the peak of the
+/// LOUDEST INPUT CHANNEL and stops there, so a sound is never pushed past where it
+/// started and the relative loudness the game was mixed with survives intact: a
+/// correlated sound gets a gain of 1 and is returned bit-identical, a fully
+/// decorrelated one gets the whole 6 dB back. The 2x ceiling is for the
+/// pathological anti-correlated case, where the mono peak is near zero and the
+/// ratio is meaningless.
+///
+/// Mono in, mono out, untouched.
+std::vector<std::int16_t> downmixToMonoWithMakeup(const std::vector<std::int16_t> &pcm,
+                                                  int channels);
+
 /// Linear-interpolating resample of mono PCM16. Riven's own sounds are left at
 /// their native rate; this exists for the DVD release's 44.1 kHz MP2 tracks,
 /// which are halved to keep the card footprint and the DS timer sane.
@@ -223,5 +244,14 @@ struct SoundResult
 /// Convert tWAV `id` from `set` and write `out` atomically.
 SoundResult convertSound(const ArchiveSet &set, std::uint16_t id,
                          const std::filesystem::path &out);
+
+/// The same, on bytes already pulled out of the archive.
+///
+/// This split is what lets the sound stage use more than one core: libvaht is not
+/// thread-safe, so reading stays on the thread that owns the ArchiveSet and only
+/// this function -- which touches nothing shared -- runs on workers. It matters most
+/// on the DVD release, where every ambient is an MPEG-2 Layer II decode.
+SoundResult convertSoundBytes(const std::vector<std::uint8_t> &bytes, std::uint16_t id,
+                              const std::filesystem::path &out);
 
 } // namespace riven

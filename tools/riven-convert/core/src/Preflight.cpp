@@ -2,9 +2,12 @@
 
 #include <array>
 #include <cstdio>
+#include <map>
+#include <mutex>
 
 #include "RivenImage.hpp"
 #include "riven/Archive.hpp"
+#include "riven/FFmpeg.hpp"
 
 namespace fs = std::filesystem;
 
@@ -174,6 +177,48 @@ std::uint64_t estimateOutput(const SourceInfo &info, const Options &opts)
     return total;
 }
 
+Check checkFFmpeg(const Options &opts)
+{
+    if (!opts.video)
+        return {Check::Level::Ok, "ffmpeg", "not needed: the movies are not being converted"};
+
+    // Memoised per path. This is reached from the GUI's refreshChecks(), which
+    // runs on every keystroke in every path field, and answering it costs two
+    // process launches -- which is a hitch per character typed. What it probes
+    // is the machine, not the conversion, so caching it for the life of the
+    // process is also the right answer rather than merely the fast one.
+    static std::mutex mutex;
+    static std::map<std::string, Check> cache;
+
+    const std::string key = opts.ffmpegPath.string();
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        const auto it = cache.find(key);
+        if (it != cache.end())
+            return it->second;
+    }
+
+    const FFmpegPaths ff = findFFmpeg(opts.ffmpegPath);
+    std::string version;
+    std::string error;
+    Check result;
+    if (!probeFFmpeg(ff, version, error))
+    {
+        result = {Check::Level::Fail, "ffmpeg",
+                  error
+                      + ". The movie stage decodes through it. Install ffmpeg and put "
+                        "it on PATH, name it explicitly, or convert without the movies."};
+    }
+    else
+    {
+        result = {Check::Level::Ok, "ffmpeg", version + "  (" + ff.ffmpeg.string() + ")"};
+    }
+
+    const std::lock_guard<std::mutex> lock(mutex);
+    cache[key] = result;
+    return result;
+}
+
 std::vector<Check> runChecks(const SourceInfo &info, const Options &opts)
 {
     std::vector<Check> checks;
@@ -207,6 +252,9 @@ std::vector<Check> runChecks(const SourceInfo &info, const Options &opts)
         }
         checks.push_back({Check::Level::Warn, "Damaged archives", names});
     }
+
+    // --- the tools ----------------------------------------------------------
+    checks.push_back(checkFFmpeg(opts));
 
     // --- what to do ---------------------------------------------------------
     if (opts.empty())

@@ -46,14 +46,34 @@ namespace rivendata
 enum class SoundCodec : std::uint8_t
 {
     /// 4-bit IMA ADPCM, low nibble first, preceded by the 4-byte DS hardware
-    /// state word. This is what the converter emits for every sound.
+    /// state word.
     ImaAdpcm = 0,
-    /// Signed 8-bit PCM. Not currently emitted; the field exists so a future
-    /// "uncompressed" option does not need a format version bump.
+    /// Signed 8-bit PCM. Not emitted; the field exists so a future "even smaller"
+    /// option would not need a format version bump.
     Pcm8 = 1,
-    /// Signed 16-bit PCM, likewise.
+    /// Signed 16-bit PCM, little-endian, no state word and no seek table.
+    ///
+    /// What most sounds now are. Riven's stereo tracks have to be decoded and
+    /// downmixed whatever happens -- SLST pans every sound in hardware, so a
+    /// stereo source would be stored twice and re-panned -- and re-encoding that
+    /// downmix back to ADPCM was the one lossy step left in the sound path.
+    /// Keeping the PCM instead costs four times the card space and nothing else:
+    /// the DS plays 16-bit PCM on a hardware channel exactly as it plays ADPCM.
     Pcm16 = 2,
 };
+
+/// Largest PCM16 payload the converter will choose over ADPCM.
+///
+/// The choice is a RAM one, not a quality one: a hardware channel plays a whole
+/// resident buffer, so a sound costs its full size for as long as it sounds, and
+/// several ambient layers sound at once. 512 KB is 11.9 seconds at 22050 Hz --
+/// every effect in the game and most short ambients. Riven's long ambient loops
+/// run to 157 seconds, which is 6.9 MB as PCM16 and 1.7 MB as ADPCM, so those stay
+/// ADPCM and stay audible.
+///
+/// Shared because both ends have to agree: the converter decides with it and the
+/// runtime budgets against it.
+inline constexpr std::uint32_t kPcm16Budget = 512u * 1024u;
 
 /// `flags` bits.
 enum : std::uint8_t
@@ -96,7 +116,11 @@ struct RsndSeekPoint
 };
 static_assert(sizeof(RsndSeekPoint) == 4, "RsndSeekPoint must be 4 bytes");
 
-inline constexpr std::uint16_t kSoundVersion = 1;
+/// 2 gave the stereo-to-mono downmix its makeup gain, so the samples themselves
+/// changed and everything converted before it is quiet. The layout is identical;
+/// the bump exists purely so the converter re-encodes rather than keeping files it
+/// would otherwise consider current.
+inline constexpr std::uint16_t kSoundVersion = 2;
 
 /// Frames between seek points. 8192 at 22050 Hz is one entry per 0.37 s.
 inline constexpr std::uint16_t kSeekInterval = 8192;

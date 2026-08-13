@@ -24,11 +24,41 @@ namespace
                   /*highNibbleFirst=*/false, {}, &src.seek, rivendata::kSeekInterval);
     }
 
-    /// Mono PCM16 -> the ADPCM fields of `src`.
+    /// Mono PCM16 -> the payload fields of `src`, as PCM16 if it fits the budget
+    /// and as ADPCM if it does not.
+    ///
+    /// This is the only place in the sound path that ever lost anything. The
+    /// stereo sources have to be decoded and downmixed regardless -- SLST pans in
+    /// hardware, so storing two channels and re-panning them would be worse --
+    /// but re-encoding that downmix back to ADPCM was a second generation on top,
+    /// and it bought only card space. Keeping the PCM is lossless.
+    ///
+    /// What it costs is RAM on the DS, four times over, and a hardware channel
+    /// holds its whole sample while it plays. So the long ambient loops -- 157
+    /// seconds is 6.9 MB as PCM16 -- stay ADPCM, where they are still audible.
+    /// kPcm16Budget is the line, and it is shared so the runtime budgets against
+    /// the same number.
     void encodeFromPcm(RsndSource &src, const std::vector<std::int16_t> &mono)
     {
-        src.codec = rivendata::SoundCodec::ImaAdpcm;
         src.sampleCount = static_cast<std::uint32_t>(mono.size());
+
+        const std::uint64_t pcmBytes =
+            static_cast<std::uint64_t>(mono.size()) * sizeof(std::int16_t);
+        if (pcmBytes <= rivendata::kPcm16Budget)
+        {
+            src.codec = rivendata::SoundCodec::Pcm16;
+            src.nibbles.resize(static_cast<std::size_t>(pcmBytes));
+            // Both sides are little-endian, so the samples are the payload.
+            if (!mono.empty())
+                std::memcpy(src.nibbles.data(), mono.data(),
+                            static_cast<std::size_t>(pcmBytes));
+            // PCM is randomly accessible: there is no decoder state to resume, so
+            // no seek table is written at all.
+            src.seek.clear();
+            return;
+        }
+
+        src.codec = rivendata::SoundCodec::ImaAdpcm;
         src.nibbles = encodeIma(mono.data(), mono.size());
         buildSeekTable(src);
     }
@@ -52,7 +82,7 @@ namespace
             for (std::size_t i = 0; i < pcm.size(); ++i)
                 pcm[i] = static_cast<std::int16_t>((data[i * 2] << 8) | data[i * 2 + 1]);
         }
-        return downmixToMono(pcm, channels);
+        return downmixToMonoWithMakeup(pcm, channels);
     }
 } // namespace
 
@@ -104,14 +134,21 @@ std::vector<std::uint8_t> encodeRsnd(const RsndSource &src)
 
 SoundResult convertSound(const ArchiveSet &set, std::uint16_t id, const fs::path &out)
 {
-    SoundResult res;
-
     const auto bytes = set.read("tWAV", id);
     if (bytes.empty())
     {
+        SoundResult res;
         res.error = "tWAV " + std::to_string(id) + " could not be read";
         return res;
     }
+    return convertSoundBytes(bytes, id, out);
+}
+
+SoundResult convertSoundBytes(const std::vector<std::uint8_t> &bytes, std::uint16_t id,
+                              const fs::path &out)
+{
+    SoundResult res;
+
     if (looksDamaged(bytes))
     {
         res.error = "tWAV " + std::to_string(id) + " is zero-filled in this copy of the game";
@@ -153,7 +190,7 @@ SoundResult convertSound(const ArchiveSet &set, std::uint16_t id, const fs::path
         {
             const auto stereo = decodeIma(data, dataBytes, info.sampleCount, info.channels,
                                           kMohawkHighNibbleFirst);
-            encodeFromPcm(src, downmixToMono(stereo, info.channels));
+            encodeFromPcm(src, downmixToMonoWithMakeup(stereo, info.channels));
         }
         break;
 
@@ -181,7 +218,7 @@ SoundResult convertSound(const ArchiveSet &set, std::uint16_t id, const fs::path
             res.unsupported = true;
             return res;
         }
-        auto mono = downmixToMono(pcm, channels);
+        auto mono = downmixToMonoWithMakeup(pcm, channels);
         if (rate > kTargetRate)
         {
             mono = resampleMono(mono, rate, kTargetRate);

@@ -13,6 +13,8 @@ const char *stageName(Stage s)
     case Stage::Water:  return "water effects";
     case Stage::Audio:  return "audio";
     case Stage::Video:  return "video";
+    case Stage::Cursors: return "cursors";
+    case Stage::Extras: return "inventory art";
     }
     return "?";
 }
@@ -34,6 +36,8 @@ bool Options::enabled(Stage s) const
     case Stage::Water:  return water;
     case Stage::Audio:  return audio;
     case Stage::Video:  return video;
+    case Stage::Cursors: return cursors;
+    case Stage::Extras: return extras;
     }
     return false;
 }
@@ -48,6 +52,8 @@ void Options::setEnabled(Stage s, bool on)
     case Stage::Water:  water = on; break;
     case Stage::Audio:  audio = on; break;
     case Stage::Video:  video = on; break;
+    case Stage::Cursors: cursors = on; break;
+    case Stage::Extras: extras = on; break;
     }
 }
 
@@ -65,6 +71,7 @@ namespace
     Options everything(Options o)
     {
         o.cards = o.images = o.hires = o.water = o.audio = o.video = true;
+        o.cursors = o.extras = true;
         o.normalise();
         return o;
     }
@@ -72,6 +79,7 @@ namespace
     Options smaller(Options o)
     {
         o.cards = o.images = o.water = o.audio = o.video = true;
+        o.cursors = o.extras = true;
         o.hires = false;
         o.normalise();
         return o;
@@ -81,6 +89,7 @@ namespace
     {
         o.cards = true;
         o.images = o.hires = o.water = o.audio = o.video = false;
+        o.cursors = o.extras = false;
         o.normalise();
         return o;
     }
@@ -114,7 +123,8 @@ std::string matchingPresetName(const Options &o)
         Options probe = p.apply(o);
         if (probe.cards == o.cards && probe.images == o.images && probe.hires == o.hires
             && probe.water == o.water && probe.audio == o.audio
-            && probe.video == o.video)
+            && probe.video == o.video && probe.cursors == o.cursors
+            && probe.extras == o.extras)
             return p.name;
     }
     return "Custom";

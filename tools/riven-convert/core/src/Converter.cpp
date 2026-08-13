@@ -1,19 +1,22 @@
 #include "riven/Converter.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <cstring>
-#include <thread>
+#include <functional>
+#include <memory>
 
 #include <yas/mem_streams.hpp>
 #include <yas/binary_oarchive.hpp>
 
 #include "RivenData.hpp"
 #include "RivenSfxe.hpp"
+#include "RivenVideo.hpp"
 #include "riven/Archive.hpp"
 #include "riven/AtomicWrite.hpp"
 #include "riven/CardParse.hpp"
+#include "riven/CursorPipeline.hpp"
+#include "riven/Installer.hpp"
 #include "riven/ImagePipeline.hpp"
 #include "riven/MovieList.hpp"
 #include "riven/SoundPipeline.hpp"
@@ -29,6 +32,29 @@ namespace
     // Same archive flags the ARM9 reads with. See RivenData.hpp: the file
     // carries our own versioned StackFileHeader instead of yas's.
     constexpr std::size_t kYasFlags = yas::mem | yas::binary | yas::no_header;
+
+    // -----------------------------------------------------------------------
+    // One asset at a time
+    // -----------------------------------------------------------------------
+    //
+    // This stage used to run a thread pool, one job per core, each worker with its
+    // own libvaht handles. It was removed on purpose and the cost is real, so it is
+    // written down here rather than rediscovered: the work is embarrassingly
+    // parallel (1055 movies, ~162k frames, no job touching another's output) and
+    // CPU-bound, so a serial run gives most of the machine back to nobody.
+    //
+    // Measured on an eight-core machine, rspit's 28 movies and 14831 frames: 32.7 s
+    // at 185% CPU. The other ~6 cores are idle. ffmpeg cannot take them either --
+    // its Cinepak decoder is single-threaded and 1038 of the 1055 movies are
+    // Cinepak -- so removing `-threads 1` from it changed nothing measurable
+    // (32.3 s pinned, 32.7 s not). The 185% is this process quantising the last
+    // frame while ffmpeg's decodes the next through the pipe.
+    //
+    // What is bought with that: peak memory is one movie rather than one per core
+    // (64 MB resident for the run above, against workers each holding a tMOV of up
+    // to 25 MB), the log lines come out in resource order instead of interleaved,
+    // and there is nothing left in here that needs a lock. The GUI is unaffected --
+    // it runs Converter::run on its own QThread and always did.
 
     /// Work units. Weighted so the bar moves at a roughly even rate: an image
     /// costs far more than a card, and a hi-res twin costs more again because
@@ -46,6 +72,41 @@ namespace
     constexpr std::uint64_t kMovieWork = 400;
 
     std::string stackDir(const rivendata::StackId id) { return rivendata::stackName(id); }
+
+    /// ASCII fold, matching Vars::normalise on the ARM9 side. The NAME lists are
+    /// mixed case ("aAtrusBook") and RivenVars.hpp stores them folded; std::tolower
+    /// is avoided because it is locale-dependent and these are resource strings.
+    std::string toLowerAscii(const std::string &s)
+    {
+        std::string out;
+        out.reserve(s.size());
+        for (const char c : s)
+            out.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
+        return out;
+    }
+
+    /// Slurp a file. Only the executable goes through this -- everything else in
+    /// the conversion arrives through an archive reader -- so it is deliberately
+    /// simple and deliberately here rather than in a header.
+    bool readFileInto(const fs::path &path, std::vector<std::uint8_t> &out)
+    {
+        std::FILE *f = std::fopen(path.string().c_str(), "rb");
+        if (f == nullptr)
+            return false;
+        std::fseek(f, 0, SEEK_END);
+        const long size = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        if (size <= 0)
+        {
+            std::fclose(f);
+            return false;
+        }
+        out.resize(static_cast<std::size_t>(size));
+        const bool ok = std::fread(out.data(), 1, out.size(), f) == out.size();
+        std::fclose(f);
+        return ok;
+    }
+
 } // namespace
 
 std::string ConversionResult::summary() const
@@ -53,10 +114,12 @@ std::string ConversionResult::summary() const
     char buf[448];
     std::snprintf(buf, sizeof(buf),
                   "%d stacks, %d cards, %d images, %d zoom twins, %d water effects, "
-                  "%d sounds, %d movies (%llu frames); %d skipped, %d warnings, %d errors",
+                  "%d sounds, %d movies (%llu frames), %d cursors, %d inventory images; "
+                  "%d skipped, %d warnings, %d errors",
                   stacksConverted, cardsWritten, imagesWritten, hiresWritten,
                   effectsWritten, soundsWritten, moviesWritten,
-                  static_cast<unsigned long long>(videoFrames), skipped, warnings, errors);
+                  static_cast<unsigned long long>(videoFrames), cursorsWritten,
+                  extrasWritten, skipped, warnings, errors);
     return buf;
 }
 
@@ -86,6 +149,26 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
         result.message = "No Riven data found in " + opts.source.string();
         out.error("setup", result.message);
         return result;
+    }
+
+    // ffmpeg, found once for the whole run rather than per movie: the video
+    // stage decodes through it, and a run that cannot decode a single movie
+    // should say so here instead of a thousand times over the next two hours.
+    FFmpegPaths ffmpeg;
+    if (opts.video)
+    {
+        ffmpeg = findFFmpeg(opts.ffmpegPath);
+        std::string version;
+        std::string ffError;
+        if (!probeFFmpeg(ffmpeg, version, ffError))
+        {
+            result.message = ffError
+                           + ". Install ffmpeg, point --ffmpeg at it, or convert "
+                             "with --no-video.";
+            out.error("setup", result.message);
+            return result;
+        }
+        out.info("setup", "using " + version);
     }
 
     const fs::path root = dataDir(opts.dest);
@@ -139,20 +222,6 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
     if (total == 0)
         total = 1;
 
-    // How many movies to encode at once. Auto means "every core but one", so
-    // the machine stays usable through what is otherwise a half-hour of full
-    // load; the cap keeps peak memory sane, since each worker holds a whole
-    // tMOV and the largest is 25 MB.
-    int workers = opts.jobs;
-    if (workers <= 0)
-    {
-        const unsigned hw = std::thread::hardware_concurrency();
-        workers = hw > 1 ? static_cast<int>(hw) - 1 : 1;
-    }
-    workers = std::clamp(workers, 1, 16);
-    if (opts.video && workers > 1)
-        out.logf(Severity::Info, "setup", "encoding movies on %d threads", workers);
-
     std::uint64_t done = 0;
     std::string stage;
 
@@ -166,6 +235,116 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
 
     try
     {
+        // --- cursors and inventory art --------------------------------------
+        //
+        // Outside the per-stack loop, because neither belongs to a stack: the
+        // cursors are PE resources in riven.exe and the inventory books are
+        // tBMPs in extras.MHK, and both describe the game rather than an age.
+        //
+        // On the CD release neither file exists on its own -- both are inside
+        // program/arcriven.z, which is why this converter can read that at all.
+        // An install without any of the three is not an error: the game runs
+        // with a plain pointer and no inventory strip, and says so.
+        if (opts.cursors || opts.extras)
+        {
+            stage = "cursors";
+            InstallerArchive installer;
+            if (!info.source.installerArchive.empty())
+                installer = InstallerArchive::open(info.source.installerArchive);
+
+            const auto fromInstaller = [&](const char *name) {
+                std::vector<std::uint8_t> bytes;
+                if (!installer.isOpen())
+                    return bytes;
+                std::string err;
+                bytes = installer.read(name, err);
+                if (bytes.empty() && !err.empty())
+                    out.warn(stage, err);
+                return bytes;
+            };
+
+            if (opts.cursors)
+            {
+                // A loose executable wins: an installed copy has one, and so does
+                // the DVD/GOG release. ScummVM orders it the same way.
+                std::vector<std::uint8_t> exe;
+                if (!info.source.executable.empty())
+                    readFileInto(info.source.executable, exe);
+                if (exe.empty())
+                    exe = fromInstaller("riven.exe");
+                if (exe.empty())
+                    exe = fromInstaller("rivendmo.exe");
+
+                if (exe.empty())
+                {
+                    out.warn(stage, "no Riven executable found; the game will use a "
+                                    "plain pointer. A Mac install keeps its cursors in "
+                                    "a resource fork, which this converter does not read.");
+                }
+                else
+                {
+                    std::vector<std::string> warnings;
+                    const auto r = convertCursors(exe, root / "cursors" / "cursors.rcur",
+                                                  warnings);
+                    for (const std::string &w : warnings)
+                        out.warn(stage, w);
+                    if (!r.ok)
+                        out.error(stage, r.error);
+                    else
+                    {
+                        result.cursorsWritten = r.cels;
+                        result.bytesWritten += r.bytes;
+                        out.logf(Severity::Info, stage, "%d cursors", r.cels);
+                    }
+                }
+            }
+
+            if (opts.extras)
+            {
+                stage = "inventory art";
+                fs::path extras = info.source.extrasArchive;
+                if (extras.empty())
+                {
+                    // libvaht opens by path, so the archive has to become a file.
+                    // Kept rather than deleted: it makes the 221 KB inflate happen
+                    // once, and the marbles and credits will want it next.
+                    const auto bytes = fromInstaller("extras.mhk");
+                    if (!bytes.empty())
+                    {
+                        const fs::path unpacked = root / "extras" / "extras.mhk";
+                        std::string err;
+                        if (writeFileAtomic(unpacked, bytes, err))
+                            extras = unpacked;
+                        else
+                            out.error(stage, err);
+                    }
+                }
+
+                if (extras.empty())
+                {
+                    out.warn(stage, "extras.mhk was not found; Atrus's journal will "
+                                    "not be reachable");
+                }
+                else
+                {
+                    std::vector<std::string> warnings;
+                    const auto r =
+                        convertInventory(extras, root / "extras" / "inventory.rcur",
+                                         warnings);
+                    for (const std::string &w : warnings)
+                        out.warn(stage, w);
+                    if (!r.ok)
+                        out.error(stage, r.error);
+                    else
+                    {
+                        result.extrasWritten = r.cels;
+                        result.bytesWritten += r.bytes;
+                        out.logf(Severity::Info, stage, "%d inventory images", r.cels);
+                    }
+                }
+            }
+        }
+
         for (const auto &si : info.stacks)
         {
             if (!opts.stacks.empty() && opts.stacks.find(si.id) == opts.stacks.end())
@@ -193,7 +372,9 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                 stage = std::string(name) + " cards";
                 const fs::path outFile = root / "stacks" / (std::string(name) + ".bin");
 
-                bool upToDate = !opts.force;
+                bool upToDate = !opts.force
+                                && !formatStampIsStale(root / "stacks",
+                                                       rivendata::kSchemaVersion);
                 if (upToDate)
                     for (const auto &a : ss->dataArchives)
                         if (!isUpToDate(outFile, a))
@@ -229,6 +410,27 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                         const auto bytes = set.read("NAME", id);
                         ResourceReader r(bytes);
                         stack.names[i] = parseName(r);
+                    }
+
+                    // Resolve the variable names to the shared enum HERE, once,
+                    // so the ROM never sees a variable name at all
+                    // (shared/RivenVars.hpp). A name the enum does not know is
+                    // not an error -- the game still runs, that one variable just
+                    // reads and writes nowhere -- but it is always a bug in
+                    // RivenVars.hpp, so say so per occurrence.
+                    {
+                        const auto &vnames = stack.names[rivendata::kVariableNames].names;
+                        stack.variableIds.reserve(vnames.size());
+                        for (const std::string &n : vnames)
+                        {
+                            const rivendata::VarId v = rivendata::parseVarName(toLowerAscii(n));
+                            if (v == rivendata::VarId::Unknown)
+                                out.logf(Severity::Warning, stage,
+                                         "variable \"%s\" is not in RivenVars.hpp; "
+                                         "scripts using it will do nothing",
+                                         n.c_str());
+                            stack.variableIds.push_back(v);
+                        }
                     }
 
                     int damaged = 0;
@@ -318,6 +520,9 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                         result.bytesWritten += file.size();
                         out.logf(Severity::Info, stage, "%zu cards -> %s.bin",
                                  stack.cards.size(), name);
+                        if (std::string e;
+                            !writeFormatStamp(root / "stacks", rivendata::kSchemaVersion, e))
+                            out.warn(stage, e);
                     }
                 }
             }
@@ -330,30 +535,27 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                 const fs::path hiDir = root / "pics_hi" / stackDir(si.id);
                 const fs::path &archive = ss->dataArchives.front();
 
-                for (const std::uint16_t id : set.resourceIds("tBMP"))
+                // Art written by a build with a different .rpic layout is as
+                // unreadable as a stale movie, and mtimes cannot see it either.
+                const bool redoPics =
+                    opts.force || formatStampIsStale(picDir, rivendata::kImageVersion);
+                const bool redoHires =
+                    opts.force || formatStampIsStale(hiDir, rivendata::kImageVersion);
+
+                struct ImageJob
                 {
-                    const std::uint64_t work = (opts.images ? kImageWork : 0)
-                                             + (opts.hires ? kHiresWork : 0);
-                    const fs::path rpic = picDir / (std::to_string(id) + ".rpic");
-                    const fs::path rpiz = hiDir / (std::to_string(id) + ".rpiz");
+                    std::uint16_t id = 0;
+                    fs::path rpic;
+                    fs::path rpiz;
+                    bool needRpic = false;
+                    bool needRpiz = false;
+                    std::uint64_t work = 0;
+                };
 
-                    const bool needRpic =
-                        opts.images && (opts.force || !isUpToDate(rpic, archive));
-                    const bool needRpiz =
-                        opts.hires && (opts.force || !isUpToDate(rpiz, archive));
-
-                    if (!needRpic && !needRpiz)
-                    {
-                        ++result.skipped;
-                        bump(work, "image " + std::to_string(id) + " (up to date)");
-                        continue;
-                    }
-
-                    const ImageResult ir =
-                        convertBitmap(set, id, rpic, needRpic, rpiz, needRpiz);
+                const auto report = [&](ImageJob &j, ImageResult &ir) {
                     if (!ir.ok)
                     {
-                        out.logf(Severity::Warning, stage, "image %u: %s", id,
+                        out.logf(Severity::Warning, stage, "image %u: %s", j.id,
                                  ir.error.c_str());
                     }
                     else
@@ -364,8 +566,38 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                             ++result.hiresWritten;
                         result.bytesWritten += ir.rpicBytes + ir.rpizBytes;
                     }
-                    bump(work, "image " + std::to_string(id));
+                    bump(j.work, "image " + std::to_string(j.id));
+                };
+
+                for (const std::uint16_t id : set.resourceIds("tBMP"))
+                {
+                    const std::uint64_t work = (opts.images ? kImageWork : 0)
+                                             + (opts.hires ? kHiresWork : 0);
+                    ImageJob job;
+                    job.id = id;
+                    job.rpic = picDir / (std::to_string(id) + ".rpic");
+                    job.rpiz = hiDir / (std::to_string(id) + ".rpiz");
+                    job.needRpic = opts.images && (redoPics || !isUpToDate(job.rpic, archive));
+                    job.needRpiz = opts.hires && (redoHires || !isUpToDate(job.rpiz, archive));
+                    job.work = work;
+
+                    if (!job.needRpic && !job.needRpiz)
+                    {
+                        ++result.skipped;
+                        bump(work, "image " + std::to_string(id) + " (up to date)");
+                        continue;
+                    }
+
+                    ImageResult ir = convertBitmap(set, job.id, job.rpic, job.needRpic,
+                                                   job.rpiz, job.needRpiz);
+                    report(job, ir);
                 }
+
+                std::string e;
+                if (opts.images && !writeFormatStamp(picDir, rivendata::kImageVersion, e))
+                    out.warn(stage, e);
+                if (opts.hires && !writeFormatStamp(hiDir, rivendata::kImageVersion, e))
+                    out.warn(stage, e);
             }
 
             // --- water effects ----------------------------------------------
@@ -433,116 +665,66 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                 const fs::path videoDir = root / "video" / stackDir(si.id);
                 const fs::path &archive = ss->dataArchives.front();
 
-                // Encoding is the only stage worth spreading across cores: a
-                // stack of movies takes minutes where everything else takes
-                // seconds. libvaht is not thread-safe, so the reads stay here
-                // and only convertMovieBytes goes to a worker.
-                //
-                // Work is handed out a batch at a time rather than through a
-                // queue. That keeps cancellation and the progress bar exactly
-                // as they were -- both happen on this thread, between batches
-                // -- and it bounds memory, which matters when a single tMOV can
-                // be 25 MB and the biggest batch holds one per worker.
-                struct Job
+                struct MovieJob
                 {
                     std::uint16_t id = 0;
                     fs::path out;
-                    std::vector<std::uint8_t> bytes;
                 };
 
                 int unsupported = 0;
-                const auto ids = set.resourceIds("tMOV");
-                std::size_t next = 0;
 
-                while (next < ids.size())
-                {
-                    // Batches are several jobs per worker so the pull loop has
-                    // something to balance, but bounded by total bytes as well
-                    // as by count: a batch of 25 MB movies is the one way this
-                    // stage could run a machine out of memory.
-                    constexpr std::size_t kBatchBytes = 192u * 1024 * 1024;
-                    const std::size_t batchLimit = static_cast<std::size_t>(workers) * 4;
-                    std::size_t batchBytes = 0;
+                // A .rvid written by an older build is rejected outright by the
+                // ARM9 (isRvid is a hard version equality), and mtimes cannot see
+                // that: the outputs are still newer than a 1997 CD, so every movie
+                // would be skipped as up to date while none of them plays. The
+                // stamp is the only thing that knows.
+                const bool formatChanged =
+                    formatStampIsStale(videoDir, rivendata::kVideoVersion);
+                if (formatChanged)
+                    out.logf(Severity::Warning, stage,
+                             "video was converted by an older build: redoing it");
+                const bool redoAll = opts.force || formatChanged;
 
-                    std::vector<Job> batch;
-                    while (next < ids.size() && batch.size() < batchLimit
-                           && batchBytes < kBatchBytes)
+                const auto report = [&](MovieJob &j, VideoResult &vr) {
+                    if (!vr.ok)
                     {
-                        const std::uint16_t id = ids[next++];
-                        const fs::path outFile = videoDir / (std::to_string(id) + ".rvid");
-                        if (!opts.force && isUpToDate(outFile, archive))
-                        {
-                            ++result.skipped;
-                            bump(kMovieWork, "movie " + std::to_string(id) + " (up to date)");
-                            continue;
-                        }
-                        Job job;
-                        job.id = id;
-                        job.out = outFile;
-                        job.bytes = set.readMovie(id);
-                        if (job.bytes.empty())
-                        {
-                            out.logf(Severity::Warning, stage,
-                                     "tMOV %u is not a readable QuickTime movie", id);
-                            bump(kMovieWork, "movie " + std::to_string(id));
-                            continue;
-                        }
-                        batchBytes += job.bytes.size();
-                        batch.push_back(std::move(job));
-                    }
-                    if (batch.empty())
-                        continue;
-
-                    std::vector<VideoResult> results(batch.size());
-                    if (batch.size() == 1)
-                    {
-                        results[0] = convertMovieBytes(batch[0].bytes, batch[0].id,
-                                                       batch[0].out, opts.videoQuality);
+                        if (vr.unsupported)
+                            ++unsupported;
+                        out.logf(Severity::Warning, stage, "%s", vr.error.c_str());
                     }
                     else
                     {
-                        // Workers pull the next job rather than being handed
-                        // one each. Riven's movies differ in length by two
-                        // orders of magnitude -- 1225 frames next to 23 -- so a
-                        // thread per job leaves most of the machine waiting on
-                        // whichever cutscene landed in the batch.
-                        std::atomic<std::size_t> nextJob{0};
-                        std::vector<std::thread> pool;
-                        pool.reserve(static_cast<std::size_t>(workers));
-                        for (int t = 0; t < workers; ++t)
-                            pool.emplace_back([&] {
-                                for (;;)
-                                {
-                                    const std::size_t i = nextJob.fetch_add(1);
-                                    if (i >= batch.size())
-                                        return;
-                                    results[i] =
-                                        convertMovieBytes(batch[i].bytes, batch[i].id,
-                                                          batch[i].out, opts.videoQuality);
-                                }
-                            });
-                        for (auto &t : pool)
-                            t.join();
+                        if (!vr.audioError.empty())
+                            out.logf(Severity::Warning, stage,
+                                     "movie %u converted without its soundtrack: %s",
+                                     j.id, vr.audioError.c_str());
+                        ++result.moviesWritten;
+                        result.videoFrames += static_cast<std::uint64_t>(vr.frames);
+                        result.bytesWritten += vr.bytes;
+                    }
+                    bump(kMovieWork, "movie " + std::to_string(j.id));
+                };
+
+                for (const std::uint16_t id : set.resourceIds("tMOV"))
+                {
+                    MovieJob job;
+                    job.id = id;
+                    job.out = videoDir / (std::to_string(id) + ".rvid");
+                    if (!redoAll && isUpToDate(job.out, archive))
+                    {
+                        ++result.skipped;
+                        bump(kMovieWork, "movie " + std::to_string(id) + " (up to date)");
+                        continue;
                     }
 
-                    for (std::size_t i = 0; i < batch.size(); ++i)
-                    {
-                        const VideoResult &vr = results[i];
-                        if (!vr.ok)
-                        {
-                            if (vr.unsupported)
-                                ++unsupported;
-                            out.logf(Severity::Warning, stage, "%s", vr.error.c_str());
-                        }
-                        else
-                        {
-                            ++result.moviesWritten;
-                            result.videoFrames += static_cast<std::uint64_t>(vr.frames);
-                            result.bytesWritten += vr.bytes;
-                        }
-                        bump(kMovieWork, "movie " + std::to_string(batch[i].id));
-                    }
+                    VideoResult vr = convertMovie(set, job.id, job.out, ffmpeg, &cancel);
+                    report(job, vr);
                 }
+
+                // Stamped only now: a stamp written before the stage would claim
+                // movies a cancelled run never wrote.
+                if (std::string err; !writeFormatStamp(videoDir, rivendata::kVideoVersion, err))
+                    out.warn(stage, err);
 
                 if (unsupported > 0)
                     out.logf(Severity::Warning, stage,
@@ -555,6 +737,8 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
             {
                 stage = std::string(name) + " sound";
                 const fs::path soundDir = root / "sound" / stackDir(si.id);
+                const bool redoSounds =
+                    opts.force || formatStampIsStale(soundDir, rivendata::kSoundVersion);
 
                 // tWAV lives in TWO places: the effects a script plays are in
                 // the data archives, the ambient tracks are in <stack>_Sounds.mhk
@@ -571,28 +755,15 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                 for (const auto &f : soundFailures)
                     out.warn(stage, "could not open " + f);
 
-                int mpeg = 0;
-                for (const std::uint16_t id : soundSet.resourceIds("tWAV"))
+                struct SoundJob
                 {
-                    const fs::path outFile = soundDir / (std::to_string(id) + ".rsnd");
+                    std::uint16_t id = 0;
+                    fs::path out;
+                };
 
-                    // Freshness is measured against the archive the sound
-                    // actually came from, which may be either kind.
-                    const Archive *owner = soundSet.find("tWAV", id);
-                    if (owner == nullptr)
-                    {
-                        bump(kSoundWork, "sound " + std::to_string(id));
-                        continue;
-                    }
+                int mpeg = 0;
 
-                    if (!opts.force && isUpToDate(outFile, owner->path()))
-                    {
-                        ++result.skipped;
-                        bump(kSoundWork, "sound " + std::to_string(id) + " (up to date)");
-                        continue;
-                    }
-
-                    const SoundResult sr = convertSound(soundSet, id, outFile);
+                const auto report = [&](SoundJob &j, SoundResult &sr) {
                     if (!sr.ok)
                     {
                         out.logf(Severity::Warning, stage, "%s", sr.error.c_str());
@@ -604,8 +775,37 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                         if (sr.wasMpeg)
                             ++mpeg;
                     }
-                    bump(kSoundWork, "sound " + std::to_string(id));
+                    bump(kSoundWork, "sound " + std::to_string(j.id));
+                };
+
+                for (const std::uint16_t id : soundSet.resourceIds("tWAV"))
+                {
+                    SoundJob job;
+                    job.id = id;
+                    job.out = soundDir / (std::to_string(id) + ".rsnd");
+
+                    // Freshness is measured against the archive the sound
+                    // actually came from, which may be either kind.
+                    const Archive *owner = soundSet.find("tWAV", id);
+                    if (owner == nullptr)
+                    {
+                        bump(kSoundWork, "sound " + std::to_string(id));
+                        continue;
+                    }
+
+                    if (!redoSounds && isUpToDate(job.out, owner->path()))
+                    {
+                        ++result.skipped;
+                        bump(kSoundWork, "sound " + std::to_string(id) + " (up to date)");
+                        continue;
+                    }
+
+                    SoundResult sr = convertSound(soundSet, job.id, job.out);
+                    report(job, sr);
                 }
+
+                if (std::string e; !writeFormatStamp(soundDir, rivendata::kSoundVersion, e))
+                    out.warn(stage, e);
 
                 if (mpeg > 0)
                 {

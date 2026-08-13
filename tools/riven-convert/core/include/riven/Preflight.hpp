@@ -91,6 +91,14 @@ struct Check
 /// would otherwise feed the converter its own output.
 std::vector<Check> runChecks(const SourceInfo &info, const Options &opts);
 
+/// Is ffmpeg where the options say it is?
+///
+/// Its own check because it is the one condition a user can fix without touching
+/// anything about the conversion, and because finding out at movie 1 of 1055 is
+/// two hours too late. A Fail when the video stage is on, an Ok note when it is
+/// off -- a run with --no-video needs no ffmpeg at all.
+Check checkFFmpeg(const Options &opts);
+
 /// True when no check failed.
 bool checksPass(const std::vector<Check> &checks);
 

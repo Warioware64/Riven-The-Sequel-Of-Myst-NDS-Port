@@ -40,6 +40,7 @@ protected:
 private slots:
     void browseSource();
     void browseDest();
+    void browseFFmpeg();
     void sourcePathEdited();
     void rescanSource();
     void presetChanged(int index);
@@ -56,6 +57,7 @@ private slots:
 private:
     QWidget *buildSourceGroup();
     QWidget *buildDestGroup();
+    QWidget *buildFFmpegGroup();
     QWidget *buildStagesGroup();
     QWidget *buildChecksGroup();
     QWidget *buildProgressGroup();
@@ -75,6 +77,8 @@ private:
     QLabel *sourceStatus_ = nullptr;
     QLineEdit *destEdit_ = nullptr;
     QLabel *destNote_ = nullptr;
+    QLineEdit *ffmpegEdit_ = nullptr;
+    QLabel *ffmpegStatus_ = nullptr;
 
     QComboBox *presetBox_ = nullptr;
     QCheckBox *cardsBox_ = nullptr;
@@ -83,6 +87,8 @@ private:
     QCheckBox *waterBox_ = nullptr;
     QCheckBox *audioBox_ = nullptr;
     QCheckBox *videoBox_ = nullptr;
+    QCheckBox *cursorsBox_ = nullptr;
+    QCheckBox *extrasBox_ = nullptr;
     QCheckBox *forceBox_ = nullptr;
     QLabel *estimateLabel_ = nullptr;
 

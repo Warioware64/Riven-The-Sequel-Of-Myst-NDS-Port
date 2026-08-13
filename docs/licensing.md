@@ -24,6 +24,22 @@ checked. No ScummVM code is copied.
 If you are adding a feature, read the ScummVM implementation, understand it,
 cite it, and write the code yourself.
 
+Three of the converter's readers are worth naming here, because they are the
+newest and because "read the spec, write your own" is easiest to get wrong when
+the spec is itself an implementation:
+
+| Ours | Described by |
+|---|---|
+| [`core/src/installer/Dcl.cpp`](../tools/riven-convert/core/src/installer/Dcl.cpp) | `common/compression/dcl.cpp` — PKWARE DCL "implode", a published format |
+| [`core/src/installer/InstallerArchive.cpp`](../tools/riven-convert/core/src/installer/InstallerArchive.cpp) | `common/compression/installshieldv3_archive.cpp`, cited by line for each header field |
+| [`core/src/pe/PeCursors.cpp`](../tools/riven-convert/core/src/pe/PeCursors.cpp) | `engines/mohawk/cursors.cpp` and the documented Win32 `RT_GROUP_CURSOR` / `RT_CURSOR` structures |
+
+None of these is a transcription. The DCL Huffman tables are the format's own
+constants and are the only literal values shared with any other implementation
+of it — a table of code lengths is not expression, and there is no other correct
+set. The rest is written from the structure descriptions, which is why the
+comments in those files read as specifications rather than as annotations.
+
 ## libvaht — LGPL-3.0, host-side only
 
 [`thirdparty/libvaht`](../thirdparty/libvaht) (agrif/libvaht) reads Mohawk
@@ -87,6 +103,34 @@ The core and the CLI do not link Qt at all. That is a licensing convenience as
 well as a design one — `riven_convert_core` and `riven-convert` are pure
 Apache-2.0 with no LGPL component.
 
+## ffmpeg — a separate program, never linked
+
+The converter's movie stage decodes through **ffmpeg** and probes with **ffprobe**
+([`core/include/riven/FFmpeg.hpp`](../tools/riven-convert/core/include/riven/FFmpeg.hpp)).
+ffmpeg is LGPL-2.1-or-later, or GPL-2.0-or-later when built with `--enable-gpl`,
+and a distributor cannot know which build a user has installed.
+
+That is exactly why it is a **child process and not a library**. Running a program
+is not linking against it, and no ffmpeg code, header or symbol enters this binary:
+
+* Nothing is `#include`d from ffmpeg. `FFmpeg.hpp` declares nothing but paths,
+  argument vectors and a pipe.
+* Nothing is linked. `CMakeLists.txt` has no `find_package`, no `pkg_check_modules`
+  and no ffmpeg import library; the converter builds on a machine with no ffmpeg
+  at all and only fails when a movie is actually converted.
+* No ffmpeg binary is shipped with this project. The user supplies it, on their
+  PATH or through `--ffmpeg` / the GUI's ffmpeg field.
+
+So the converter stays Apache-2.0 and the GPL question never arises. **If anyone
+later wants to link libavcodec instead, this section stops being true** and the
+converter would have to be relicensed or shipped without that path -- which is the
+main reason the subprocess design is written down here rather than treated as an
+implementation detail.
+
+The same reasoning is why the ARM9 side is untouched: the ROM contains no decoder
+of any kind, ffmpeg-derived or otherwise. A `.rvid` frame is the texels the DS
+samples ([`docs/video.md`](video.md)).
+
 ## minimp3 — CC0-1.0, converter only
 
 [`thirdparty/minimp3`](../thirdparty/minimp3) (lieff/minimp3) decodes the
@@ -126,20 +170,26 @@ the ARM9. The BIOS routine links nothing, costs nothing, and carries no licence
 at all — and measured on real Riven art it reaches 55% of raw 8bpp, which is
 better than the game's own packing.
 
-## FastVideoDS — no license at all
+## FastVideoDS — no license at all, and no longer relevant
 
 Neither [FastVideoDSEncoder](../helpSrc/FastVideoDSEncoder-master) nor
 [FastVideoDSPlayer](../helpSrc/FastVideoDSPlayer-master) ships a license file.
 Absent a grant, **no code from either may be copied into this project** — not
 the ARM assembly decoder, not the C# encoder, not the VLC tables.
 
-What is not restricted is the *design*: a file format is not copyrightable, and
-neither is the technique of doing motion compensation on the 3D engine. The RVID
-codec is therefore a reimplementation working from the reference, cited the same
-way ScummVM is.
+This governed the RVID codec, which was a reimplementation from the design (a file
+format is not copyrightable, and neither is the technique of motion compensation on
+the 3D engine) and which deliberately used Exp-Golomb rather than the MPEG-4 TCOEF
+VLC tables the reference is driven by.
 
-**Ask Gericom for an explicit license.** A grant would let large parts of the
-decoder be used directly and would save a great deal of work.
+**That codec no longer exists.** Video is stored as raw ARGB1555 frames
+([docs/video.md](video.md) says why), so there is no transform, no entropy coder and
+no prediction anywhere in the video path — nothing that could resemble anyone's
+expression of anything. The restriction above still stands as a rule about the
+`helpSrc/` reference material; it no longer constrains any code that ships.
+
+Asking Gericom for a grant would now buy only the option of going back to a codec,
+which nothing needs.
 
 ## Game data
 

@@ -128,6 +128,39 @@ int main()
               "an unreadable source means redo, not skip");
     }
 
+    // --- the format stamp ---------------------------------------------------
+    //
+    // This is the rule that mtimes cannot express, and getting it wrong is not a
+    // visible bug on the host: it is a card full of files the DS silently refuses
+    // to read. That is exactly what happened when the video format went 1 -> 3 --
+    // every .rvid was still newer than the 1997 CD it came from, so the converter
+    // reported "up to date" for all 1055 of them, forever.
+    {
+        const fs::path dir = root / "stamped";
+        std::string e;
+
+        check(!formatStampIsStale(dir, 3), "a directory that does not exist is not stale");
+        fs::create_directories(dir, ec);
+        check(!formatStampIsStale(dir, 3), "an empty directory is not stale either");
+
+        check(writeFileAtomic(dir / "58.rvid", payload, e), "write an output");
+        check(formatStampIsStale(dir, 3),
+              "output with no stamp at all is stale -- it predates stamping");
+
+        check(writeFormatStamp(dir, 3, e), "stamp the directory");
+        check(!formatStampIsStale(dir, 3), "the stamped version is not stale");
+        check(formatStampIsStale(dir, 4), "a bumped version makes everything stale");
+        check(formatStampIsStale(dir, 2), "so does going backwards");
+
+        // The stamp itself must not be mistaken for output, or a stage would
+        // rebuild from scratch every time on a card that holds nothing else.
+        const fs::path bare = root / "stamp-only";
+        fs::create_directories(bare, ec);
+        check(writeFormatStamp(bare, 3, e), "stamp an empty directory");
+        check(!formatStampIsStale(bare, 4),
+              "a stamp with no output beside it is not stale at any version");
+    }
+
     // --- cleanStaleTempFiles ------------------------------------------------
     {
         const fs::path dir = root / "stale";

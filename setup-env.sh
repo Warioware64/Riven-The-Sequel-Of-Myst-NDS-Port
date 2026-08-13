@@ -4,7 +4,9 @@
 #
 # Unlike the Myst port, this venv is ONLY for building the ROM. The asset
 # converter is a C++ program (tools/riven-convert) built with CMake, so there
-# are no numpy/Pillow/ffmpeg dependencies to install here.
+# are no Python dependencies to install for it here. It does need ffmpeg on the
+# PATH to convert the movies -- a run-time tool, not a build-time one, and not
+# something this script installs.
 #
 # Usage:
 #   ./setup-env.sh

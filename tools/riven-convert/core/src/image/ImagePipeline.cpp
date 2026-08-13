@@ -51,7 +51,7 @@ namespace
     }
 
     /// 4x4 Bayer matrix, normalised to (-0.5, +0.5).
-    inline float bayer(int x, int y)
+    inline float bayerOffset(int x, int y)
     {
         static const int kBayer4[4][4] = {
             {0, 8, 2, 10},
@@ -62,39 +62,95 @@ namespace
         return (static_cast<float>(kBayer4[y & 3][x & 3]) + 0.5f) / 16.0f - 0.5f;
     }
 
-    /// Quantise one linear-light channel to 5 bits with an ordered-dither
-    /// offset. The threshold is applied between the two candidate output
-    /// levels, so the perturbation is always smaller than one output step and
-    /// can never push a colour past its neighbour.
-    inline int quantise5(float linear, float dither)
+    /// The 16 dither offsets, indexed the way the loop indexes them.
+    inline int bayerIndex(int x, int y) { return ((y & 3) << 2) | (x & 3); }
+
+    // --- the quantiser, as cut points -------------------------------------
+    //
+    // Quantising a linear-light channel to 5 bits with an ordered dither was
+    // written the obvious way: bracket the two candidate levels with a linear
+    // scan, work out where in the step the value falls, and compare that against
+    // the dither threshold. Correct, and up to 31 iterations plus a divide PER
+    // CHANNEL PER PIXEL -- which is 127k calls for one fullscreen movie frame and
+    // 162439 frames across the game. With the video codec gone this is the
+    // conversion's inner loop and very little else is.
+    //
+    // The same function, rearranged: for a given dither offset, the output level
+    // is decided entirely by which of 31 fixed CUT POINTS the value falls past,
+    // and those cut points are monotone. So one binary search over a precomputed
+    // table replaces the scan, the divide and the threshold compare together.
+    //
+    // Rearranged, not approximated. The cut points are the exact values at which
+    // the original switched levels, computed once in double precision, so this is
+    // if anything the more accurate of the two. tests/test_image.cpp holds the
+    // original as a reference implementation and checks the two agree.
+    struct DitherCuts
     {
-        const auto &g = gamma();
+        /// cut[d][i] is the linear value at which dither offset d starts choosing
+        /// level i+1 over level i.
+        float cut[16][31]{};
 
-        // Find the bracketing 5-bit levels.
+        DitherCuts()
+        {
+            const auto &g = gamma();
+            for (int y = 0; y < 4; ++y)
+                for (int x = 0; x < 4; ++x)
+                {
+                    const double d = bayerOffset(x, y);
+                    float *row = cut[bayerIndex(x, y)];
+                    for (int i = 0; i < 31; ++i)
+                    {
+                        const double lo = g.level5Linear[i];
+                        const double hi = g.level5Linear[i + 1];
+                        // t + d > 0.5, with t = (v - lo) / (hi - lo).
+                        row[i] = static_cast<float>(lo + (0.5 - d) * (hi - lo));
+                    }
+                }
+        }
+    };
+
+    const DitherCuts &ditherCuts()
+    {
+        static const DitherCuts c;
+        return c;
+    }
+
+    /// Quantise one linear-light channel to 5 bits with the ordered-dither offset
+    /// for this pixel. The perturbation is always smaller than one output step, so
+    /// it can never push a colour past its neighbour.
+    inline int quantise5(float linear, const float *cut)
+    {
+        // How many cut points this value has passed, by binary search over 31
+        // monotone floats: five comparisons, no division.
         int lo = 0;
-        while (lo < 31 && g.level5Linear[lo + 1] <= linear)
-            ++lo;
-        if (lo >= 31)
-            return 31;
-        const int hi = lo + 1;
-
-        const float span = g.level5Linear[hi] - g.level5Linear[lo];
-        if (span <= 0.0f)
-            return lo;
-
-        const float t = (linear - g.level5Linear[lo]) / span; // 0..1 within the step
-        return (t + dither > 0.5f) ? hi : lo;
+        int n = 31;
+        while (n > 0)
+        {
+            const int half = n >> 1;
+            const int mid = lo + half;
+            if (cut[mid] < linear)
+            {
+                lo = mid + 1;
+                n -= half + 1;
+            }
+            else
+            {
+                n = half;
+            }
+        }
+        return lo;
     }
 } // namespace
 
-std::vector<Texel> downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH, int dstW,
-                                     int dstH)
+void downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH, int dstW, int dstH,
+                       std::vector<Texel> &out)
 {
-    std::vector<Texel> out;
+    out.clear();
     if (rgb == nullptr || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0)
-        return out;
+        return;
 
     const auto &g = gamma();
+    const auto &cuts = ditherCuts();
     out.resize(static_cast<std::size_t>(dstW) * dstH);
 
     for (int dy = 0; dy < dstH; ++dy)
@@ -136,10 +192,10 @@ std::vector<Texel> downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH
             gg /= static_cast<float>(n);
             b /= static_cast<float>(n);
 
-            const float d = bayer(dx, dy);
-            const int r5 = quantise5(r, d);
-            const int g5 = quantise5(gg, d);
-            const int b5 = quantise5(b, d);
+            const float *cut = cuts.cut[bayerIndex(dx, dy)];
+            const int r5 = quantise5(r, cut);
+            const int g5 = quantise5(gg, cut);
+            const int b5 = quantise5(b, cut);
 
             // Alpha is always set: Riven stills are opaque, and a texel with
             // bit 15 clear would be skipped by the DS blender.
@@ -147,6 +203,13 @@ std::vector<Texel> downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH
                 static_cast<Texel>(0x8000 | (b5 << 10) | (g5 << 5) | r5);
         }
     }
+}
+
+std::vector<Texel> downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH, int dstW,
+                                     int dstH)
+{
+    std::vector<Texel> out;
+    downscaleToTexels(rgb, srcW, srcH, dstW, dstH, out);
     return out;
 }
 
@@ -221,23 +284,47 @@ std::vector<std::uint8_t> encodeRpiz(const std::uint8_t *indices, const std::uin
     return out;
 }
 
-ImageResult convertBitmap(const ArchiveSet &set, std::uint16_t id, const fs::path &rpicPath,
-                          bool wantRpic, const fs::path &rpizPath, bool wantRpiz)
+BitmapPixels readBitmapPixels(const ArchiveSet &set, std::uint16_t id, std::string &error)
 {
-    ImageResult res;
+    BitmapPixels px;
+    error.clear();
 
     Bitmap bmp = set.readBitmap(id);
     if (!bmp.valid() || bmp.width() <= 0 || bmp.height() <= 0)
     {
+        error = "tBMP " + std::to_string(id) + " did not decode";
+        return px;
+    }
+    px.width = bmp.width();
+    px.height = bmp.height();
+
+    const std::size_t plane = static_cast<std::size_t>(px.width) * px.height;
+    if (const std::uint8_t *rgb = bmp.rgb(); rgb != nullptr)
+        px.rgb.assign(rgb, rgb + plane * 3);
+    if (const std::uint8_t *idx = bmp.indices(); idx != nullptr)
+        px.indices.assign(idx, idx + plane);
+    if (const std::uint8_t *pal = bmp.palette(); pal != nullptr)
+        px.palette.assign(pal, pal + rivendata::kPaletteEntries * 3);
+    return px;
+}
+
+ImageResult convertBitmapPixels(const BitmapPixels &px, std::uint16_t id,
+                                const fs::path &rpicPath, bool wantRpic,
+                                const fs::path &rpizPath, bool wantRpiz)
+{
+    ImageResult res;
+
+    if (!px.valid())
+    {
         res.error = "tBMP " + std::to_string(id) + " did not decode";
         return res;
     }
-    res.width = bmp.width();
-    res.height = bmp.height();
+    res.width = px.width;
+    res.height = px.height;
 
     if (wantRpic)
     {
-        const std::uint8_t *rgb = bmp.rgb();
+        const std::uint8_t *rgb = px.rgb.empty() ? nullptr : px.rgb.data();
         if (rgb == nullptr)
         {
             res.error = "tBMP " + std::to_string(id) + " has no truecolour data";
@@ -247,13 +334,12 @@ ImageResult convertBitmap(const ArchiveSet &set, std::uint16_t id, const fs::pat
         // Preserve aspect from the source rather than assuming 608x392: Riven
         // ships a handful of odd-sized tBMPs (inventory art, credits), and
         // stretching those to the card ratio would visibly distort them.
-        const int dstW = std::min(rivendata::kViewW, bmp.width());
-        int dstH = static_cast<int>(static_cast<std::int64_t>(bmp.height()) * dstW
-                                    / bmp.width());
+        const int dstW = std::min(rivendata::kViewW, px.width);
+        int dstH = static_cast<int>(static_cast<std::int64_t>(px.height) * dstW / px.width);
         if (dstH < 1)
             dstH = 1;
 
-        const auto texels = downscaleToTexels(rgb, bmp.width(), bmp.height(), dstW, dstH);
+        const auto texels = downscaleToTexels(rgb, px.width, px.height, dstW, dstH);
         const auto bytes = encodeRpic(texels, dstW, dstH);
         if (!writeFileAtomic(rpicPath, bytes, res.error))
             return res;
@@ -262,8 +348,8 @@ ImageResult convertBitmap(const ArchiveSet &set, std::uint16_t id, const fs::pat
 
     if (wantRpiz)
     {
-        const std::uint8_t *indices = bmp.indices();
-        const std::uint8_t *palette = bmp.palette();
+        const std::uint8_t *indices = px.indices.empty() ? nullptr : px.indices.data();
+        const std::uint8_t *palette = px.palette.empty() ? nullptr : px.palette.data();
         if (indices == nullptr || palette == nullptr)
         {
             // Truecolour tBMPs exist in the format but Riven does not use them
@@ -273,7 +359,7 @@ ImageResult convertBitmap(const ArchiveSet &set, std::uint16_t id, const fs::pat
             return res;
         }
 
-        const auto bytes = encodeRpiz(indices, palette, bmp.width(), bmp.height(), true);
+        const auto bytes = encodeRpiz(indices, palette, px.width, px.height, true);
         if (!writeFileAtomic(rpizPath, bytes, res.error))
             return res;
         res.rpizBytes = bytes.size();
@@ -281,6 +367,21 @@ ImageResult convertBitmap(const ArchiveSet &set, std::uint16_t id, const fs::pat
 
     res.ok = true;
     return res;
+}
+
+
+ImageResult convertBitmap(const ArchiveSet &set, std::uint16_t id, const fs::path &rpicPath,
+                          bool wantRpic, const fs::path &rpizPath, bool wantRpiz)
+{
+    std::string error;
+    const BitmapPixels px = readBitmapPixels(set, id, error);
+    if (!px.valid())
+    {
+        ImageResult res;
+        res.error = error;
+        return res;
+    }
+    return convertBitmapPixels(px, id, rpicPath, wantRpic, rpizPath, wantRpiz);
 }
 
 } // namespace riven

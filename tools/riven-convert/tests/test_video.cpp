@@ -1,15 +1,25 @@
-// The video path: bit IO, the transform, the RVID round trip, the QuickTime
-// demuxer, and the two source codecs.
+// The video path: what ffmpeg reports about the game's movies, and the .rvid
+// files the pipeline builds out of them.
 //
-// The check that matters most is that the reference decoder reproduces the
-// encoder's own reconstruction EXACTLY, frame after frame. RVID predicts from
-// the decoded picture, so any disagreement between the two sides does not stay
-// small -- it compounds until the next keyframe. Everything else here is in
-// service of being able to trust that one.
+// There is no codec to test here any more, in either direction. Frames are stored
+// raw, so what used to be a bit-exactness argument between an encoder and a
+// decoder is a plain equality that lives in test_rvid_arm9.cpp; and the decoding
+// is ffmpeg's, which is not this project's to verify. What is left is the three
+// things that ARE ours:
 //
-// With RIVEN_TEST_DATA set, the same round trip runs over real movies and dumps
-// a few frames as PPM. Video is the one thing in this converter where a person
-// has to look at the output.
+//   * the census -- every movie in the install has a video stream ffprobe can
+//     describe, which is what makes "unsupported codec" an impossible outcome
+//     rather than a hoped-for one;
+//   * the container -- the frames tile the file, largestFrameBytes is true, and
+//     the index names every frame in order;
+//   * the QUANTISER -- the stored texels are what our own dither produces from
+//     ffmpeg's rgb24, and they are close to what the stills path would have
+//     produced from the same source. 874 of Riven's movies are overlays
+//     composited into a card still, so a difference here is a visible seam.
+//
+// Everything real-data needs RIVEN_TEST_DATA, and everything at all needs ffmpeg;
+// both are skipped cleanly when absent. A few frames are dumped as PPM because
+// video is the one thing in this converter where a person has to look at it.
 
 #include <cmath>
 #include <cstdio>
@@ -17,18 +27,16 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "RivenVideo.hpp"
 #include "riven/Archive.hpp"
-#include "riven/Bits.hpp"
 #include "riven/ImagePipeline.hpp"
 #include "riven/Layout.hpp"
-#include "riven/QuickTime.hpp"
-#include "riven/Rvid.hpp"
-#include "riven/VideoCodecs.hpp"
+#include "riven/FFmpeg.hpp"
 #include "riven/VideoPipeline.hpp"
 
 namespace fs = std::filesystem;
@@ -67,177 +75,85 @@ namespace
         std::fclose(f);
     }
 
-    /// A synthetic clip with the three things that exercise every path: motion,
-    /// a hard cut, and frames where nothing moves at all.
-    RvidFrame syntheticFrame(int w, int h, int n)
+    /// Decode `count` frames and return the last, as rgb24. When `w`/`h` are
+    /// non-zero ffmpeg scales; when they are zero the frame comes back at the
+    /// movie's own size, which is what the stills path would have been handed.
+    std::vector<std::uint8_t> lastFrameOf(const FFmpegPaths &ff, const fs::path &movie,
+                                          int count, int srcW, int srcH, int w, int h)
     {
-        std::vector<Texel> texels(static_cast<std::size_t>(w) * h);
-        const int shift = n < 20 ? n : 20;      // pans, then holds still
-        const bool inverted = n >= 30;          // a hard cut at frame 30
-        for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x)
+        const int outW = w > 0 ? w : srcW;
+        const int outH = h > 0 ? h : srcH;
+        const std::size_t bytes = static_cast<std::size_t>(outW) * outH * 3;
+
+        std::vector<std::string> argv = {"-v",  "error", "-nostdin", "-threads",
+                                         "1",   "-i",    movie.string(), "-an"};
+        char scale[64];
+        if (w > 0 && h > 0)
+        {
+            std::snprintf(scale, sizeof(scale), "scale=%d:%d:flags=area", w, h);
+            argv.push_back("-vf");
+            argv.push_back(scale);
+        }
+        argv.insert(argv.end(), {"-frames:v", std::to_string(count), "-f", "rawvideo",
+                                 "-pix_fmt", "rgb24", "pipe:1"});
+
+        Subprocess p;
+        std::string err;
+        if (!p.start(ff.ffmpeg, argv, err))
+            return {};
+
+        std::vector<std::uint8_t> frame(bytes);
+        std::vector<std::uint8_t> got;
+        for (int n = 0; n < count; ++n)
+        {
+            bool eof = false;
+            if (!p.readExact(frame.data(), frame.size(), eof))
+                break;
+            got = frame;
+        }
+        p.kill();
+        p.wait();
+        return got;
+    }
+
+    /// Mean and maximum absolute per-channel difference between two texel
+    /// images, in 5-bit units (so 31 is the full range).
+    void texelDelta(const std::vector<Texel> &a, const std::vector<Texel> &b,
+                    double &mean, int &worst)
+    {
+        mean = 0.0;
+        worst = 0;
+        if (a.size() != b.size() || a.empty())
+        {
+            worst = 32;
+            return;
+        }
+        std::uint64_t sum = 0;
+        for (std::size_t i = 0; i < a.size(); ++i)
+        {
+            for (int shift = 0; shift <= 10; shift += 5)
             {
-                int v = ((x + shift) / 3 + y / 5) & 0x1F;
-                if (inverted)
-                    v = 31 - v;
-                const int r = v, g = (v * 2) & 0x1F, b = 31 - v;
-                texels[static_cast<std::size_t>(y) * w + x] =
-                    static_cast<Texel>(0x8000 | (b << 10) | (g << 5) | r);
+                const int d = std::abs(((a[i] >> shift) & 0x1F) - ((b[i] >> shift) & 0x1F));
+                sum += static_cast<std::uint64_t>(d);
+                worst = std::max(worst, d);
             }
-        return texelsToFrame(texels, w, h);
+        }
+        mean = static_cast<double>(sum) / (a.size() * 3);
     }
 } // namespace
 
 int main()
 {
-    // --- bit IO -------------------------------------------------------------
+    // --- ffmpeg -------------------------------------------------------------
+    const FFmpegPaths ff = findFFmpeg();
+    std::string version;
+    std::string ffError;
+    if (!probeFFmpeg(ff, version, ffError))
     {
-        // Exp-Golomb at its boundaries: every power of two changes the code
-        // length, and the signed folding has to survive the sign of zero.
-        std::vector<std::int32_t> values = {0,  1,  -1,  2,   -2,  3,   -3, 7,
-                                            8,  -8, 15, 16,  -16, 63, 64, 255,
-                                            256, -256, 4095, -4095};
-        BitWriter w;
-        for (const auto v : values)
-            w.putSE(v);
-        for (const auto v : values)
-            w.putUE(static_cast<std::uint32_t>(std::abs(v)));
-        w.flush();
-
-        BitReader r(w.bytes().data(), w.bytes().size());
-        bool same = true;
-        for (const auto v : values)
-            same = same && r.getSE() == v;
-        for (const auto v : values)
-            same = same && r.getUE() == static_cast<std::uint32_t>(std::abs(v));
-        check(same && r.ok(), "Exp-Golomb round-trips at its boundary values");
-
-        // The cost functions drive every rate-distortion decision, so they have
-        // to agree with what the writer actually emits.
-        bool costsMatch = true;
-        for (const auto v : values)
-        {
-            BitWriter one;
-            one.putSE(v);
-            costsMatch = costsMatch && static_cast<int>(one.sizeBits()) == BitWriter::costSE(v);
-        }
-        check(costsMatch, "the bit-cost estimate matches what is written");
+        std::printf("video: skipped -- %s\n", ffError.c_str());
+        return 0;
     }
-
-    // --- the transform ------------------------------------------------------
-    {
-        std::mt19937 rng(12345);
-        std::uniform_int_distribution<int> pixel(0, 31);
-        bool exact = true;
-        for (int trial = 0; trial < 2000 && exact; ++trial)
-        {
-            int src[4], pred[4];
-            for (int i = 0; i < 4; ++i)
-            {
-                src[i] = pixel(rng);
-                pred[i] = pixel(rng);
-            }
-            int resid[4];
-            for (int i = 0; i < 4; ++i)
-                resid[i] = src[i] - pred[i];
-
-            int coef[4];
-            forwardHadamard(resid, coef);
-            int out[4];
-            inverseHadamard(coef, pred, out);
-            for (int i = 0; i < 4; ++i)
-                exact = exact && out[i] == src[i];
-        }
-        check(exact, "the transform is lossless when nothing is quantised");
-
-        // The half-pel blend is the DS's, not an average: it must stay in range
-        // and be symmetric.
-        bool blendOk = true;
-        for (int a = 0; a <= 31; ++a)
-            for (int b = 0; b <= 31; ++b)
-            {
-                const int v = blendHalf(a, b);
-                blendOk = blendOk && v >= 0 && v <= 31 && v == blendHalf(b, a);
-            }
-        check(blendOk, "the half-pel blend is symmetric and stays in 5 bits");
-    }
-
-    // --- the RVID round trip ------------------------------------------------
-    for (const auto profile : {VideoProfile::Lite, VideoProfile::Full})
-    {
-        const int w = 64, h = 48;
-        RvidSettings settings;
-        settings.profile = profile;
-
-        RvidEncoder encoder(w, h, settings);
-        RvidDecoder decoder(w, h, settings);
-
-        bool identical = true;
-        bool decoded = true;
-        long worstError = 0;
-        std::vector<std::vector<std::uint8_t>> frames;
-        std::vector<bool> intraFlags;
-
-        for (int n = 0; n < 40; ++n)
-        {
-            const RvidFrame src = syntheticFrame(w, h, n);
-            const RvidEncodedFrame e = encoder.encode(src, n == 0);
-            frames.push_back(e.bytes);
-            intraFlags.push_back(e.intra);
-
-            if (!decoder.decode(e.bytes.data(), e.bytes.size(), e.intra))
-            {
-                decoded = false;
-                break;
-            }
-            for (int p = 0; p < kPlaneCount; ++p)
-                identical = identical
-                            && decoder.frame().plane[p] == encoder.reference().plane[p];
-
-            for (int p = 0; p < kPlaneCount; ++p)
-                for (std::size_t i = 0; i < src.plane[p].size(); ++i)
-                    worstError = std::max<long>(
-                        worstError, std::abs(static_cast<int>(src.plane[p][i])
-                                             - static_cast<int>(decoder.frame().plane[p][i])));
-        }
-
-        const std::string what = profile == VideoProfile::Full ? "FULL" : "LITE";
-        check(decoded, what + ": every frame decodes");
-        check(identical, what + ": the decoder reproduces the encoder's reconstruction exactly");
-        check(worstError <= 8, what + ": no sample drifts more than 8 levels from the source");
-
-        // A hard cut has to produce an I-frame of its own accord, or the
-        // encoder is spending P-frame bits on a picture it cannot predict.
-        check(intraFlags.size() > 30 && intraFlags[30], what + ": a hard cut forces a keyframe");
-
-        // Decoding from a keyframe must give the same picture as decoding from
-        // the start -- this is what the keyframe index promises.
-        std::size_t k = 0;
-        for (std::size_t i = 1; i < intraFlags.size(); ++i)
-            if (intraFlags[i])
-                k = i;
-        if (k > 0)
-        {
-            RvidDecoder fresh(w, h, settings);
-            bool ok = true;
-            for (std::size_t i = k; i < frames.size(); ++i)
-                ok = ok && fresh.decode(frames[i].data(), frames[i].size(), intraFlags[i]);
-            check(ok && fresh.frame().plane[0] == decoder.frame().plane[0],
-                  what + ": decoding from a keyframe matches decoding from the start");
-        }
-    }
-
-    // --- plane conversion ---------------------------------------------------
-    {
-        // Padding to a multiple of 8 must not disturb the real pixels.
-        std::vector<Texel> texels(21 * 13);
-        for (std::size_t i = 0; i < texels.size(); ++i)
-            texels[i] = static_cast<Texel>(0x8000 | (i * 7919));
-        const RvidFrame f = texelsToFrame(texels, 21, 13);
-        check(f.width == 24 && f.height == 16, "frames pad up to a multiple of 8");
-        const auto back = frameToTexels(f, 21, 13);
-        check(back == texels, "texels survive the trip through the codec's planes");
-    }
+    std::printf("video: %s\n", version.c_str());
 
     // --- real data ----------------------------------------------------------
     const char *dataEnv = std::getenv("RIVEN_TEST_DATA");
@@ -261,11 +177,14 @@ int main()
     fs::remove_all(outDir, ec);
     fs::create_directories(outDir, ec);
 
-    int movies = 0, cvid = 0, rle = 0, other = 0, withAudio = 0;
-    int badSamples = 0, badRanges = 0;
+    std::map<std::string, int> codecs;
+    int movies = 0, noVideo = 0, withAudio = 0;
     int dumped = 0;
     std::uint64_t outBytes = 0;
     int converted = 0;
+    double worstMean = 0.0;
+    int worstMax = 0;
+    int parityChecked = 0;
 
     for (const auto &stack : source.stacks)
     {
@@ -280,48 +199,31 @@ int main()
             const auto bytes = set.readMovie(id);
             if (bytes.empty())
                 continue;
-            const MovieInfo info = probeMovie(bytes, id, true);
-            if (!info.ok)
-                continue;
-            const MovieTrack *v = info.video();
-            if (v == nullptr)
-                continue;
 
+            const MovieProbe m = probeMovieBytes(bytes, id, ff);
             ++movies;
-            if (v->codec == "cvid")
-                ++cvid;
-            else if (v->codec == "rle ")
-                ++rle;
-            else
-                ++other;
-            if (info.audio() != nullptr)
+            if (!m.ok)
+            {
+                ++noVideo;
+                std::fprintf(stderr, "  tMOV %u: %s\n", id, m.error.c_str());
+                continue;
+            }
+            ++codecs[m.videoCodec];
+            if (m.hasAudio())
                 ++withAudio;
 
-            // The demuxer's two promises: every sample the tables describe is
-            // present, and none of them points outside the resource.
-            if (v->samples.size() != v->sampleCount)
-                ++badSamples;
-            for (const auto &s : v->samples)
-                if (s.offset + s.size > bytes.size())
-                {
-                    ++badRanges;
-                    break;
-                }
-
-            // Decoding and converting every movie would be a full conversion
-            // run; two per stack is enough to catch a codec that has stopped
-            // working.
+            // Converting every movie would be a full conversion run; two per
+            // stack is enough to catch the pipeline having stopped working.
             if (i % std::max<std::size_t>(1, ids.size() / 2) != 0 || converted >= 16)
                 continue;
 
             const fs::path out =
                 outDir / (std::string(rivendata::stackName(stack.id)) + "-"
                           + std::to_string(id) + ".rvid");
-            const VideoResult vr = convertMovie(set, id, out, 100);
+            const VideoResult vr = convertMovie(set, id, out, ff);
             if (!vr.ok)
             {
-                if (!vr.unsupported)
-                    std::fprintf(stderr, "  %s\n", vr.error.c_str());
+                check(false, "tMOV " + std::to_string(id) + ": " + vr.error);
                 continue;
             }
             ++converted;
@@ -343,16 +245,22 @@ int main()
             }
             std::memcpy(&hdr, file.data(), sizeof(hdr));
             if (!isRvid(hdr) || hdr.width == 0 || hdr.height == 0 || hdr.frameCount == 0
-                || hdr.keyframeCount == 0)
+                || hdr.indexCount != hdr.frameCount)
             {
                 check(false, "tMOV " + std::to_string(id) + " wrote a coherent .rvid");
                 continue;
             }
 
-            // Walk the frames the way a player would, and check the keyframe
-            // index actually points at frame starts.
-            std::size_t pos = sizeof(hdr)
-                            + static_cast<std::size_t>(hdr.keyframeCount) * sizeof(RvidKeyframe);
+            // Walk the frames the way a player would, and check the index
+            // actually points at frame starts.
+            RvidFrameEntry firstEntry{};
+            std::memcpy(&firstEntry, file.data() + sizeof(hdr), sizeof(firstEntry));
+            check(firstEntry.offset
+                      >= sizeof(hdr)
+                             + static_cast<std::size_t>(hdr.indexCount)
+                                   * sizeof(RvidFrameEntry),
+                  "tMOV " + std::to_string(id) + ": frame 0 starts at or after the index");
+            std::size_t pos = firstEntry.offset;
             std::vector<std::size_t> starts;
             std::uint32_t largest = 0;
             bool walked = true;
@@ -371,73 +279,113 @@ int main()
                 pos += sizeof(fh) + fh.byteCount;
             }
             check(walked && pos == file.size(),
-                  "tMOV " + std::to_string(id) + ": the frames tile the file exactly");
+                  "tMOV " + std::to_string(id) + ": the frames tile the file from frame 0 onwards");
             check(largest == hdr.largestFrameBytes,
                   "tMOV " + std::to_string(id) + ": largestFrameBytes is the real maximum");
 
-            bool indexOk = true;
-            for (std::uint32_t n = 0; n < hdr.keyframeCount; ++n)
+            // One entry per frame, in order, each pointing at that frame's start.
+            // Raw frames predict from nothing, so every frame is an entry point and
+            // the index is what makes seeking to one O(1).
+            bool indexOk = starts.size() == hdr.frameCount;
+            for (std::uint32_t n = 0; n < hdr.indexCount && indexOk; ++n)
             {
-                RvidKeyframe kf{};
-                std::memcpy(&kf, file.data() + sizeof(hdr) + n * sizeof(kf), sizeof(kf));
-                indexOk = indexOk && kf.frame < hdr.frameCount
-                          && kf.frame < starts.size() && starts[kf.frame] == kf.offset;
+                RvidFrameEntry fe{};
+                std::memcpy(&fe, file.data() + sizeof(hdr) + n * sizeof(fe), sizeof(fe));
+                indexOk = fe.frame == n && n < starts.size() && starts[n] == fe.offset;
             }
-            check(indexOk, "tMOV " + std::to_string(id) + ": the keyframe index points at frames");
+            check(indexOk,
+                  "tMOV " + std::to_string(id) + ": the index names every frame in order");
 
-            // Two frames out as PPM, so the result can be looked at.
-            if (dumped < 3 && v->sampleCount > 20)
+            // --- the quantiser ---------------------------------------------
+            //
+            // Frame 20 out of the container, the same frame out of ffmpeg, and
+            // the same frame downscaled the way a still would have been. The
+            // first pair must be IDENTICAL -- that is the whole claim of storing
+            // raw texels. The second is the seam measurement: ffmpeg scales in
+            // gamma space and downscaleToTexels averages in linear light, and if
+            // that gap were large an overlay would not match the card under it.
+            if (dumped < 3 && m.frames > 25 && starts.size() > 20)
             {
-                std::unique_ptr<VideoDecoder> dec;
-                if (v->codec == "cvid")
-                    dec.reset(new CinepakDecoder(v->width, v->height));
-                else
-                    dec.reset(new QtRleDecoder(v->width, v->height, v->depth, {}));
+                RvidFrameHeader fh{};
+                std::memcpy(&fh, file.data() + starts[20], sizeof(fh));
+                const bool repeat = (fh.flags & kFrameRepeat) != 0;
+                const std::size_t pixels =
+                    static_cast<std::size_t>(vr.width) * vr.height;
 
-                RvidSettings settings;
-                settings.profile = vr.profile;
-                const int padW = (vr.width + 7) / 8 * 8;
-                const int padH = (vr.height + 7) / 8 * 8;
-                RvidDecoder rd(padW, padH, settings);
-
-                bool ok = true;
-                for (std::uint32_t n = 0; n < 20 && n < hdr.frameCount; ++n)
+                fs::path staged;
+                std::string stageErr;
                 {
-                    RvidFrameHeader fh{};
-                    std::memcpy(&fh, file.data() + starts[n], sizeof(fh));
-                    const std::uint8_t *payload =
-                        file.data() + starts[n] + sizeof(fh) + fh.audioBytes;
-                    ok = ok
-                         && rd.decode(payload, fh.byteCount - fh.audioBytes,
-                                      fh.type
-                                          == static_cast<std::uint8_t>(RvidFrameType::Intra));
-
-                    if (n < v->samples.size())
-                        dec->decode(bytes.data() + v->samples[n].offset,
-                                    v->samples[n].size);
+                    // The probe deleted its own copy; stage one to read frames from.
+                    staged = outDir / (std::to_string(id) + ".mov");
+                    FILE *sf = std::fopen(staged.string().c_str(), "wb");
+                    if (sf != nullptr)
+                    {
+                        std::fwrite(bytes.data(), 1, bytes.size(), sf);
+                        std::fclose(sf);
+                    }
                 }
-                check(ok, "tMOV " + std::to_string(id) + ": 20 frames decode from the file");
 
-                const auto srcTexels = downscaleToTexels(dec->rgb().data(), v->width,
-                                                         v->height, vr.width, vr.height);
-                const std::string base =
-                    (outDir / (std::string(rivendata::stackName(stack.id)) + "-"
-                               + std::to_string(id)))
-                        .string();
-                writePpm(base + "-source.ppm", srcTexels, vr.width, vr.height);
-                writePpm(base + "-rvid.ppm", frameToTexels(rd.frame(), vr.width, vr.height),
-                         vr.width, vr.height);
-                ++dumped;
+                const auto scaled = lastFrameOf(ff, staged, 21, m.width, m.height,
+                                                vr.width, vr.height);
+                const auto native =
+                    lastFrameOf(ff, staged, 21, m.width, m.height, 0, 0);
+
+                if (!repeat && scaled.size() == pixels * 3)
+                {
+                    const Texel *stored = reinterpret_cast<const Texel *>(
+                        file.data() + starts[20] + sizeof(fh) + fh.audioBytes);
+                    const auto ours = downscaleToTexels(scaled.data(), vr.width,
+                                                        vr.height, vr.width, vr.height);
+                    check(std::vector<Texel>(stored, stored + pixels) == ours,
+                          "tMOV " + std::to_string(id)
+                              + ": the stored frame is exactly our quantiser's output");
+
+                    if (native.size()
+                        == static_cast<std::size_t>(m.width) * m.height * 3)
+                    {
+                        const auto viaStills = downscaleToTexels(
+                            native.data(), m.width, m.height, vr.width, vr.height);
+                        double mean = 0.0;
+                        int worst = 0;
+                        texelDelta(ours, viaStills, mean, worst);
+                        worstMean = std::max(worstMean, mean);
+                        worstMax = std::max(worstMax, worst);
+                        ++parityChecked;
+
+                        const std::string base =
+                            (outDir / (std::string(rivendata::stackName(stack.id)) + "-"
+                                       + std::to_string(id)))
+                                .string();
+                        writePpm(base + "-ffmpeg-scaled.ppm", ours, vr.width, vr.height);
+                        writePpm(base + "-stills-scaled.ppm", viaStills, vr.width,
+                                 vr.height);
+                    }
+                    ++dumped;
+                }
+                fs::remove(staged, ec);
             }
         }
     }
 
-    std::printf("video: %d movies -- %d cvid, %d rle, %d other, %d with audio\n", movies,
-                cvid, rle, other, withAudio);
+    std::printf("video: %d movies, %d with audio, %d with no video stream\n", movies,
+                withAudio, noVideo);
+    for (const auto &[codec, n] : codecs)
+        std::printf("  %-8s %d\n", codec.c_str(), n);
     check(movies > 0, "the install has movies");
-    check(other == 0, "every movie uses a codec the converter decodes");
-    check(badSamples == 0, "every video sample the tables describe was located");
-    check(badRanges == 0, "no sample points outside its resource");
+    check(noVideo == 0, "ffprobe describes a video stream in every movie");
+
+    if (parityChecked > 0)
+    {
+        // The threshold is a REGRESSION guard, not a quality bar: the measured
+        // numbers on a 5-CD install are well inside it, and the point is to
+        // notice if a change to either scaler moves them.
+        std::printf("  scaler parity over %d frames: mean %.3f, worst %d "
+                    "(of 31 levels)\n",
+                    parityChecked, worstMean, worstMax);
+        check(worstMean < 1.5,
+              "ffmpeg's scaling and the stills' scaling agree on average");
+        check(worstMax <= 12, "ffmpeg's scaling and the stills' scaling never diverge wildly");
+    }
 
     if (converted > 0)
         std::printf("  converted %d movies, %llu bytes; frames in %s\n", converted,

@@ -59,6 +59,9 @@ struct Source
     std::filesystem::path installerArchive;
     /// extras.mhk, when the install has it unpacked already.
     std::filesystem::path extrasArchive;
+    /// riven.exe / rivendmo.exe, when the install has it unpacked. Riven's
+    /// cursors are PE resources in it and are nowhere else.
+    std::filesystem::path executable;
 
     bool valid() const { return layout != SourceLayout::Unknown && !stacks.empty(); }
     const StackSource *find(rivendata::StackId id) const;

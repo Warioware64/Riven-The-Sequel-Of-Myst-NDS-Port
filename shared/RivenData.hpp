@@ -36,6 +36,8 @@
 #include <yas/serialize.hpp>
 #include <yas/std_types.hpp>
 
+#include "RivenVars.hpp"
+
 namespace rivendata
 {
 
@@ -52,7 +54,7 @@ using i32 = std::int32_t;
 /// Bump on ANY change to a struct below, including field order. yas binary
 /// archives are not self-describing: without this a converter/ROM mismatch
 /// deserializes garbage silently instead of failing.
-inline constexpr u16 kSchemaVersion = 1;
+inline constexpr u16 kSchemaVersion = 2;
 
 /// Fixed-size header written raw ahead of the yas payload in stacks/<stack>.bin.
 /// Read it with a plain fread before handing the rest to yas.
@@ -80,8 +82,13 @@ inline bool headerLooksValid(const StackFileHeader &h)
 // ---------------------------------------------------------------------------
 
 /// Riven's card view. The game window is 608x436: this 608x392 picture area
-/// plus a 44px inventory strip, which on the DS lives on the top screen.
-/// riven_graphics.cpp:331-339.
+/// plus a 44px inventory strip. riven_graphics.cpp:331-339.
+///
+/// The strip does NOT live on the top screen, which an earlier note here said it
+/// would: the top screen is not a touch screen, and the strip's whole purpose is
+/// to be clicked. It lives in the lower letterbox band of the bottom screen --
+/// see source/render/Inventory.hpp, which also explains why the icons there are
+/// not drawn at the scale everything else uses.
 inline constexpr int kCardW = 608;
 inline constexpr int kCardH = 392;
 
@@ -485,7 +492,16 @@ struct Stack
     std::vector<u32> rmap;                      ///< local card id -> global id
     std::array<NameList, kNameListCount> names;
 
-    template <class Ar> void serialize(Ar &ar) { ar & id & cards & rmap & names; }
+    /// names[kVariableNames] resolved to the global enum, index for index. The
+    /// converter fills this so the runtime never has to look at a variable name:
+    /// a script's variable index is a subscript here and the result is the key.
+    /// Entries the enum does not know are VarId::Unknown (RivenVars.hpp).
+    std::vector<VarId> variableIds;
+
+    template <class Ar> void serialize(Ar &ar)
+    {
+        ar & id & cards & rmap & names & variableIds;
+    }
 
     /// Cards are sorted by id, so this is a binary search. Returns nullptr when
     /// the stack has no card with that id (RMAP lists ids that have no CARD

@@ -89,15 +89,15 @@ add_library(riven_convert_core STATIC
     core/src/Options.cpp
     core/src/Preflight.cpp
     core/src/Progress.cpp
+    core/src/installer/Dcl.cpp
+    core/src/installer/InstallerArchive.cpp
+    core/src/pe/PeCursors.cpp
+    core/src/cursor/CursorPipeline.cpp
     core/src/mhk/Archive.cpp
     core/src/mhk/CardParse.cpp
     core/src/mhk/MovieList.cpp
     core/src/mhk/WaterEffect.cpp
-    core/src/mov/QuickTime.cpp
-    core/src/mov/Cinepak.cpp
-    core/src/mov/QtRle.cpp
-    core/src/rvid/RvidEncoder.cpp
-    core/src/rvid/RvidDecoder.cpp
+    core/src/ffmpeg/FFmpeg.cpp
     core/src/rvid/VideoPipeline.cpp
     core/src/image/ImagePipeline.cpp
     core/src/image/Lz77.cpp
@@ -168,11 +168,39 @@ else()
 endif()
 
 if(BUILD_TESTING)
-    foreach(t schema_roundtrip archive atomic_write cards image sound video)
+    foreach(t schema_roundtrip archive atomic_write cards image sound video installer
+              transition)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE riven_convert_core)
         add_test(NAME ${t} COMMAND test_${t})
     endforeach()
+
+    # The container reader the DS uses, compiled for the HOST. It is the only
+    # device-side file this build touches, and it is deliberately free of <nds.h>
+    # so that it can be: on hardware nothing can check that a movie was read the
+    # way it was written.
+    # The .rcur reader the DS uses, compiled for the HOST -- same argument as
+    # test_rvid_arm9 below, and the only place the tile ordering of a sprite cel
+    # can be checked at all.
+    add_executable(test_rcur_arm9
+        tests/test_rcur_arm9.cpp
+        "${REPO_ROOT}/source/render/RcurFile.cpp")
+    target_include_directories(test_rcur_arm9 PRIVATE "${REPO_ROOT}/source")
+    target_link_libraries(test_rcur_arm9 PRIVATE riven_convert_core)
+    if(NOT MSVC)
+        target_compile_options(test_rcur_arm9 PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME rcur_arm9 COMMAND test_rcur_arm9)
+
+    add_executable(test_rvid_arm9
+        tests/test_rvid_arm9.cpp
+        "${REPO_ROOT}/source/rvid/RvidFile.cpp")
+    target_include_directories(test_rvid_arm9 PRIVATE "${REPO_ROOT}/source")
+    target_link_libraries(test_rvid_arm9 PRIVATE riven_convert_core)
+    if(NOT MSVC)
+        target_compile_options(test_rvid_arm9 PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME rvid_arm9 COMMAND test_rvid_arm9)
 
     # RIVEN_TEST_DATA is deliberately NOT set as a test property: a
     # set_tests_properties(ENVIRONMENT) captures the value at CONFIGURE time and

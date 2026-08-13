@@ -47,6 +47,9 @@ struct ConversionResult
     int effectsWritten = 0;
     int soundsWritten = 0;
     int moviesWritten = 0;
+    /// Cels, not files: both of these are one packed set each.
+    int cursorsWritten = 0;
+    int extrasWritten = 0;
     /// Frames across every movie converted, which is the number that says how
     /// much work the video stage actually did.
     std::uint64_t videoFrames = 0;

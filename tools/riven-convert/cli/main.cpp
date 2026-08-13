@@ -19,7 +19,8 @@
 
 #include "riven/Converter.hpp"
 #include "riven/Preflight.hpp"
-#include "riven/QuickTime.hpp"
+#include "riven/FFmpeg.hpp"
+#include "riven/VideoPipeline.hpp"
 
 namespace
 {
@@ -44,14 +45,17 @@ namespace
             "  --no-water          skip the water effects\n"
             "  --no-audio          skip the sounds\n"
             "  --no-video          skip the movies (by far the longest stage)\n"
-            "  --video-quality N   RVID quantiser scale, percent. 100 is the\n"
-            "                      default; 60 is about a third the size\n"
-            "  -j, --jobs N        movies to encode at once (default: cores - 1)\n"
+            "  --no-cursors        skip Riven's own cursors (read from riven.exe)\n"
+            "  --no-extras         skip the inventory art (read from extras.mhk)\n"
+            "  --ffmpeg <path>     the ffmpeg binary, or the folder holding it. The\n"
+            "                      movie stage decodes through ffmpeg; without this\n"
+            "                      it is looked for on PATH. Not needed with\n"
+            "                      --no-video\n"
             "  --cards-only        only the card graph -- fast, enough to test navigation\n"
             "  --force             redo assets that are already up to date\n"
-            "  --movie-report      list what is inside the movies and exit. Reads\n"
-            "                      headers only, writes nothing; the RVID codec is\n"
-            "                      designed against these numbers (docs/video.md)\n"
+            "  --movie-report      list what is inside the movies and exit. Probes\n"
+            "                      with ffprobe, writes no output; the numbers in\n"
+            "                      docs/video.md come from here\n"
             "  --stack <name>      restrict to one stack (repeatable): aspit, bspit,\n"
             "                      gspit, jspit, ospit, pspit, rspit, tspit\n"
             "  -q, --quiet         only warnings and errors\n"
@@ -141,17 +145,33 @@ namespace
     }
 
     /// What is actually inside this copy of the game's movies. Nothing is
-    /// written and nothing is decoded: this reads the QuickTime headers so the
-    /// RVID format in docs/video.md can be designed against measurements
-    /// instead of assumptions. See riven/QuickTime.hpp.
-    int movieReport(const riven::SourceInfo &info)
+    /// written and nothing is decoded: each movie is staged and handed to
+    /// ffprobe, so the RVID design in docs/video.md can be argued from
+    /// measurements rather than assumptions.
+    ///
+    /// This is slower than it was when the converter carried its own QuickTime
+    /// header parser -- it stages every tMOV and runs two ffprobe calls over it,
+    /// which for 1055 movies is a couple of gigabytes of temporary writes and a
+    /// minute or so. It is a diagnostic command, run by hand, and the parser it
+    /// replaced was 543 lines that existed for nothing else.
+    int movieReport(const riven::SourceInfo &info, const riven::Options &opts)
     {
+        const riven::FFmpegPaths ff = riven::findFFmpeg(opts.ffmpegPath);
+        std::string version;
+        std::string ffError;
+        if (!riven::probeFFmpeg(ff, version, ffError))
+        {
+            std::fprintf(stderr, "%s\n", ffError.c_str());
+            return 2;
+        }
+        std::printf("%s\n", version.c_str());
+
         struct Tally
         {
             int movies = 0;
             std::uint64_t bytes = 0;
         };
-        std::map<std::string, Tally> videoCodecs, audioCodecs;
+        std::map<std::string, Tally> videoCodecs;
         std::map<std::string, int> sizes, audioFormats;
         int total = 0, unreadable = 0, silent = 0;
         std::uint64_t totalBytes = 0;
@@ -182,64 +202,55 @@ namespace
                 continue;
 
             std::printf("\n%s\n", rivendata::stackName(si.id));
-            for (const auto &m : riven::probeMovies(set))
+            for (const std::uint16_t id : set.resourceIds("tMOV"))
             {
+                const auto bytes = set.readMovie(id);
+                const riven::MovieProbe m =
+                    bytes.empty()
+                        ? riven::MovieProbe{}
+                        : riven::probeMovieBytes(bytes, id, ff);
+
                 ++total;
                 totalBytes += m.resourceBytes;
                 if (!m.ok)
                 {
                     ++unreadable;
-                    std::printf("  %5u  %s\n", m.id, m.error.c_str());
+                    std::printf("  %5u  %s\n", id,
+                                m.error.empty() ? "could not be read" : m.error.c_str());
                     continue;
                 }
 
-                const riven::MovieTrack *v = m.video();
-                const riven::MovieTrack *a = m.audio();
-                if (v != nullptr)
-                {
-                    char box[16];
-                    std::snprintf(box, sizeof(box), "%dx%d", v->width, v->height);
-                    ++sizes[box];
-                    auto &t = videoCodecs[v->codec];
-                    ++t.movies;
-                    t.bytes += v->dataBytes;
-                    totalSeconds += v->seconds();
+                char box[16];
+                std::snprintf(box, sizeof(box), "%dx%d", m.width, m.height);
+                ++sizes[box];
+                auto &t = videoCodecs[m.videoCodec];
+                ++t.movies;
+                t.bytes += m.resourceBytes;
+                totalSeconds += m.seconds;
 
-                    const bool fullscreen =
-                        v->width >= rivendata::kCardW && v->height >= rivendata::kCardH;
-                    Class &c = fullscreen ? full : lite;
-                    ++c.movies;
-                    c.frames += v->sampleCount;
-                    c.bytes += m.resourceBytes;
-                    c.seconds += v->seconds();
-                    if (!fullscreen)
-                    {
-                        widest = std::max(widest, v->width);
-                        tallest = std::max(tallest, v->height);
-                    }
-
-                    std::printf("  %5u  %-4s %9s %6u frames %5.1f fps %6.1fs %8s",
-                                m.id, v->codec.c_str(), box, v->sampleCount, v->rate(),
-                                v->seconds(),
-                                riven::humanBytes(m.resourceBytes).c_str());
-                }
-                else
+                Class &c = m.fullscreen() ? full : lite;
+                ++c.movies;
+                c.frames += static_cast<std::uint64_t>(m.frames);
+                c.bytes += m.resourceBytes;
+                c.seconds += m.seconds;
+                if (!m.fullscreen())
                 {
-                    std::printf("  %5u  (no video track)                                  ",
-                                m.id);
+                    widest = std::max(widest, m.width);
+                    tallest = std::max(tallest, m.height);
                 }
 
-                if (a != nullptr)
+                std::printf("  %5u  %-6s %9s %6d frames %5.1f fps %6.1fs %8s", id,
+                            m.videoCodec.c_str(), box, m.frames, m.rate(), m.seconds,
+                            riven::humanBytes(m.resourceBytes).c_str());
+
+                if (m.hasAudio())
                 {
-                    auto &t = audioCodecs[a->codec];
-                    ++t.movies;
-                    t.bytes += a->dataBytes;
                     char fmt[48];
-                    std::snprintf(fmt, sizeof(fmt), "%s %d Hz %dch", a->codec.c_str(),
-                                  a->sampleRate, a->channels);
+                    std::snprintf(fmt, sizeof(fmt), "%s %d Hz %dch",
+                                  m.audioCodec.c_str(), m.audioRate, m.audioChannels);
                     ++audioFormats[fmt];
-                    std::printf("  audio %-4s %5d Hz %dch", a->codec.c_str(), a->sampleRate,
-                                a->channels);
+                    std::printf("  audio %-6s %5d Hz %dch", m.audioCodec.c_str(),
+                                m.audioRate, m.audioChannels);
                 }
                 else
                 {
@@ -255,9 +266,9 @@ namespace
             std::printf("%d could not be read\n", unreadable);
         std::printf("%d have no audio track\n", silent);
 
-        std::printf("\nvideo codecs:\n");
+        std::printf("\nvideo codecs (as ffprobe names them):\n");
         for (const auto &[codec, t] : videoCodecs)
-            std::printf("  %-6s %5d movies, %s of samples\n", codec.c_str(), t.movies,
+            std::printf("  %-8s %5d movies, %s of resource\n", codec.c_str(), t.movies,
                         riven::humanBytes(t.bytes).c_str());
         std::printf("audio tracks:\n");
         for (const auto &[fmt, n] : audioFormats)
@@ -303,33 +314,24 @@ int main(int argc, char **argv)
             opts.audio = false;
         else if (a == "--no-video")
             opts.video = false;
-        else if (a == "-j" || a == "--jobs")
+        else if (a == "--no-cursors")
+            opts.cursors = false;
+        else if (a == "--no-extras")
+            opts.extras = false;
+        else if (a == "--ffmpeg")
         {
             if (++i >= argc)
             {
-                std::fprintf(stderr, "--jobs needs a count\n");
+                std::fprintf(stderr, "--ffmpeg needs a path\n");
                 return 2;
             }
-            opts.jobs = std::atoi(argv[i]);
-        }
-        else if (a == "--video-quality")
-        {
-            if (++i >= argc)
-            {
-                std::fprintf(stderr, "--video-quality needs a percentage\n");
-                return 2;
-            }
-            opts.videoQuality = std::atoi(argv[i]);
-            if (opts.videoQuality < 10 || opts.videoQuality > 400)
-            {
-                std::fprintf(stderr, "--video-quality must be between 10 and 400\n");
-                return 2;
-            }
+            opts.ffmpegPath = argv[i];
         }
         else if (a == "--cards-only")
         {
             opts.cards = true;
             opts.images = opts.hires = opts.water = opts.audio = opts.video = false;
+            opts.cursors = opts.extras = false;
         }
         else if (a == "--force")
             opts.force = true;
@@ -398,7 +400,7 @@ int main(int argc, char **argv)
     }
 
     if (wantMovieReport)
-        return movieReport(info);
+        return movieReport(info, opts);
 
     if (opts.dest.empty())
     {

@@ -18,6 +18,9 @@ public:
     std::string fatDeviceCPP;          ///< same as a std::string, for path building
     bool hasFat = false;               ///< FAT init succeeded and a drive is mounted
     bool hasNitroFS = false;           ///< NitroFS (ROM filesystem) available
+    /// The top-screen console is up, so std::printf reaches the player. Every
+    /// diagnostic in the engine is a printf; without this they go nowhere.
+    bool hasConsole = false;
 
     /// nitroFSInit + fatInitDefault + fatGetDefaultDrive, then create the data
     /// directories. Safe to call once at startup.
@@ -63,6 +66,16 @@ public:
     /// Look for the pieces the engine cannot start without. Cheap (a handful of
     /// filesystem probes), so main() can call it before anything else reads data.
     DataStatus CheckData() const;
+
+    /// Report the pieces the engine can start WITHOUT, to the top-screen console.
+    ///
+    /// Deliberately not part of CheckData: a conversion run with --no-video is a
+    /// playable game with no movies, and halting on it would be worse than the
+    /// silence it replaces. But an absent video/ directory is also exactly what a
+    /// player who thinks video is broken needs to be told, and nothing else in the
+    /// engine is in a position to say it -- by the time a card wants a movie, the
+    /// only symptom is one missing file at a time.
+    void ReportOptionalData() const;
 
     /// Two lines of player-facing explanation for a CheckData() result: what is
     /// wrong (line 1) and what to do about it (line 2). Never null.

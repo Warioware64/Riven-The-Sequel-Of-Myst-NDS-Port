@@ -106,6 +106,52 @@ std::vector<std::int16_t> downmixToMono(const std::vector<std::int16_t> &pcm, in
     return mono;
 }
 
+std::vector<std::int16_t> downmixToMonoWithMakeup(const std::vector<std::int16_t> &pcm,
+                                                  int channels)
+{
+    std::vector<std::int16_t> mono = downmixToMono(pcm, channels);
+    if (channels <= 1 || mono.empty())
+        return mono;
+
+    const auto peakOf = [](const std::vector<std::int16_t> &v) {
+        std::int32_t peak = 0;
+        for (const std::int16_t s : v)
+        {
+            // Negated in 32 bits: -(-32768) does not fit in an int16_t.
+            const std::int32_t mag = s < 0 ? -static_cast<std::int32_t>(s) : s;
+            if (mag > peak)
+                peak = mag;
+        }
+        return peak;
+    };
+
+    const std::int32_t peakMono = peakOf(mono);
+    std::int32_t peakSrc = peakOf(pcm);
+    if (peakMono == 0 || peakSrc <= peakMono)
+        return mono; // silence, or an average that cancelled nothing
+
+    // The ceiling. Without it, two channels that are near-exact opposites give a
+    // mono peak of a handful of LSBs and a ratio in the thousands.
+    if (peakSrc > peakMono * 2)
+        peakSrc = peakMono * 2;
+
+    for (std::int16_t &s : mono)
+    {
+        const std::int64_t num = static_cast<std::int64_t>(s) * peakSrc * 2;
+        const std::int64_t bias = s < 0 ? -peakMono : peakMono; // round away from zero
+        std::int64_t v = (num + bias) / (static_cast<std::int64_t>(peakMono) * 2);
+        // peakSrc is a real sample magnitude and the scale is peakSrc/peakMono, so
+        // the loudest sample lands exactly on it and cannot exceed 32767 -- except
+        // for the one value 32768 a peak of -32768 would produce.
+        if (v > 32767)
+            v = 32767;
+        else if (v < -32768)
+            v = -32768;
+        s = static_cast<std::int16_t>(v);
+    }
+    return mono;
+}
+
 std::vector<std::int16_t> resampleMono(const std::vector<std::int16_t> &pcm, int srcRate,
                                        int dstRate)
 {

@@ -248,6 +248,12 @@ Source detectSource(const fs::path &root)
 
     src.installerArchive = findFileCI(allFiles, "arcriven.z");
     src.extrasArchive = findFileCI(allFiles, "extras.mhk");
+    // The cursors live in the executable's PE resources (riven.cpp:139-143).
+    // An installed copy and the DVD/GOG release have it loose; the CD release
+    // has it only inside arcriven.z, which the converter reads instead.
+    src.executable = findFileCI(allFiles, "riven.exe");
+    if (src.executable.empty())
+        src.executable = findFileCI(allFiles, "rivendmo.exe");
 
     return src;
 }

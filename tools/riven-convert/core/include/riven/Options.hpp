@@ -28,6 +28,8 @@ enum class Stage
     Water,   ///< sfxe/<stack>/<id>.rsfx -- water-effect frame scripts
     Audio,   ///< sound/<stack>/<id>.rsnd -- mono IMA ADPCM
     Video,   ///< video/<stack>/<id>.rvid -- the RVID codec
+    Cursors, ///< cursors/cursors.rcur -- Riven's own cursors, from riven.exe
+    Extras,  ///< extras/inventory.rcur -- the inventory books, from extras.MHK
 };
 
 const char *stageName(Stage s);
@@ -46,15 +48,17 @@ struct Options
     bool water = true;
     bool audio = true;
     bool video = true;
+    /// Not per-stack, unlike everything above: both come from files that
+    /// belong to the game as a whole rather than to an age.
+    bool cursors = true;
+    bool extras = true;
 
-    /// RVID quantiser scale, as a percentage: 100 is the tuned default, lower
-    /// is smaller and softer, higher is larger and sharper. Only the three AC
-    /// coefficients follow it -- see rvidQuantSteps.
-    int videoQuality = 100;
 
-    /// Movies to encode at once. 0 picks one per core, less one. Only the
-    /// video stage uses it; everything else is fast enough to stay serial.
-    int jobs = 0;
+    /// Where ffmpeg is. The video stage decodes through it (riven/FFmpeg.hpp),
+    /// so this is the one external tool the converter needs. Empty means "search
+    /// PATH", which is what it is on any machine that installed ffmpeg normally;
+    /// it may be the binary itself or the directory holding it.
+    std::filesystem::path ffmpegPath;
 
     /// Reconvert assets whose output is already up to date. Off by default:
     /// skipping finished work is what makes a cancelled run resumable and a
@@ -73,7 +77,11 @@ struct Options
     void normalise();
 
     /// True when nothing at all would be produced.
-    bool empty() const { return !cards && !images && !hires && !water && !audio && !video; }
+    bool empty() const
+    {
+        return !cards && !images && !hires && !water && !audio && !video && !cursors
+            && !extras;
+    }
 };
 
 /// Named stage combinations offered in the UI.

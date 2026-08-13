@@ -25,12 +25,20 @@ void Global::Init()
         EnsureDataDirs();
     }
 
+    // NEA is still initialised, but only for what is not the 3D engine: the
+    // cooperative thread pool, the maxmod stream, NEA_WaitForVBL and the vblank
+    // handler all key off ne_execution_mode being set. Nothing draws through it
+    // any more -- the card view and the movies are bitmap backgrounds now (see
+    // source/render/BgSurface.hpp for why).
     NEA_Init3D();
-    NEA_MainScreenSetOnBottom();
     swiWaitForVBlank();
     swiWaitForVBlank();
-    NEA_SetTexPaletteBank(static_cast<NEA_VRAMBankFlags>(NEA_VRAM_F | NEA_VRAM_G));
-    NEA_TextureSystemReset(0, 0, static_cast<NEA_VRAMBankFlags>(NEA_VRAM_AB));
+
+    // NEA_Init3D claims A, B, C and D for the texture pool and E for texture
+    // palettes. Give all of it back: with nothing textured, every one of those
+    // banks is wanted for something better.
+    NEA_TextureSystemEnd();
+    NEA_SetTexPaletteBank(static_cast<NEA_VRAMBankFlags>(0));
 
     // Background-task pool (NEAThread.h). Cooperative, single CPU: this buys
     // RESPONSIVENESS, never throughput — a task runs only while the main thread is
@@ -47,19 +55,52 @@ void Global::Init()
     NEA_ThreadSystemReset(1, 32 * 1024);
 
     NEA_Hw2DVRAMConfig hw2dCfg = {};
+    // main_bg stays 0: NEA's background allocator only models 8 blocks of 16 KB
+    // per engine and reserves the first for maps, so it cannot hand out the
+    // 128 KB-aligned bitmap bases BgSurface needs -- and it cannot address bank D
+    // at all. The main backgrounds are claimed by hand below instead.
     hw2dCfg.main_bg = static_cast<NEA_VRAMBankFlags>(0);
     // Bank E drives main-engine OBJ sprites (the touch cursor). NEA only allows
     // main OBJ in banks A/B/E; A/B are the texture pool, so E (free — C is sub bg,
     // F/G are texture palette) is the one usable choice. main_obj=D fails
     // NEA_Hw2DInit (D can't be MAIN_SPRITE) and takes the sub bg down with it.
     //
-    // D is deliberately left unclaimed here. The FULL-profile video decoder wants
-    // D (+E) for its residual scratch, and it takes them only for the duration of
-    // a fullscreen movie, when no card and no cursor are on screen.
     hw2dCfg.main_obj = NEA_VRAM_E;
     hw2dCfg.sub_bg = NEA_VRAM_C;
     hw2dCfg.sub_obj = static_cast<NEA_VRAMBankFlags>(0);
     NEA_Hw2DInit(&hw2dCfg);
+
+    // The bottom screen: video mode 5, so BG2 and BG3 can be extended-rotation
+    // bitmaps. Three things here are load-bearing and each of them fails quietly:
+    //
+    //  * The mode must change with a READ-MODIFY-WRITE. videoSetMode() assigns
+    //    the whole of DISPCNT and would wipe the sprite-enable and 1D-128 mapping
+    //    bits the oamInit() inside NEA_Hw2DInit has just set.
+    //  * The mode must be 5 BEFORE the first bgInit. libnds latches whether a
+    //    layer is text from the video mode at bgInit time, so a bitmap layer set
+    //    up while the mode is still 0 is silently treated as tiled.
+    //  * lcdMainOnBottom() has to be called here. NEA_MainScreenSetOnBottom only
+    //    sets a flag that ne_process_common() applies, and ne_process_common runs
+    //    from NEA_Process, which this port no longer calls. Without this line the
+    //    game draws on the top screen and the console on the touch screen.
+    videoBgDisable(0); // MODE_0_3D left BG0 enabled for the 3D output
+    REG_DISPCNT = (REG_DISPCNT & ~(7u | ENABLE_3D | DISPLAY_BG0_ACTIVE))
+                  | DISPLAY_VIDEO_MODE(5);
+    lcdMainOnBottom();
+
+    // The three card buffers. Main background VRAM is one contiguous window from
+    // 0x06000000, so these land on bitmap bases 0, 8 and 16 -- see BgSurface.hpp.
+    // Bank C is not in that window; it belongs to the sub engine.
+    vramSetBankA(VRAM_A_MAIN_BG_0x06000000);
+    vramSetBankB(VRAM_B_MAIN_BG_0x06020000);
+    vramSetBankD(VRAM_D_MAIN_BG_0x06040000);
+    // Freed along with the texture system: nothing has a palette to hold now.
+    vramSetBankF(VRAM_F_LCD);
+    vramSetBankG(VRAM_G_LCD);
+
+    // The backdrop, which is what the letterbox bands above and below the
+    // 256x165 card view show: both backgrounds are transparent there.
+    BG_PALETTE[0] = 0;
 
     // NEA_Hw2DInit leaves the sub engine in MODE_0_2D (all four layers tiled),
     // and NEA only auto-upgrades the mode for bitmap BGs on the *main* engine.
@@ -68,9 +109,26 @@ void Global::Init()
     // extended-rotation bitmaps.
     videoSetModeSub(MODE_5_2D);
 
-    // Black clear color for the main 3D engine — the letterbox bands above and
-    // below the 256x165 card view on the 256x192 bottom screen.
-    NEA_ClearColorSet(NEA_Black, 31, 63);
+    // Bank C is whatever was in it at power-on, and the top screen is pointed at
+    // it, so without this the player's first sight of the game is a screenful of
+    // noise. Cleared to zero with the backdrop black, which reads the same whether
+    // the layer showing it ends up paletted or direct-colour.
+    dmaFillWords(0, VRAM_C, 128 * 1024);
+    BG_PALETTE_SUB[0] = 0;
+
+    // The top screen is the log. Every diagnostic in this port is a std::printf --
+    // a movie that is not on the card, a card id a script asked for and the stack
+    // does not have, an external command nobody has written yet -- and on hardware
+    // stdout goes nowhere, so all of them are experienced as the game silently not
+    // doing something. A console on the sub engine costs one call and makes the
+    // whole set visible, with no work at any of the call sites.
+    //
+    // Mode 5 keeps BG0 and BG1 tiled (only BG2/BG3 became bitmaps above), so the
+    // console takes BG0. Map base 31 puts the map at the top of the 128 KB bank,
+    // well clear of the tiles at base 0; nothing else claims VRAM_C.
+    hasConsole = consoleInit(nullptr, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 0,
+                             false, true)
+                 != nullptr;
 }
 
 void Global::EnsureDataDirs()
@@ -113,6 +171,23 @@ Global::DataStatus Global::CheckData() const
         return DataStatus::NoImages;
 
     return DataStatus::Ok;
+}
+
+void Global::ReportOptionalData() const
+{
+    if (!hasFat)
+        return;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(videoDir(), ec))
+    {
+        // The single most likely explanation for "the game shows no video", and
+        // nothing downstream can tell it from a card that simply has no movie on
+        // it: activateMlst only ever learns about one missing file at a time.
+        std::printf("no video/ on the card: converted with --no-video?\n");
+    }
+    if (!std::filesystem::exists(cursorsDir(), ec))
+        std::printf("no cursors/ on the card: plain pointer\n");
 }
 
 const char *Global::DataStatusTitle(DataStatus s)

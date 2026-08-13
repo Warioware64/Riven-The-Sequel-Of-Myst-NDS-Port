@@ -132,6 +132,13 @@ namespace
         s.names[kCardNames].names = {"bspit_start", "bdome"};
         s.names[kCardNames].sortedIndex = {1, 0};
         s.names[kStackNames].names = {"ospit", "pspit", "rspit"};
+
+        // The variable list and the enum resolution the converter derives from
+        // it, including one name the enum does not know: the ROM subscripts
+        // variableIds by a script's variable index, so the two must stay the
+        // same length and the same order even where a name did not resolve.
+        s.names[kVariableNames].names = {"bBlrValve", "bHeat", "bNotAVariable"};
+        s.variableIds = {VarId::BBlrValve, VarId::BHeat, VarId::Unknown};
         return s;
     }
 } // namespace
@@ -180,6 +187,9 @@ int main()
               "name list survives");
         check(out.names[kCardNames].sortedIndex == in.names[kCardNames].sortedIndex,
               "name sort index survives");
+        check(out.variableIds == in.variableIds, "resolved variable ids survive");
+        check(out.variableIds.size() == out.names[kVariableNames].names.size(),
+              "variableIds stays index-parallel to the NAME 4 list");
 
         const Card &a = in.cards[0];
         const Card &b = out.cards[0];
@@ -217,6 +227,26 @@ int main()
               "commands nested inside a switch arm survive");
         check(changeStackGlobalCardId(cmds[2].branches[1].commands[0]) == 0x22118,
               "a changeStack nested inside a switch survives");
+    }
+
+    // --- the variable enum -------------------------------------------------
+    {
+        // Every enumerator has to round-trip through its on-disc name, because
+        // that name is what the converter matches a stack's NAME 4 entry against
+        // -- a duplicate or a typo silently sends a variable to the wrong slot.
+        for (int i = 1; i < kVarCount; ++i)
+        {
+            const auto v = static_cast<VarId>(i);
+            check(parseVarName(varName(v)) == v, "every VarId round-trips");
+            for (const char *p = varName(v); *p != '\0'; ++p)
+                check(!(*p >= 'A' && *p <= 'Z'), "every VarId name is lower case");
+        }
+        check(parseVarName("bblrvalve") == VarId::BBlrValve, "a real name resolves");
+        check(parseVarName("bBlrValve") == VarId::Unknown,
+              "parseVarName does not case-fold for its caller");
+        check(parseVarName("nosuchvariable") == VarId::Unknown,
+              "an unknown name is Unknown, not a wrong answer");
+        check(varName(VarId::Unknown)[0] == '\0', "Unknown has no name");
     }
 
     // --- lookups -----------------------------------------------------------

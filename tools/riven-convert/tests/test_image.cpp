@@ -8,6 +8,8 @@
 // The image parts run with RIVEN_TEST_DATA when it is set, and on synthetic
 // input otherwise, so the format is always covered even without game data.
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -44,6 +46,58 @@ namespace
         check(same, std::string("lz77 round-trips: ") + what);
         return same;
     }
+
+    // --- the quantiser, as it was written before it was made fast ------------
+    //
+    // downscaleToTexels' 5-bit quantiser was a linear scan for the bracketing
+    // levels plus a divide, per channel per pixel. It is now a binary search over
+    // precomputed cut points, which is the same function rearranged -- but "the
+    // same function rearranged" is exactly the claim that needs checking, because
+    // this decides the value of every pixel in the game and a mistake would look
+    // like a slightly different picture rather than like a bug.
+    //
+    // So the original stays here, verbatim in behaviour, as the reference.
+    // The types are float here for the same reason they are float in the
+    // production path: the point of the comparison is the rearrangement, not the
+    // precision, so anything else held identical.
+    struct ReferenceQuantiser
+    {
+        float toLinear[256]{};
+        float level5Linear[32]{};
+
+        ReferenceQuantiser()
+        {
+            for (int i = 0; i < 256; ++i)
+                toLinear[i] = std::pow(static_cast<float>(i) / 255.0f, 2.2f);
+            for (int i = 0; i < 32; ++i)
+                level5Linear[i] = toLinear[(i << 3) | (i >> 2)];
+        }
+
+        static float bayer(int x, int y)
+        {
+            static const int kBayer4[4][4] = {
+                {0, 8, 2, 10},
+                {12, 4, 14, 6},
+                {3, 11, 1, 9},
+                {15, 7, 13, 5},
+            };
+            return (static_cast<float>(kBayer4[y & 3][x & 3]) + 0.5f) / 16.0f - 0.5f;
+        }
+
+        int quantise(float linear, float dither) const
+        {
+            int lo = 0;
+            while (lo < 31 && level5Linear[lo + 1] <= linear)
+                ++lo;
+            if (lo >= 31)
+                return 31;
+            const float span = level5Linear[lo + 1] - level5Linear[lo];
+            if (span <= 0.0f)
+                return lo;
+            const float t = (linear - level5Linear[lo]) / span;
+            return (t + dither > 0.5f) ? lo + 1 : lo;
+        }
+    };
 } // namespace
 
 int main()
@@ -89,6 +143,89 @@ int main()
             const auto back = decompressLz77(packed.data(), cut);
             check(back.size() <= ramp.size(), "a truncated lz77 payload decodes safely");
         }
+    }
+
+    // --- the quantiser rearrangement ---------------------------------------
+    // Driven through downscaleToTexels at 1:1, where each destination pixel is
+    // exactly one source pixel, so the linear value reaching the quantiser is
+    // known and the reference can be evaluated against it. 256 columns x 16 rows
+    // covers every 8-bit value at every one of the 16 Bayer positions.
+    {
+        const ReferenceQuantiser ref;
+        const int w = 256, h = 16;
+        std::vector<std::uint8_t> src(static_cast<std::size_t>(w) * h * 3);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                std::uint8_t *p = &src[(static_cast<std::size_t>(y) * w + x) * 3];
+                // A different channel value per component, so a red/blue mix-up
+                // in the texel packing cannot pass either.
+                p[0] = static_cast<std::uint8_t>(x);
+                p[1] = static_cast<std::uint8_t>((x * 7 + 13) & 0xFF);
+                p[2] = static_cast<std::uint8_t>(255 - x);
+            }
+
+        const auto texels = downscaleToTexels(src.data(), w, h, w, h);
+        int mismatches = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                const std::uint8_t *p = &src[(static_cast<std::size_t>(y) * w + x) * 3];
+                const float d = ReferenceQuantiser::bayer(x, y);
+                const int r = ref.quantise(ref.toLinear[p[0]], d);
+                const int g = ref.quantise(ref.toLinear[p[1]], d);
+                const int b = ref.quantise(ref.toLinear[p[2]], d);
+                const rivendata::Texel want =
+                    static_cast<rivendata::Texel>(0x8000 | (b << 10) | (g << 5) | r);
+                if (texels[static_cast<std::size_t>(y) * w + x] != want)
+                    ++mismatches;
+            }
+        check(mismatches == 0, "the fast quantiser matches the original on every "
+                              "8-bit value at every dither position ("
+                                  + std::to_string(mismatches) + " differ)");
+
+        // And on averaged values, which is what a real downscale produces: the
+        // 1:1 case only ever hands the quantiser one of 256 exact levels.
+        std::mt19937 rng(20260812);
+        std::uniform_int_distribution<int> byte(0, 255);
+        const int aw = 64, ah = 64;
+        std::vector<std::uint8_t> noise(static_cast<std::size_t>(aw) * ah * 3);
+        for (auto &v : noise)
+            v = static_cast<std::uint8_t>(byte(rng));
+        const auto small = downscaleToTexels(noise.data(), aw, ah, 27, 27);
+        int averagedMismatches = 0;
+        for (int dy = 0; dy < 27; ++dy)
+            for (int dx = 0; dx < 27; ++dx)
+            {
+                const int x0 = dx * aw / 27, x1 = std::max((dx + 1) * aw / 27, x0 + 1);
+                const int y0 = dy * ah / 27, y1 = std::max((dy + 1) * ah / 27, y0 + 1);
+                float acc[3] = {0.0f, 0.0f, 0.0f};
+                int n = 0;
+                for (int sy = y0; sy < y1; ++sy)
+                    for (int sx = x0; sx < x1; ++sx, ++n)
+                        for (int c = 0; c < 3; ++c)
+                            acc[c] += ref.toLinear[noise[(static_cast<std::size_t>(sy) * aw + sx)
+                                                             * 3
+                                                         + c]];
+                const float d = ReferenceQuantiser::bayer(dx, dy);
+                const int r = ref.quantise(acc[0] / n, d);
+                const int g = ref.quantise(acc[1] / n, d);
+                const int b = ref.quantise(acc[2] / n, d);
+                const rivendata::Texel want =
+                    static_cast<rivendata::Texel>(0x8000 | (b << 10) | (g << 5) | r);
+                if (small[static_cast<std::size_t>(dy) * 27 + dx] != want)
+                    ++averagedMismatches;
+            }
+        check(averagedMismatches == 0,
+              "the fast quantiser matches the original on averaged values ("
+                  + std::to_string(averagedMismatches) + " of 729 differ)");
+
+        // The out-parameter form is what the video path calls in a loop; it has to
+        // agree with the returning form it replaced.
+        std::vector<rivendata::Texel> reused;
+        reused.assign(9999, 0x1234); // deliberately dirty and the wrong size
+        downscaleToTexels(src.data(), w, h, w, h, reused);
+        check(reused == texels, "the out-parameter downscale matches the returning one");
     }
 
     // --- downscale + encoders on synthetic input ---------------------------

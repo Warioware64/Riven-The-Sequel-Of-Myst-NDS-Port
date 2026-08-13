@@ -81,6 +81,7 @@ MainWindow::MainWindow()
     auto *layout = new QVBoxLayout(central);
     layout->addWidget(buildSourceGroup());
     layout->addWidget(buildDestGroup());
+    layout->addWidget(buildFFmpegGroup());
     layout->addWidget(buildStagesGroup());
 
     auto *splitter = new QSplitter(Qt::Vertical);
@@ -182,6 +183,33 @@ QWidget *MainWindow::buildDestGroup()
     return group;
 }
 
+QWidget *MainWindow::buildFFmpegGroup()
+{
+    // Its own group rather than a line in Destination: ffmpeg is the one thing
+    // the converter needs that is not part of the game or the card, and it is
+    // the one failure a user can fix without changing anything about the
+    // conversion. Reporting it here, before Start, is the whole point --
+    // discovering it at movie 1 of 1055 is two hours too late.
+    auto *group = new QGroupBox(tr("ffmpeg"));
+    auto *layout = new QVBoxLayout(group);
+
+    auto *row = new QHBoxLayout;
+    ffmpegEdit_ = new QLineEdit;
+    ffmpegEdit_->setPlaceholderText(tr("Leave empty to use the ffmpeg on your PATH"));
+    auto *browse = new QPushButton(tr("Browse..."));
+    row->addWidget(ffmpegEdit_, 1);
+    row->addWidget(browse);
+    layout->addLayout(row);
+
+    ffmpegStatus_ = new QLabel;
+    ffmpegStatus_->setWordWrap(true);
+    layout->addWidget(ffmpegStatus_);
+
+    connect(browse, &QPushButton::clicked, this, &MainWindow::browseFFmpeg);
+    connect(ffmpegEdit_, &QLineEdit::textChanged, this, [this] { refreshChecks(); });
+    return group;
+}
+
 QWidget *MainWindow::buildStagesGroup()
 {
     auto *group = new QGroupBox(tr("What to convert"));
@@ -237,11 +265,22 @@ QWidget *MainWindow::buildStagesGroup()
                 "of a conversion, and the largest thing on the card after the zoom art."),
              true);
 
+    addStage(cursorsBox_, 6, tr("Cursors"), tr("Riven's own hand and pointer cursors."),
+             tr("Read from riven.exe, or from program/arcriven.z on the CD release, "
+                "where the executable is not a file. Absent on a Mac install, in which "
+                "case the game falls back to a plain pointer."),
+             true);
+    addStage(extrasBox_, 7, tr("Inventory art"), tr("The books you carry."),
+             tr("Atrus's journal, Catherine's journal and the trap book, read from "
+                "extras.mhk -- which on the CD release is also inside arcriven.z. "
+                "Without these there is no way to open a journal."),
+             true);
+
     forceBox_ = new QCheckBox(tr("Rebuild everything"));
     forceBox_->setToolTip(
         tr("Off by default: anything already converted and still up to date is skipped, "
            "so a stopped conversion resumes and a re-run costs seconds."));
-    grid->addWidget(forceBox_, 6, 0);
+    grid->addWidget(forceBox_, 8, 0);
     connect(forceBox_, &QCheckBox::toggled, this, [this] { refreshChecks(); });
 
     layout->addLayout(grid);
@@ -336,7 +375,10 @@ riven::Options MainWindow::currentOptions() const
     o.water = waterBox_->isChecked();
     o.audio = audioBox_->isChecked();
     o.video = videoBox_->isChecked();
+    o.cursors = cursorsBox_->isChecked();
+    o.extras = extrasBox_->isChecked();
     o.force = forceBox_->isChecked();
+    o.ffmpegPath = ffmpegEdit_->text().toStdString();
     o.normalise();
     return o;
 }
@@ -349,6 +391,8 @@ void MainWindow::applyOptions(const riven::Options &o)
     waterBox_->setChecked(o.water);
     audioBox_->setChecked(o.audio);
     videoBox_->setChecked(o.video);
+    cursorsBox_->setChecked(o.cursors);
+    extrasBox_->setChecked(o.extras);
 }
 
 void MainWindow::presetChanged(int index)
@@ -402,6 +446,14 @@ void MainWindow::browseSource()
                                                           sourceEdit_->text());
     if (!dir.isEmpty())
         sourceEdit_->setText(dir);
+}
+
+void MainWindow::browseFFmpeg()
+{
+    const QString file = QFileDialog::getOpenFileName(this, tr("Locate ffmpeg"),
+                                                      ffmpegEdit_->text());
+    if (!file.isEmpty())
+        ffmpegEdit_->setText(file);
 }
 
 void MainWindow::browseDest()
@@ -478,6 +530,15 @@ void MainWindow::refreshChecks()
     if (running_)
         return;
 
+    // Independent of the scan: whether ffmpeg is there has nothing to do with
+    // whether the source folder has been read yet, and it is the one thing worth
+    // saying before anything else has been chosen.
+    const riven::Check ff = riven::checkFFmpeg(currentOptions());
+    ffmpegStatus_->setText(QString::fromStdString(ff.detail));
+    ffmpegStatus_->setStyleSheet(ff.level == riven::Check::Level::Fail
+                                     ? QStringLiteral("color: #d9534f;")
+                                     : QString());
+
     if (!haveScan_)
         return; // nothing to judge until the first scan lands
     const auto checks = riven::runChecks(scanned_, currentOptions());
@@ -534,9 +595,11 @@ void MainWindow::setRunning(bool running)
     startButton_->setEnabled(true);
     sourceEdit_->setEnabled(!running);
     destEdit_->setEnabled(!running);
+    ffmpegEdit_->setEnabled(!running);
     presetBox_->setEnabled(!running);
     for (auto *box :
-         {cardsBox_, imagesBox_, hiresBox_, waterBox_, audioBox_, videoBox_, forceBox_})
+         {cardsBox_, imagesBox_, hiresBox_, waterBox_, audioBox_, videoBox_,
+          cursorsBox_, extrasBox_, forceBox_})
         box->setEnabled(!running);
     if (running)
         openButton_->setEnabled(false);
@@ -645,12 +708,15 @@ void MainWindow::loadSettings()
 
     sourceEdit_->setText(stringOr("source"));
     destEdit_->setText(stringOr("dest"));
+    ffmpegEdit_->setText(stringOr("ffmpeg"));
     cardsBox_->setChecked(boolOr("cards", true));
     imagesBox_->setChecked(boolOr("images", true));
     hiresBox_->setChecked(boolOr("hires", true));
     waterBox_->setChecked(boolOr("water", true));
     audioBox_->setChecked(boolOr("audio", true));
     videoBox_->setChecked(boolOr("video", true));
+    cursorsBox_->setChecked(boolOr("cursors", true));
+    extrasBox_->setChecked(boolOr("extras", true));
     forceBox_->setChecked(boolOr("force", false));
     restoreGeometry(s.value(QStringLiteral("geometry")).toByteArray());
 
@@ -667,12 +733,15 @@ void MainWindow::saveSettings()
     QSettings s;
     s.setValue(QStringLiteral("source"), sourceEdit_->text());
     s.setValue(QStringLiteral("dest"), destEdit_->text());
+    s.setValue(QStringLiteral("ffmpeg"), ffmpegEdit_->text());
     s.setValue(QStringLiteral("cards"), cardsBox_->isChecked());
     s.setValue(QStringLiteral("images"), imagesBox_->isChecked());
     s.setValue(QStringLiteral("hires"), hiresBox_->isChecked());
     s.setValue(QStringLiteral("water"), waterBox_->isChecked());
     s.setValue(QStringLiteral("audio"), audioBox_->isChecked());
     s.setValue(QStringLiteral("video"), videoBox_->isChecked());
+    s.setValue(QStringLiteral("cursors"), cursorsBox_->isChecked());
+    s.setValue(QStringLiteral("extras"), extrasBox_->isChecked());
     s.setValue(QStringLiteral("force"), forceBox_->isChecked());
     s.setValue(QStringLiteral("geometry"), saveGeometry());
 }

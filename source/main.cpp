@@ -2,38 +2,25 @@
 
 #include "Global.hpp"
 #include "RivenData.hpp"
+#include "audio/RivenAudio.hpp"
+#include "engine/Engine.hpp"
 
 namespace
 {
-    // NEA_Process takes a capture-less callback, so the screen's text lives at
-    // file scope. Same pattern the Myst port uses for its menu and error screens.
-    const char *g_line1 = "";
-    const char *g_line2 = "";
-    const char *g_line3 = "";
-
-    void drawStatus()
-    {
-        NEA_2DViewInit();
-        NEA_RichTextRender3D(0, "Riven DS", 16, 30);
-        NEA_RichTextRender3D(0, g_line1, 16, 60);
-        NEA_RichTextRender3D(0, g_line2, 16, 80);
-        NEA_RichTextRender3D(0, g_line3, 16, 100);
-    }
-
     /// Show why the game cannot start, and stop. There is nothing the player can
     /// do from inside the game -- every screen past this point reads the data
     /// that isn't there -- so this is a dead end on purpose rather than a menu
     /// that black-screens on New Game.
+    ///
+    /// The top-screen console, not the 3D text renderer: with the card view moved
+    /// onto bitmap backgrounds nothing renders through the 3D engine any more, so
+    /// NEA_RichTextRender3D would draw to a layer that is switched off. The
+    /// console is already up by the time anything can fail (Global::Init).
     [[noreturn]] void haltWith(const char *l1, const char *l2, const char *l3)
     {
-        g_line1 = l1;
-        g_line2 = l2;
-        g_line3 = l3;
+        std::printf("\n-- Riven DS --\n%s\n%s\n%s\n", l1, l2, l3);
         while (true)
-        {
-            NEA_WaitForVBL(static_cast<NEA_UpdateFlags>(0));
-            NEA_Process(drawStatus);
-        }
+            swiWaitForVBlank();
     }
 }
 
@@ -44,13 +31,6 @@ int main(int argc, char *argv[])
 
     global.Init();
 
-    // The UI font is the only thing in NitroFS besides the menu art. Without it
-    // nothing below can report anything, so it is loaded before the data check.
-    NEA_RichTextResetSystem();
-    NEA_RichTextInit(0);
-    NEA_RichTextMetadataLoadFAT(0, "font/DejaVuSans-Bold.fnt");
-    NEA_RichTextMaterialLoadGRF(0, "font/DejaVuSans-Bold_0_png.grf");
-
     const Global::DataStatus status = global.CheckData();
     if (status != Global::DataStatus::Ok)
     {
@@ -58,12 +38,30 @@ int main(int argc, char *argv[])
                  Global::DataStatusHint(status));
     }
 
-    // Milestone 1 stops here: the ROM boots, mounts the card and confirms a
-    // conversion is present. Card loading and the engine run loop land in
-    // milestone 4.
-    static char l2[64];
-    std::snprintf(l2, sizeof(l2), "Schema v%u  view %dx%d",
-                  static_cast<unsigned>(rivendata::kSchemaVersion),
-                  rivendata::kViewW, rivendata::kViewH);
-    haltWith("Data found.", l2, "Engine not built yet.");
+    // What is missing but not fatal, said once, before anything can be blamed on
+    // it. The console is up by now, so this is the first thing the player reads.
+    global.ReportOptionalData();
+
+    RivenAudio::initSystem();
+
+    if (!rivenrt::engine.boot())
+    {
+        // The data is there but something in it could not be read. The engine's
+        // own message says what; it is a std::string, so it is copied into a
+        // buffer the halt screen can hold onto.
+        static char detail[96];
+        std::snprintf(detail, sizeof(detail), "%s", rivenrt::engine.error().c_str());
+        haltWith("Cannot start:", "Riven data could not be loaded", detail);
+    }
+
+    while (!rivenrt::engine.quitRequested())
+    {
+        // The engine's own frame does the uploads that have to happen in the
+        // vblank window, so it is entered from here rather than the other way
+        // round.
+        NEA_WaitForVBL(static_cast<NEA_UpdateFlags>(0));
+        rivenrt::engine.frame();
+    }
+
+    haltWith("Riven DS", "Thank you for playing.", "");
 }

@@ -1,6 +1,6 @@
 # Prerequisites
 *.d
-
+codegraph.json
 # Compiled Object files
 *.slo
 *.lo
@@ -45,7 +45,7 @@ Build/
 build-*/
 .codegraph/
 helpSrc/
-
+docs/
 # architectds emits its ninja files at the repo root
 build.ninja
 .ninja_deps
