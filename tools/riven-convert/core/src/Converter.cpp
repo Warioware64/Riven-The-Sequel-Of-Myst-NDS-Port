@@ -34,6 +34,32 @@ namespace
     // carries our own versioned StackFileHeader instead of yas's.
     constexpr std::size_t kYasFlags = yas::mem | yas::binary | yas::no_header;
 
+    /// True if `path` is a stack file this build's ARM9 would accept.
+    ///
+    /// A .format stamp cannot answer this and must not be used here, which is
+    /// worth spelling out because every other stage does use one. A stamp
+    /// describes a DIRECTORY, and pics/, pics_hi/, video/ and sound/ each get
+    /// one directory PER STACK -- but all eight stack files share stacks/. A
+    /// run restricted with --stack would stamp that shared directory after
+    /// converting one of them, and every later run would then read the stamp,
+    /// conclude the whole directory was current, and skip the seven files still
+    /// written to the old schema. They would never be redone, and the ROM
+    /// rejects them the moment the player links to one.
+    ///
+    /// The file answers for itself instead: StackFileHeader carries the schema
+    /// version it was written with, and headerLooksValid is the same check the
+    /// ARM9 makes (RivenData.hpp:74-78, StackFile.cpp:35-42).
+    bool stackFileIsCurrent(const fs::path &path)
+    {
+        std::FILE *f = std::fopen(path.string().c_str(), "rb");
+        if (f == nullptr)
+            return false;
+        rivendata::StackFileHeader hdr{};
+        const bool read = std::fread(&hdr, 1, sizeof(hdr), f) == sizeof(hdr);
+        std::fclose(f);
+        return read && rivendata::headerLooksValid(hdr);
+    }
+
     // -----------------------------------------------------------------------
     // One asset at a time
     // -----------------------------------------------------------------------
@@ -400,9 +426,7 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                 stage = std::string(name) + " cards";
                 const fs::path outFile = root / "stacks" / (std::string(name) + ".bin");
 
-                bool upToDate = !opts.force
-                                && !formatStampIsStale(root / "stacks",
-                                                       rivendata::kSchemaVersion);
+                bool upToDate = !opts.force && stackFileIsCurrent(outFile);
                 if (upToDate)
                     for (const auto &a : ss->dataArchives)
                         if (!isUpToDate(outFile, a))
@@ -548,9 +572,10 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                         result.bytesWritten += file.size();
                         out.logf(Severity::Info, stage, "%zu cards -> %s.bin",
                                  stack.cards.size(), name);
-                        if (std::string e;
-                            !writeFormatStamp(root / "stacks", rivendata::kSchemaVersion, e))
-                            out.warn(stage, e);
+                        // No format stamp here: the file's own header is the
+                        // version, and a stamp on the shared stacks/ directory
+                        // would let a --stack run mark the seven files it did
+                        // not touch as current. See stackFileIsCurrent.
                     }
                 }
             }

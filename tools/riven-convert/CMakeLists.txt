@@ -171,7 +171,7 @@ endif()
 
 if(BUILD_TESTING)
     foreach(t schema_roundtrip archive atomic_write cards image sound video installer
-              transition topbg)
+              transition topbg resume)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE riven_convert_core)
         add_test(NAME ${t} COMMAND test_${t})
