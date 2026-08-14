@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "DebugLog.hpp"
 #include "engine/Engine.hpp"
 
 using namespace rivendata;
@@ -21,7 +22,7 @@ namespace
         if (seen[opcode])
             return;
         seen[opcode] = true;
-        std::printf("script: opcode %d is not implemented\n", opcode);
+        DebugLog::warn("script: opcode %d is not implemented", opcode);
     }
 
     std::uint16_t arg(const Command &c, std::size_t i)
@@ -117,7 +118,7 @@ namespace
         const StackId target = parseStackName(name);
         if (target == StackId::None)
         {
-            std::printf("script: ChangeStack to unknown stack name id %u\n",
+            DebugLog::warn("script: ChangeStack to unknown stack name id %u",
                         static_cast<unsigned>(nameId));
             return;
         }

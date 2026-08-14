@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "DebugLog.hpp"
 #include "audio/RivenAudio.hpp"
 #include "render/CardSurface.hpp"
 #include "tonccpy.h"
@@ -373,7 +374,7 @@ void RvidPlayer::pump()
             clockStalled_ = true;
             // vbl_ has been counting since play(), so the fallback clock starts
             // where the soundtrack should have been rather than back at frame 0.
-            std::printf("movie soundtrack is not playing: pacing on vblanks\n");
+            DebugLog::warn("movie soundtrack is not playing: pacing on vblanks");
         }
     }
 

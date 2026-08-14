@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "DebugLog.hpp"
 #include "Global.hpp"
 #include "tonccpy.h"
 
@@ -33,14 +34,14 @@ bool Cursor::create()
     std::string error;
     if (!file_.load(global.cursorsDir() + "cursors.rcur", error))
     {
-        std::printf("%s\n", error.c_str());
+        DebugLog::notice("%s", error.c_str());
         return false;
     }
 
     NEA_OBJSize size;
     if (!objSizeFor(file_.celWidth(), file_.celHeight(), size))
     {
-        std::printf("cursor cels are %dx%d, which is not a sprite size\n",
+        DebugLog::notice("cursor cels are %dx%d, which is not a sprite size",
                     file_.celWidth(), file_.celHeight());
         file_.unload();
         return false;
@@ -62,7 +63,7 @@ bool Cursor::create()
         assets_[i] = NEA_Hw2DOBJAssetCreate(NEA_ENGINE_MAIN, size, NEA_OBJ_COLOR_256);
         if (assets_[i] == nullptr)
         {
-            std::printf("no OBJ VRAM for the cursor set\n");
+            DebugLog::notice("no OBJ VRAM for the cursor set");
             destroy();
             return false;
         }
@@ -73,7 +74,7 @@ bool Cursor::create()
     obj_ = NEA_Hw2DOBJCreateFromAsset(assets_[0]);
     if (obj_ == nullptr)
     {
-        std::printf("no OAM entry for the cursor\n");
+        DebugLog::notice("no OAM entry for the cursor");
         destroy();
         return false;
     }

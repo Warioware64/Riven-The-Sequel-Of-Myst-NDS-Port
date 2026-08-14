@@ -204,6 +204,33 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME rvid_arm9 COMMAND test_rvid_arm9)
 
+    # The save file the DS writes, compiled for the HOST -- same argument again,
+    # and the only place the four ways a slot can be damaged can be checked at
+    # all. A save is written by the player and read back by a later build, so it
+    # is the one format here whose compatibility nothing else guards.
+    add_executable(test_save_arm9
+        tests/test_save_arm9.cpp
+        "${REPO_ROOT}/source/SaveGame.cpp")
+    target_include_directories(test_save_arm9 PRIVATE "${REPO_ROOT}/source")
+    target_link_libraries(test_save_arm9 PRIVATE riven_convert_core)
+    if(NOT MSVC)
+        target_compile_options(test_save_arm9 PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME save_arm9 COMMAND test_save_arm9)
+
+    # The notebook files the DS writes, compiled for the HOST. Same argument as
+    # save_arm9: the player made these, and every allocation in the reader is
+    # sized from a field in a file that a bad sector can rewrite.
+    add_executable(test_notes_arm9
+        tests/test_notes_arm9.cpp
+        "${REPO_ROOT}/source/BookNotes.cpp")
+    target_include_directories(test_notes_arm9 PRIVATE "${REPO_ROOT}/source")
+    target_link_libraries(test_notes_arm9 PRIVATE riven_convert_core)
+    if(NOT MSVC)
+        target_compile_options(test_notes_arm9 PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME notes_arm9 COMMAND test_notes_arm9)
+
     # RIVEN_TEST_DATA is deliberately NOT set as a test property: a
     # set_tests_properties(ENVIRONMENT) captures the value at CONFIGURE time and
     # then overrides whatever the runtime environment holds, so

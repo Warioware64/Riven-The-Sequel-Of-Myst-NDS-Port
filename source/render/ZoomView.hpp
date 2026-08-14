@@ -14,13 +14,18 @@
 // before anything could -- "decodes one image on demand into a 238 KB scratch
 // buffer and windows 256x192 out of it". This is that.
 //
-// The window is 1:1 and is the card view's own 256x165, so it covers 42% of the
-// card's width and its height, and the D-pad or the stylus moves it. Framing it
-// as the card view rather than as the whole screen is not cosmetic -- see the
-// note on kWindowH in the .cpp. There is no intermediate zoom level either: the
-// hardware could scale the background, but everything between 0.42x and 1.0x is
-// an interpolation of pixels that already exist at both ends, and the point of
-// the mode is the ones that do not.
+// The window is 1:1 and is the WHOLE SCREEN, 256x192 -- the letterbox goes off
+// and the 27 rows the card view spends on black bands become picture, which is
+// 16% more of it. It was the card view's 256x165 for a while and the note on
+// kWindowH in the .cpp records why that changed and what it cost. There is no
+// intermediate zoom level either: the hardware could scale the background, but
+// everything between 0.42x and 1.0x is an interpolation of pixels that already
+// exist at both ends, and the point of the mode is the ones that do not.
+//
+// That 192 is load-bearing outside this file exactly once: Engine::captureNote
+// reads the front buffer to make a notebook page, and has to take all 192 rows
+// here where it takes 165 from a letterboxed card, or the page silently loses
+// the bottom of what the player was looking at.
 //
 // THE SCREEN. Taken with BgSurface::beginMovieTakeover, which is the mechanism
 // a fullscreen movie already uses and which exists precisely for this: the card

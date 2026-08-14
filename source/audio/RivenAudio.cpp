@@ -1,5 +1,6 @@
 #include "RivenAudio.hpp"
 
+#include "DebugLog.hpp"
 #include "global_header.hpp" // NEASound.h + <nds.h> + maxmod
 
 #include <cstdio>
@@ -407,7 +408,7 @@ int RivenAudio::playSound(const std::string &path, int volume, int balance, bool
         || h.dataBytes == 0)
     {
         std::fclose(f);
-        std::printf("sound: %s is not a playable .rsnd\n", path.c_str());
+        rivenrt::DebugLog::warn("sound: %s is not a playable .rsnd", path.c_str());
         return -1;
     }
 
@@ -415,13 +416,13 @@ int RivenAudio::playSound(const std::string &path, int volume, int balance, bool
     if (codec != SoundCodec::ImaAdpcm && codec != SoundCodec::Pcm16)
     {
         std::fclose(f);
-        std::printf("sound: %s uses a codec this build does not play\n", path.c_str());
+        rivenrt::DebugLog::warn("sound: %s uses a codec this build does not play", path.c_str());
         return -1;
     }
     if (codec == SoundCodec::Pcm16 && h.dataBytes != h.sampleCount * 2)
     {
         std::fclose(f);
-        std::printf("sound: %s is PCM16 but not two bytes a sample\n", path.c_str());
+        rivenrt::DebugLog::warn("sound: %s is PCM16 but not two bytes a sample", path.c_str());
         return -1;
     }
 
@@ -433,7 +434,7 @@ int RivenAudio::playSound(const std::string &path, int volume, int balance, bool
         // buffer, so the alternative to a budget is a failed allocation somewhere
         // else, later, with no clue attached.
         std::fclose(f);
-        std::printf("sound: %s is %lu KB and %lu KB of the %lu KB budget is in use: silent\n",
+        rivenrt::DebugLog::warn("sound: %s is %lu KB and %lu KB of the %lu KB budget is in use: silent",
                     path.c_str(), static_cast<unsigned long>(h.dataBytes / 1024),
                     static_cast<unsigned long>(g_resident / 1024),
                     static_cast<unsigned long>(kSoundBudgetBytes / 1024));

@@ -1,10 +1,12 @@
 #include "global_header.hpp"
 
+#include "BookNotes.hpp"
 #include "DebugLog.hpp"
 #include "Global.hpp"
 #include "RivenData.hpp"
 #include "Settings.hpp"
 #include "MainMenu.hpp"
+#include "SaveGame.hpp"
 #include "audio/RivenAudio.hpp"
 #include "engine/Engine.hpp"
 #include "render/BgSurface.hpp"
@@ -24,6 +26,14 @@ namespace
     /// console is already up by the time anything can fail (Global::Init).
     [[noreturn]] void haltWith(const char *l1, const char *l2, const char *l3)
     {
+        // The picture goes first. Console glyphs are opaque white on whatever is
+        // behind them (TopBg.hpp), and this is the one screen in the port that
+        // has to be read rather than glanced at -- on black it is legible, over
+        // a photograph of Riven it is not. This is also the normal-quit path.
+        rivenrt::topBg.setVisible(false);
+        // The one print in the port that is never gated. It is the only
+        // player-facing error UI there is, and everything it could report has
+        // already stopped the game (DebugLog.hpp).
         std::printf("\n-- Riven DS --\n%s\n%s\n%s\n", l1, l2, l3);
         while (true)
             swiWaitForVBlank();
@@ -40,6 +50,13 @@ int main(int argc, char *argv[])
     // Before anything reads a setting, and harmless when the card cannot be
     // written: an absent settings.dat is a first boot, not an error.
     settings.load();
+
+    // SaveGame is deliberately free of <nds.h> so the host tests can compile it
+    // (SaveGame.hpp), which means it cannot reach the Global singleton and has
+    // to be told where the card is. Here, because Global::Init has just created
+    // the directory; everything in SaveGame is a no-op until this runs.
+    rivenrt::SaveGame::setDirectory(global.savesDir());
+    rivenrt::BookNotes::setDirectory(global.notesDir());
 
     const Global::DataStatus status = global.CheckData();
     if (status != Global::DataStatus::Ok)
@@ -75,7 +92,9 @@ int main(int argc, char *argv[])
     rivenrt::textLayer.create();
     rivenrt::mainMenu.run();
 
-    if (!rivenrt::engine.boot())
+    // pendingLoad() is null unless the menu ended on Load game with a slot that
+    // read back; boot() takes it from there.
+    if (!rivenrt::engine.boot(rivenrt::mainMenu.pendingLoad()))
     {
         // The data is there but something in it could not be read. The engine's
         // own message says what; it is a std::string, so it is copied into a
@@ -84,6 +103,12 @@ int main(int argc, char *argv[])
         std::snprintf(detail, sizeof(detail), "%s", rivenrt::engine.error().c_str());
         haltWith("Cannot start:", "Riven data could not be loaded", detail);
     }
+
+    // Here and not earlier: the last notices come from inside boot() -- a
+    // missing cursor set, a missing inventory strip -- and clearing before that
+    // would wipe the picture clean and then print over it again. Dwells only if
+    // there was something to read, and does nothing at all with the trace on.
+    rivenrt::DebugLog::settleNotices();
 
     while (!rivenrt::engine.quitRequested())
     {

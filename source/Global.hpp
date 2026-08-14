@@ -18,9 +18,15 @@ public:
     std::string fatDeviceCPP;          ///< same as a std::string, for path building
     bool hasFat = false;               ///< FAT init succeeded and a drive is mounted
     bool hasNitroFS = false;           ///< NitroFS (ROM filesystem) available
-    /// The top-screen console is up, so std::printf reaches the player. Every
-    /// diagnostic in the engine is a printf; without this they go nowhere.
-    bool hasConsole = false;
+    /// The top-screen console, or null if it would not come up. Every
+    /// diagnostic in the engine is a std::printf, and without this they go
+    /// nowhere.
+    ///
+    /// The POINTER and not a bool, because the debug console has to move the
+    /// text window around it -- consoleSetWindow takes a mutable PrintConsole *
+    /// and consoleGetDefault() hands back a const one. Nothing else needs it,
+    /// and testing it against null is the same question the bool answered.
+    PrintConsole *console = nullptr;
 
     /// nitroFSInit + fatInitDefault + fatGetDefaultDrive, then create the data
     /// directories. Safe to call once at startup.
@@ -52,6 +58,11 @@ public:
     std::string uiDir() const { return dataDir() + "ui/"; }
     /// Written by the game, never by the converter.
     std::string savesDir() const { return dataDir() + "saves/"; }
+    /// The player's notebook -- captures and the scribbles on them. Written by
+    /// the game too, and deliberately NOT under saves/: a note is global rather
+    /// than part of a slot (BookNotes.hpp), and putting it in the save
+    /// directory would invite a "delete my saves" from taking it with them.
+    std::string notesDir() const { return dataDir() + "notes/"; }
     std::string dataPath(const std::string &rel) const { return dataDir() + rel; }
 
     /// Why the game cannot start. Everything below Ok means the card does not

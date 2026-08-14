@@ -12,9 +12,9 @@ own copy of Riven into files the DS can read.
 > DS reads, with a Qt GUI and a CLI. The DS engine has a menu and a settings
 > screen, boots into Riven's own main menu, draws cards, runs the scripts, plays
 > the fullscreen movies with sound, follows hotspots between cards and stacks,
-> and zooms into any card at its original resolution. Saves, the water effects
-> and most of the per-stack puzzle commands are not there yet. See
-> [Milestones](#milestones).
+> zooms into any card at its original resolution, saves to five slots, and keeps
+> a notebook you can draw in. The water effects and most of the per-stack puzzle
+> commands are not there yet. See [Milestones](#milestones).
 
 ## How it relates to the Myst port
 
@@ -168,22 +168,59 @@ nothing.
 Options button. Zip mode (off by default, as in the original), transitions, water,
 a master volume and the debug log, kept in `_nds/riven_nds/data/settings.dat`.
 
-**The top screen always says where you are.** Every card that settles prints one
-line — `CARD tspit/300 pic=5 mov=3/4 hs=12/14 snd=1` — the picture actually on
-screen, the movie players open against the MLST records the card has, the
-hotspots actually clickable out of the ones it has, and the ambient layers
-actually playing. Anything missing (a
-picture, a movie, a sound, a card a script asked for) prints its own line beside
-it. No setting turns this on; it is a line per card, so the console still holds
-the last dozen moves.
+**START opens the port's menu** — save, load, notebook, settings, resume — over
+whatever card you are on. Riven's own menu card reaches the same screens: its
+Save and Restore buttons open the slot list, and Resume goes back to where you
+were. Five slots in `_nds/riven_nds/data/saves/`, listed by island and time. A
+slot that will not read is reported as **damaged** rather than shown as empty,
+because an empty-looking slot gets saved over and the file might be the only copy
+of a game you still want.
 
-**Debug log** turns the top screen into a trace instead of a picture: the stack
-and card being entered with its PLST/HSPT/SLST/MLST counts, and a line for every
-picture, sound, movie and zoom twin as it is loaded, with the ids and rectangles
-the scripts asked for. It goes to the console, to `nocashMessage` (so an emulator
-gets it for free) and to `_nds/riven_nds/data/debug.log`. **SELECT+L** writes the
-bottom screen to `shotNNN.bmp`, **SELECT+R** dumps every mapped VRAM bank to
-`vramNNN/`. It is read once at startup, so it takes effect on the next boot.
+**L takes a note, Y opens the notebook.** Riven is a game of written-down things
+— D'ni numerals, which animal goes with which dome sound, a grid of fire marbles
+— and the DS has a stylus. **L** puts a picture of what is on screen into the
+notebook; **Y** pages through them and lets you scribble on the page in six
+colours, with an eraser that removes whole strokes rather than painting over
+them. **L works inside the zoom viewer too**, which is where you usually want it
+— you opened the full-resolution view to read something — and there it captures
+all 192 rows rather than the card view's 165, so the page is exactly what was on
+screen. Notes live in `_nds/riven_nds/data/notes/` and are **global, not part of a
+save slot**: what you wrote down is knowledge you keep whichever game you load.
+Twenty-four pages, and the notebook says when it is full rather than quietly
+dropping the oldest one.
+
+**The top screen is quiet.** It is the splash and nothing else: no card
+summaries, no missing-asset warnings, no trace. That is a deliberate reversal —
+those lines used to print whether you asked for them or not, and because the
+console draws opaque white straight onto the picture, a minute of ordinary play
+buried it. Everything they said is still said, to `nocashMessage` (free under an
+emulator) and to `debug.log` when the trace is on; it just stops being painted
+over Riven.
+
+Two things still reach it. **Startup notices** — no `video/`, no `cursors/`, no
+menu font — print once, stay readable while you are on the menu, and are wiped
+when the game starts, because those are things to go and fix. And a **status
+line** at the bottom answers a button you just pressed (`note taken`, `notebook
+full`) and clears itself after a couple of seconds.
+
+**Debug log** turns the top screen into a trace instead of a picture, and it is
+the setting that unlocks everything above: the stack and card being entered with
+its PLST/HSPT/SLST/MLST counts, a line for every picture, sound, movie and zoom
+twin as it is loaded with the ids and rectangles the scripts asked for, and every
+warning that is otherwise held back. It goes to the console, to `nocashMessage`
+(so an emulator gets it for free) and to `_nds/riven_nds/data/debug.log`.
+**SELECT+L** writes the bottom screen to `shotNNN.bmp`, **SELECT+R** dumps every
+mapped VRAM bank to `vramNNN/`. It is read once at startup, so it takes effect on
+the next boot.
+
+**SELECT+START is a command prompt**, with the DS keyboard on the touch screen
+and the card still live above it, so what a command did is visible while the next
+one is typed. `card 300` and `stack jspit 155` go somewhere, `var blabopen 1`
+sets a variable **by name** and reads it back, `hotspots` lists every hotspot on
+the card with its rectangle and whether it is enabled, and `vars`, `zips`,
+`sound`, `movie`, `save`, `load`, `notes`, `shot` and `vram` do what they say.
+TAB completes, the D-pad's up and down walk the history, **B** closes. Debug mode
+only — the keyboard writes over palette entries the top-screen picture uses.
 
 **If your card was converted by an older build**, just convert again — the video
 stage notices by itself and logs `video was converted by an older build: redoing
@@ -278,8 +315,9 @@ partial the converter salvages what it can and says how much it lost.
    the clock, and a skipped frame that costs a seek
 9. 🔨 Inventory, zoom viewer, saves, menus, water effects — the inventory strip,
    both journals' route in, the port's menu and settings screen, the top-screen
-   picture and the zoom viewer are built. **Saves and the water effects are
-   not**, and they are what is left of this milestone
+   picture, the zoom viewer, five save slots, the notebook and the debug console
+   are built. **The water effects are not**, and they are what is left of this
+   milestone
 
 ## Credits and licensing
 

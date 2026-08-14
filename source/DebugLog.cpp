@@ -24,10 +24,28 @@ namespace
     std::FILE *g_file = nullptr;
     int g_shotCounter = 0;
     int g_dumpCounter = 0;
+    /// Startup notices emitted this run. Only settleNotices reads it, to decide
+    /// whether anything is worth pausing for.
+    int g_notices = 0;
+    /// Frames the status line still has to live.
+    int g_statusFrames = 0;
 
     /// One line's worth. The console is 32 columns, so anything past this is
     /// already wrapping; the file gets the same text so both agree.
     constexpr int kLineMax = 256;
+
+    /// The console Global::Init set up: BgSize_T_256x256 with an 8x8 font.
+    constexpr int kConsoleW = 32;
+    constexpr int kConsoleH = 24;
+    /// The status line goes on the LAST row, out of the way of a trace that
+    /// scrolls from the top.
+    constexpr int kStatusRow = kConsoleH - 1;
+
+    /// About two seconds at 59.83 Hz. Long enough to read four words while
+    /// still playing, short enough not to sit on the splash.
+    constexpr int kStatusHoldFrames = 120;
+    /// The same, for the boot notices -- but only paid when there are any.
+    constexpr int kNoticeFrames = 120;
 
     std::string logPath() { return global.dataDir() + "debug.log"; }
 
@@ -129,12 +147,19 @@ bool enabled() { return g_on; }
 
 namespace
 {
-    /// The three destinations. Everything printed here goes through this, so the
-    /// console, the emulator and the file never disagree about a line.
-    void emit(const char *line)
+    /// The three destinations, and the ONE place it is decided which of them a
+    /// line reaches. Everything printed by this file goes through here, so the
+    /// console, the emulator and the log never disagree about a line.
+    ///
+    /// `toConsole` is the whole of the policy in the header: false for the trace
+    /// with debug mode off, true for a notice. The other two destinations are
+    /// never gated -- nocashMessage is inert on hardware and free under an
+    /// emulator, and g_file only exists when the trace is on -- which is why
+    /// silencing the console loses nothing a developer was relying on.
+    void emit(const char *line, bool toConsole)
     {
-        std::printf("%s\n", line);
-        // Free under an emulator and inert on hardware, so not worth gating.
+        if (toConsole)
+            std::printf("%s\n", line);
         nocashMessage(line);
         nocashMessage("\n");
 
@@ -148,12 +173,12 @@ namespace
         }
     }
 
-    void emitv(const char *fmt, std::va_list ap)
+    void emitv(const char *fmt, std::va_list ap, bool toConsole)
     {
         char line[kLineMax];
         const int n = std::vsnprintf(line, sizeof(line), fmt, ap);
         if (n > 0)
-            emit(line);
+            emit(line, toConsole);
     }
 } // namespace
 
@@ -164,7 +189,7 @@ void log(const char *fmt, ...)
 
     std::va_list ap;
     va_start(ap, fmt);
-    emitv(fmt, ap);
+    emitv(fmt, ap, true);
     va_end(ap);
 }
 
@@ -172,7 +197,7 @@ void warn(const char *fmt, ...)
 {
     std::va_list ap;
     va_start(ap, fmt);
-    emitv(fmt, ap); // g_file is null unless the trace is on, so this splits itself
+    emitv(fmt, ap, g_on);
     va_end(ap);
 }
 
@@ -180,8 +205,87 @@ void note(const char *fmt, ...)
 {
     std::va_list ap;
     va_start(ap, fmt);
-    emitv(fmt, ap);
+    emitv(fmt, ap, g_on);
     va_end(ap);
+}
+
+void notice(const char *fmt, ...)
+{
+    ++g_notices;
+    std::va_list ap;
+    va_start(ap, fmt);
+    emitv(fmt, ap, true);
+    va_end(ap);
+}
+
+int noticeCount() { return g_notices; }
+
+void settleNotices()
+{
+    // With the trace on the console IS the top screen, and there is no picture
+    // behind it to protect -- clearing it would only throw away the boot lines.
+    if (g_on || global.console == nullptr)
+        return;
+
+    // Only if there was something to read. The last notices come from inside
+    // Engine::boot(), after the menu the earlier ones sat behind, so without a
+    // dwell here a missing cursor set would flash past in one frame. A complete
+    // conversion reports nothing and pays none of this.
+    if (g_notices > 0)
+        for (int i = 0; i < kNoticeFrames; ++i)
+            swiWaitForVBlank();
+
+    consoleSelect(global.console);
+    consoleSetWindow(global.console, 0, 0, kConsoleW, kConsoleH);
+    consoleClear();
+    g_statusFrames = 0;
+}
+
+void consoleRow(int row, const char *text)
+{
+    PrintConsole *const con = global.console;
+    if (con == nullptr)
+        return;
+
+    // Everything consoleSetWindow is about to overwrite. The cursor is the part
+    // that matters and the part that is easy to miss -- see the header.
+    const int wx = con->windowX;
+    const int wy = con->windowY;
+    const int ww = con->windowWidth;
+    const int wh = con->windowHeight;
+    const int cx = con->cursorX;
+    const int cy = con->cursorY;
+
+    consoleSelect(con);
+    consoleSetWindow(con, 0, row, kConsoleW, 1);
+    consoleSetCursor(con, 0, 0);
+    std::printf("%-*.*s", kConsoleW - 1, kConsoleW - 1, text != nullptr ? text : "");
+
+    consoleSetWindow(con, wx, wy, ww, wh);
+    consoleSetCursor(con, cx, cy);
+}
+
+void status(const char *text)
+{
+    if (global.console == nullptr)
+        return;
+
+    consoleRow(kStatusRow, text);
+    g_statusFrames = (text != nullptr && text[0] != '\0') ? kStatusHoldFrames : 0;
+
+    // The trace wants it in the scrollback too: on the top screen it is one row
+    // that is about to be overwritten, and in debug.log it is the only record
+    // that the player did this at all.
+    if (g_on && text != nullptr && text[0] != '\0')
+        emit(text, false);
+}
+
+void pumpStatus()
+{
+    if (g_statusFrames == 0)
+        return;
+    if (--g_statusFrames == 0)
+        status("");
 }
 
 void screenshot()

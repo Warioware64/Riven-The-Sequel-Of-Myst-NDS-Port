@@ -52,6 +52,24 @@ public:
 
     void set(VarId id, std::uint32_t value) { at(id) = value; }
 
+    /// Every variable a playthrough has touched, for the save file.
+    ///
+    /// Const, and the only door out. Scripts assign through at(), and a second
+    /// mutable handle on the map would leave it unclear which of the two a
+    /// change had come through -- so a load goes back in through clear() and
+    /// set() rather than by swapping the container underneath.
+    const std::unordered_map<VarId, std::uint32_t, rivendata::VarIdHash> &all() const
+    {
+        return vars_;
+    }
+
+    /// Forget everything. What startNewGame does first, and what a load has to
+    /// do before it lays a saved map down: a variable the save does not mention
+    /// is a variable that was never set, and leaving the outgoing game's copy of
+    /// it in place would carry state across a load in the one direction nobody
+    /// would think to look.
+    void clear() { vars_.clear(); }
+
     /// ASCII case fold. NOT used by this class any more -- it is kept here
     /// because the external-command dispatch (Externals.cpp) and the hotspot
     /// name lookup (Engine::idFromName) still match NAME-list strings by hand,

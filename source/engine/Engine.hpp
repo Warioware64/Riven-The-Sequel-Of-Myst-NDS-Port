@@ -28,7 +28,9 @@
 #include <string>
 #include <vector>
 
+#include "DebugLog.hpp"
 #include "RivenData.hpp"
+#include "SaveGame.hpp"
 #include "audio/RivenAudio.hpp"
 #include "engine/Vars.hpp"
 #include "render/CardSurface.hpp"
@@ -52,7 +54,13 @@ public:
     /// Load the boot stack and enter its first card: aspit card 1, the main menu
     /// (riven.cpp:195-196). False (with error() set) if the data on the card
     /// cannot be read at all.
-    bool boot();
+    ///
+    /// With `restore`, go straight to the saved card instead. Not "boot, then
+    /// load": aspit card 1 is Riven's own menu and entering it starts the
+    /// attract sequence, so a player who picked Load game would watch the intro
+    /// begin and then be yanked out of it. A restore that fails falls through to
+    /// the normal boot, which is a new game rather than a black screen.
+    bool boot(const SaveGame::SaveState *restore = nullptr);
 
     /// One pass of the run loop. Called with the main thread parked between
     /// vblanks, so it must not block.
@@ -143,6 +151,39 @@ public:
     /// The card a zip hotspot called `name` leads to in the current stack, or
     /// -1. Public because opcode 45 is the other half of this.
     std::int32_t zipDestFor(const std::string &name) const;
+
+    // --- the notebook -------------------------------------------------------
+    //
+    // Both defined out of line in render/NoteView.cpp, so the page reaches the
+    // card it is a picture of and the frame pump that keeps audio alive while it
+    // is up, without either becoming public API. BookNotes.hpp is the format.
+
+    /// L: put a picture of what is on screen into the notebook.
+    void captureNote();
+
+    /// Y: page through the notebook, and scribble on it.
+    void runNotebook();
+
+    // --- saved games --------------------------------------------------------
+
+    /// Snapshot the game. Cheap: a map copy and a short vector, because almost
+    /// all of Riven's state is the variable map (SaveGame.hpp says why this is
+    /// so much smaller than the Myst port's equivalent).
+    SaveGame::SaveState buildSaveState() const;
+
+    /// THE single restore path -- the boot menu, the in-game menu and the debug
+    /// console all come through here, so there is one ordering to get right
+    /// rather than three to keep in step.
+    ///
+    /// False without moving if the save names a stack this card does not carry:
+    /// staying where we are is recoverable and a half-loaded game is not.
+    ///
+    /// DEFERRED while a script is running, for exactly the reason
+    /// changeToStackAndGlobalCard is: this replaces the loaded Stack, and the
+    /// command list the interpreter is walking lives inside it. Riven's own
+    /// Restore button is an external command, so that is not a corner case --
+    /// it is the ordinary route in. True then means ACCEPTED, not arrived.
+    bool restoreFrom(const SaveGame::SaveState &s);
 
     // --- pictures, sound, movies -------------------------------------------
 
@@ -282,8 +323,15 @@ public:
 
     /// A one-line note for the top screen. Overwritten freely; this is a
     /// developer aid, not a game feature.
-    const std::string &status() const { return status_; }
-    void setStatus(const std::string &s) { status_ = s; }
+    /// One transient line at the bottom of the top screen: the answer to a
+    /// button the player just pressed. "note taken", "notebook full".
+    ///
+    /// This was a setter into a std::string that NOTHING ever read -- six call
+    /// sites writing to a field with no renderer. It only looked like it worked
+    /// because DebugLog::note printed the same events, and gating that is what
+    /// made this have to become real. An empty string clears it now; it also
+    /// clears itself after a couple of seconds (DebugLog::status).
+    void setStatus(const std::string &s) { DebugLog::status(s.c_str()); }
 
 private:
     /// What an MLST record assigned to a playback slot, and whether the file for
@@ -356,6 +404,15 @@ private:
     /// then enable or disable this card's zip hotspots against what has been
     /// seen. RivenCard::initializeZipMode (riven_card.cpp:652-670).
     void initializeZipMode();
+    /// SELECT+START: the debug command prompt, on an on-screen keyboard.
+    ///
+    /// Debug mode only. The whole body, including the command table, is in
+    /// engine/DebugConsole.cpp -- as a member so the commands reach this class's
+    /// private state without one accessor being widened for a debug tool.
+    void runDebugConsole();
+    /// One typed line. True closes the console.
+    bool runConsoleCommand(const std::string &line);
+
     void processInput();
     void pumpMovies();
     /// One engine frame of the card's water effect, if it has one and the player
@@ -370,7 +427,9 @@ private:
     void flushUploads();
 
     /// Apply a stack change that was held until the script stopped running.
-    void applyPendingStackChange();
+    /// Run whatever was held back because a script was running: a queued stack
+    /// change, or a load. Called the moment the outermost command list returns.
+    void applyDeferredNavigation();
 
     /// One pass of the wait-and-draw loop that a blocking movie or a script's
     /// delay spins on, so both spin on the same thing.
@@ -462,6 +521,10 @@ private:
     bool haveStackChange_ = false;
     rivendata::StackId pendingStack_ = rivendata::StackId::None;
     std::uint32_t pendingGlobalCard_ = 0;
+    /// A load asked for from inside a script, held until the interpreter is out
+    /// of the stack it is about to replace. See restoreFrom.
+    bool haveRestore_ = false;
+    SaveGame::SaveState pendingRestore_;
     int updateDepth_ = 0;
     /// Guards the CardUpdate script against re-entering itself: it draws, and
     /// drawing is what ends a screen update (riven_graphics.cpp:740).
@@ -475,7 +538,6 @@ private:
     bool booted_ = false;
 
     std::string error_;
-    std::string status_;
 };
 
 extern Engine engine;

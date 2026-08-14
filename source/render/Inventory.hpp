@@ -90,6 +90,14 @@ public:
     /// hidden it.
     void setSuppressed(bool on);
 
+    /// Whether a port screen currently has it hidden.
+    ///
+    /// For a screen that can be opened from ANOTHER port screen -- the notebook,
+    /// off the in-game menu -- which has to put the flag back the way it found
+    /// it rather than clear it, or leaving the inner screen would show the strip
+    /// over the outer one.
+    bool suppressed() const { return suppressed_; }
+
     /// Push to OAM. Vblank only, like every other upload here.
     void flush();
 

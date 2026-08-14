@@ -21,6 +21,7 @@
 #include <cstring>
 #include <string>
 
+#include "DebugLog.hpp"
 #include "MainMenu.hpp"
 #include "engine/Engine.hpp"
 #include "engine/Script.hpp"
@@ -40,7 +41,7 @@ namespace
         if (local >= 0)
             e.changeToCard(static_cast<std::uint16_t>(local));
         else
-            std::printf("xasetupcomplete: no card for global id 0xE2E\n");
+            DebugLog::warn("xasetupcomplete: no card for global id 0xE2E");
     }
 
     /// ASpit::xaatrusopenbook (aspit.cpp:150-171). Arms the page hotspots for the
@@ -128,7 +129,7 @@ namespace
     {
         if (argCount < 1 || args == nullptr)
         {
-            std::printf("xtisland390_covercombo: no button number\n");
+            DebugLog::warn("xtisland390_covercombo: no button number");
             return;
         }
 
@@ -209,7 +210,7 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
     const std::string name = e.nameFromList(kExternalCommandNames, nameIndex);
     if (name.empty())
     {
-        std::printf("external command: no NAME 2 entry %u\n",
+        DebugLog::warn("external command: no NAME 2 entry %u",
                     static_cast<unsigned>(nameIndex));
         return;
     }
@@ -308,11 +309,29 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
         mainMenu.runSettings();
         return;
     }
-    if (key == "xarestoregame" || key == "xasavegame" || key == "xaresumegame")
+    if (key == "xasavegame")
     {
-        // Saves are the other half of milestone 9. Reported rather than
-        // silently ignored so a dead menu button is explained.
-        std::printf("external command: %s needs saves (milestone 9)\n", name.c_str());
+        // Riven's own menu card has Save and Restore buttons, and they open the
+        // port's slot list rather than the original's file dialogue -- which was
+        // built for a mouse, a keyboard and a hard disc. Same argument as
+        // xaoptions above: the screen is ours, the button is the one the player
+        // expects.
+        mainMenu.runSavePicker();
+        return;
+    }
+    if (key == "xarestoregame")
+    {
+        mainMenu.runLoadPicker();
+        return;
+    }
+    if (key == "xaresumegame")
+    {
+        // NOT a save at all, and it never was -- it only shared a line with the
+        // other two because all three sit on the same menu card. Resume means
+        // "put me back where I was", which is the pair of variables the
+        // inventory writes before it links away, so this is the journal's back
+        // button under another name (backFromItem, above).
+        backFromItem(e);
         return;
     }
     if (key == "xanewgame")
@@ -350,7 +369,7 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
     if (key == "xtchotakesbook")
         return; // "And now Cho takes the trap book"
 
-    std::printf("external command: %s is not implemented\n", name.c_str());
+    DebugLog::warn("external command: %s is not implemented", name.c_str());
 }
 
 } // namespace rivenrt

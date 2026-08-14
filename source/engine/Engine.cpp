@@ -4,6 +4,7 @@
 
 #include "DebugLog.hpp"
 #include "Global.hpp"
+#include "MainMenu.hpp"
 #include "Settings.hpp"
 #include "audio/RivenAudio.hpp"
 #include "data/StackFile.hpp"
@@ -418,7 +419,7 @@ std::int32_t Engine::claimSlotForCode(std::uint16_t code)
             return i;
         }
 
-    std::printf("card %u: more than %d movies at once\n", cardId_, kMovieSlots);
+    DebugLog::warn("card %u: more than %d movies at once", cardId_, kMovieSlots);
     return -1;
 }
 
@@ -463,7 +464,7 @@ void Engine::activateMlst(std::uint16_t index, bool andPlay)
             playMovieSlot(slot, false);
         return;
     }
-    std::printf("card %u: no MLST record %u\n", cardId_, index);
+    DebugLog::warn("card %u: no MLST record %u", cardId_, index);
 }
 
 bool Engine::ensureSlotOpen(std::int32_t slot)
@@ -539,7 +540,7 @@ void Engine::playMovie(std::uint16_t code, bool blocking)
     {
         // Opcode 32/33 for a code no MLST record on this card ever activated.
         // Silent before; worth a line now that there is somewhere to put it.
-        std::printf("card %u: no movie activated as %u\n", cardId_, code);
+        DebugLog::warn("card %u: no movie activated as %u", cardId_, code);
         return;
     }
     playMovieSlot(slot, blocking);
@@ -550,7 +551,7 @@ void Engine::playMovieRange(std::uint16_t code, std::uint32_t startMs, std::uint
     const std::int32_t slot = slotForCode(code);
     if (slot < 0)
     {
-        std::printf("card %u: no movie activated as %u\n", cardId_, code);
+        DebugLog::warn("card %u: no movie activated as %u", cardId_, code);
         return;
     }
     if (!ensureSlotOpen(slot))
@@ -608,7 +609,7 @@ void Engine::playMovieSlot(std::int32_t slot, bool blocking, std::uint32_t start
 
     if (!ms.player.play(loop, startFrame, stopFrame))
     {
-        std::printf("card %u: movie %u will not play: %s\n", cardId_, ms.movieId,
+        DebugLog::warn("card %u: movie %u will not play: %s", cardId_, ms.movieId,
                     ms.player.error());
         if (full)
             surface_.invalidate(bgs.endMovieTakeover());
@@ -673,6 +674,10 @@ void Engine::idleFrame()
     RivenAudio::pump();
     pumpMovies();
     pumpWater();
+    // Here as well as in frame(), so a "note taken" raised by the notebook or
+    // during a blocking movie still expires -- both spin this loop and never
+    // reach the other one.
+    DebugLog::pumpStatus();
 }
 
 namespace
@@ -771,14 +776,28 @@ void Engine::runCommands(const std::vector<Command> &commands, bool queue)
     runCommandList(*this, commands);
     --scriptDepth_;
     if (scriptDepth_ == 0)
-        applyPendingStackChange();
+        applyDeferredNavigation();
 }
 
 void Engine::runHandlers(const std::vector<Handler> &handlers, ScriptEvent event, bool queue)
 {
+    // `handlers` LIVES INSIDE THE LOADED STACK, and running one of them can
+    // replace that stack: the last runCommands to return drops scriptDepth_ to
+    // zero, which is where applyDeferredNavigation fires a held stack change or
+    // a held load. Both free the vector this loop is walking.
+    //
+    // So the loop stops the moment the card is not the one it started on, before
+    // the iterator is advanced again. Same guard, and the same reason, as the
+    // `card_ != entered` checks through enterCard. Reading card_ is safe when
+    // handlers is not; it is a member of this class.
+    const Card *const entered = card_;
     for (const Handler &h : handlers)
+    {
         if (static_cast<ScriptEvent>(h.event) == event)
             runCommands(h.commands, queue);
+        if (card_ != entered)
+            return;
+    }
 }
 
 /// RivenGraphics::applyScreenUpdate (riven_graphics.cpp:732-751).
@@ -968,15 +987,28 @@ bool Engine::changeToStackAndGlobalCard(StackId id, std::uint32_t globalCardId)
     const std::int32_t local = stack_.localCardForGlobal(globalCardId);
     if (local < 0)
     {
-        std::printf("%s: no card for global id %lu\n", stackName(id),
+        DebugLog::warn("%s: no card for global id %lu", stackName(id),
                     static_cast<unsigned long>(globalCardId));
         return false;
     }
     return changeToCard(static_cast<std::uint16_t>(local));
 }
 
-void Engine::applyPendingStackChange()
+void Engine::applyDeferredNavigation()
 {
+    // A load first: it replaces the whole game, so a stack change queued by the
+    // script that asked for it is about to be meaningless.
+    if (haveRestore_)
+    {
+        haveRestore_ = false;
+        haveStackChange_ = false;
+        queued_.clear();
+        const SaveGame::SaveState state = pendingRestore_;
+        pendingRestore_ = SaveGame::SaveState{};
+        restoreFrom(state);
+        return;
+    }
+
     if (!haveStackChange_)
         return;
     haveStackChange_ = false;
@@ -1093,7 +1125,9 @@ void Engine::toggleZoom()
     mode_ = Mode::Zoom;
     cursor_.setVisible(false);
     inventory_.setSuppressed(true);
-    setStatus("zoom: D-pad or stylus to pan, B to leave");
+    // 31 columns is what the status row has (DebugLog::consoleRow clips to it),
+    // and this used to be forty characters of advice that nothing rendered.
+    setStatus("zoom: pan, L notes, B leaves");
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,10 +1245,11 @@ void Engine::enterCard()
     if (card_ != entered)
         return;
 
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%s card %u", displayName(stack_.id), cardId_);
-    status_ = buf;
-
+    // No status line here. This used to set one -- "Temple Island card 155" --
+    // into a field nothing rendered, which was harmless while it went nowhere.
+    // Now that setStatus actually draws, a line per card entry would flash on
+    // every single move the player makes, which is the noise this whole change
+    // exists to remove. The status line is for answering a button press.
     logCardSummary();
 }
 
@@ -1268,7 +1303,7 @@ void Engine::logCardSummary() const
 // The frame loop
 // ---------------------------------------------------------------------------
 
-bool Engine::boot()
+bool Engine::boot(const SaveGame::SaveState *restore)
 {
     vars_.startNewGame();
     zipDests_.clear();
@@ -1290,6 +1325,22 @@ bool Engine::boot()
     // console rather than stopping the boot.
     cursor_.create();
     inventory_.create();
+
+    // The saved game, if the menu picked one. restoreFrom does its own refusing
+    // and says why; falling through to the normal boot is what turns "that slot
+    // names an island this conversion does not carry" into a playable new game
+    // rather than a dead machine.
+    if (restore != nullptr)
+    {
+        if (restoreFrom(*restore))
+            return true;
+        // It got far enough to lay the save's variables down before giving up,
+        // and those must not survive into the new game the fall-through starts
+        // -- aspit card 1 reading a half-finished playthrough's state would be
+        // a stranger bug than the failed load that caused it.
+        vars_.startNewGame();
+        zipDests_.clear();
+    }
 
     if (!changeToStack(kBootStack))
         return false;
@@ -1328,6 +1379,23 @@ void Engine::processInput()
         if ((down & (KEY_B | KEY_START)) != 0)
         {
             toggleZoom();
+            return;
+        }
+
+        // L snapshots the zoomed view into the notebook.
+        //
+        // Here rather than in the bare-L handler further down, because this
+        // branch owns the input while the viewer is up and returns before
+        // reaching it. This is the place the feature is most wanted: the player
+        // opened the viewer to READ something, and reading something in Riven is
+        // usually the prelude to writing it down.
+        //
+        // Guarded on SELECT because the developer-chord block is also below this
+        // branch and so never runs during zoom -- without the guard, SELECT+L
+        // meant as a screenshot would take a note instead.
+        if ((down & KEY_L) != 0 && (held & KEY_SELECT) == 0)
+        {
+            captureNote();
             return;
         }
 
@@ -1391,6 +1459,16 @@ void Engine::processInput()
             return;
         }
 
+        // The command prompt. On START because the two shoulder buttons are
+        // taken above and START is otherwise only a cutscene skip -- and it is
+        // the one chord that opens something rather than doing something, which
+        // is what the longest reach on the machine ought to be spent on.
+        if ((down & KEY_START) != 0)
+        {
+            runDebugConsole();
+            return;
+        }
+
         Transition t = Transition::None;
         if ((down & KEY_LEFT) != 0)
             t = Transition::PanLeft;
@@ -1410,6 +1488,35 @@ void Engine::processInput()
             surface_.markAll();
             refreshCard();
         }
+        return;
+    }
+
+    // The notebook, on the two buttons nothing else uses bare.
+    //
+    // Below the SELECT block on purpose: SELECT+L is the screenshot and SELECT+R
+    // the VRAM dump, and the block above returns before this, so the chords keep
+    // their meaning and the bare presses get the shoulder buttons and Y.
+    if ((keysDown() & KEY_L) != 0)
+    {
+        captureNote();
+        return;
+    }
+    if ((keysDown() & KEY_Y) != 0)
+    {
+        runNotebook();
+        return;
+    }
+
+    // START opens the port's own menu: save, load, settings, resume.
+    //
+    // Below the SELECT block, so SELECT+START stays available as a chord, and
+    // above everything else, so the menu cannot be opened by a press that also
+    // lands on a hotspot. Unreachable during a cutscene and from the zoom
+    // viewer, both of which return before this -- the viewer above, and a
+    // blocking movie because it spins its own loop and never calls this.
+    if ((keysDown() & KEY_START) != 0)
+    {
+        mainMenu.runInGameMenu();
         return;
     }
 
@@ -1684,6 +1791,9 @@ void Engine::frame()
     // keeps moving underneath a blocking movie, and a cutscene over a lagoon
     // does not freeze the lagoon.
     pumpWater();
+    // Before processInput, so a status raised by a button this frame gets its
+    // full hold rather than being ticked once on the frame it appeared.
+    DebugLog::pumpStatus();
 
     processInput();
 

@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "DebugLog.hpp"
 #include "Global.hpp"
 #include "RivenVars.hpp"
 #include "audio/RivenAudio.hpp"
@@ -60,7 +61,7 @@ void Settings::save() const
     std::FILE *f = std::fopen(path().c_str(), "wb");
     if (f == nullptr)
     {
-        std::printf("could not write settings.dat\n");
+        rivenrt::DebugLog::warn("could not write settings.dat");
         return;
     }
     const std::uint8_t buf[kBytes] = {

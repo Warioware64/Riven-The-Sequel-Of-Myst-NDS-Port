@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "DebugLog.hpp"
 #include "Global.hpp"
 #include "engine/Engine.hpp"
 #include "tonccpy.h"
@@ -32,12 +33,12 @@ bool Inventory::create()
     std::string error;
     if (!file_.load(global.extrasDir() + "inventory.rcur", error))
     {
-        std::printf("%s\n", error.c_str());
+        DebugLog::notice("%s", error.c_str());
         return false;
     }
     if (file_.celWidth() != kInvCelW || file_.celHeight() != kInvCelH)
     {
-        std::printf("inventory cels are %dx%d, not %dx%d\n", file_.celWidth(),
+        DebugLog::notice("inventory cels are %dx%d, not %dx%d", file_.celWidth(),
                     file_.celHeight(), kInvCelW, kInvCelH);
         file_.unload();
         return false;
@@ -58,7 +59,7 @@ bool Inventory::create()
                                             NEA_OBJ_COLOR_256);
         if (assets_[i] == nullptr)
         {
-            std::printf("no OBJ VRAM for the inventory\n");
+            DebugLog::notice("no OBJ VRAM for the inventory");
             destroy();
             return false;
         }
@@ -69,7 +70,7 @@ bool Inventory::create()
         items_[i].obj = NEA_Hw2DOBJCreateFromAsset(assets_[i]);
         if (items_[i].obj == nullptr)
         {
-            std::printf("no OAM entry for the inventory\n");
+            DebugLog::notice("no OAM entry for the inventory");
             destroy();
             return false;
         }

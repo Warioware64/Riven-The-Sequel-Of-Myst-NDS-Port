@@ -46,7 +46,11 @@ public:
     std::uint8_t masterVolume = 128;
 
     /// Trace every card change and every asset load to the top screen and to
-    /// <data>/debug.log, and turn on the screenshot and VRAM-dump chords. Off,
+    /// <data>/debug.log, turn on the screenshot and VRAM-dump chords, and let
+    /// SELECT+START open the command console (engine/DebugConsole.cpp -- which
+    /// needs this off in normal play for a hardware reason as well as a taste
+    /// one: its keyboard writes over the palette entries the top-screen picture
+    /// is using). Off,
     /// and not a preference: it is loud enough to push the failures the console
     /// exists to show off the screen. See DebugLog.hpp.
     ///

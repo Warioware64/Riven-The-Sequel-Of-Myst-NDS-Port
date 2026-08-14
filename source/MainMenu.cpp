@@ -3,7 +3,9 @@
 #include <cstdio>
 #include <string>
 
+#include "DebugLog.hpp"
 #include "Global.hpp"
+#include "SaveGame.hpp"
 #include "Settings.hpp"
 #include "engine/Engine.hpp"
 #include "global_header.hpp"
@@ -145,13 +147,109 @@ namespace
         inv.setSuppressed(!on);
         inv.flush();
     }
+
+    /// How many port screens are stacked on the display, and whether the
+    /// outermost one found a game running. File-static because the nesting is
+    /// between two separate calls, not inside one.
+    int g_screenDepth = 0;
+    bool g_screenInGame = false;
+
+    /// Taking the display away from the card view, and giving it back.
+    ///
+    /// Every port screen does the same eight things in the same order, and two
+    /// of them were bugs before commit 1f4daf8: a buffer written past kViewH has
+    /// to be handed back with resetBuffer, and the inventory strip has to be put
+    /// away with setSuppressed rather than setForcedHidden, which belongs to
+    /// Riven's own scripts (Inventory.hpp).
+    ///
+    /// COUNTED, and that is the point of making it a guard rather than a pair of
+    /// functions. The in-game menu opens the settings screen, which is a port
+    /// screen opening a port screen; beginMovieTakeover is idempotent but
+    /// endMovieTakeover is not, so the inner screen closing would hand the card
+    /// back while the outer one was still drawing over it. Only the outermost
+    /// takes and returns the display.
+    ///
+    /// Scope-bound for the reason CursorHide is (Engine.hpp): these screens have
+    /// early returns, and a hand-written take/release pair leaks the display on
+    /// every one of them.
+    struct ScreenTakeover
+    {
+        ScreenTakeover()
+        {
+            if (g_screenDepth++ > 0)
+                return;
+            // The card view, if there is one, is on the front buffer and must
+            // survive: these screens are reachable mid-game, and the card has to
+            // come back afterwards without being reloaded. Same trick a
+            // fullscreen movie uses (BgSurface.hpp:94-100).
+            g_screenInGame = engine.booted();
+            if (g_screenInGame)
+                bgs.beginMovieTakeover();
+            bgs.setLetterbox(false);
+            showPointer(false);
+            showInventory(false);
+        }
+
+        ~ScreenTakeover()
+        {
+            if (--g_screenDepth > 0)
+                return;
+            bgs.setLetterbox(true);
+            if (g_screenInGame)
+            {
+                // Every buffer but the one holding the parked card. The text is
+                // opaque and was drawn on all 192 rows, so the rows below the
+                // card view have to be handed back transparent or the next
+                // vertical pan would slide black through the view.
+                for (int b = 0; b < BgSurface::kBuffers; ++b)
+                    if (b != bgs.parkedBuffer())
+                        bgs.resetBuffer(b);
+
+                (void)bgs.endMovieTakeover();
+                engine.surface().invalidateAll();
+                engine.applyScreenUpdate(true);
+                showPointer(true);
+            }
+            // Outside the branch: the strip is suppressed on the way in whether
+            // or not a game is running, so it has to be released either way.
+            showInventory(true);
+        }
+
+        ScreenTakeover(const ScreenTakeover &) = delete;
+        ScreenTakeover &operator=(const ScreenTakeover &) = delete;
+    };
+
+    /// Where a picker's one line of explanation goes: between the title and the
+    /// first row, in the gap kFirstY already leaves.
+    constexpr int kNoteY = 38;
+
+    /// Draw a titled list of rows, with a marker on the selection and a note
+    /// under the title. The tail of every screen in this file.
+    void paint(const char *title, const std::string *labels, int rows, int sel,
+               const std::string &note)
+    {
+        textLayer.target(bgs.backBuffer());
+        textLayer.clear();
+        textLayer.draw(kTextX, kTitleY, title);
+        if (!note.empty())
+            textLayer.draw(kTextX, kNoteY, note);
+        for (int i = 0; i < rows; ++i)
+        {
+            const int y = kFirstY + i * kRowStep;
+            if (i == sel)
+                textLayer.draw(kMarkX, y, ">");
+            textLayer.draw(kTextX, y, labels[i]);
+        }
+        // Shown at the top of the next turn, by frame().
+        bgs.requestFlip();
+    }
 } // namespace
 
 void MainMenu::runSettings()
 {
     if (!usable())
     {
-        std::printf("settings need the menu font; not showing them\n");
+        DebugLog::warn("settings need the menu font; not showing them");
         return;
     }
 
@@ -171,16 +269,7 @@ void MainMenu::runSettings()
     bool changed = false;
     bool leaving = false;
 
-    // The card view, if there is one, is on the front buffer and must survive:
-    // the settings screen can be opened mid-game from Riven's own Options
-    // button, and the card has to come back afterwards without being reloaded.
-    // This is the same trick a fullscreen movie uses (BgSurface.hpp:94-100).
-    const bool inGame = engine.booted();
-    if (inGame)
-        bgs.beginMovieTakeover();
-    bgs.setLetterbox(false);
-    showPointer(false);
-    showInventory(false);
+    ScreenTakeover screen;
 
     while (true)
     {
@@ -252,10 +341,6 @@ void MainMenu::runSettings()
             continue;
         s.dirty = false;
 
-        textLayer.target(bgs.backBuffer());
-        textLayer.clear();
-        textLayer.draw(kTextX, kTitleY, "Settings");
-
         const char *const onOff[2] = {"Off", "On"};
         const std::string labels[kRowCount] = {
             std::string("Zip mode: ") + onOff[settings.zipMode],
@@ -268,15 +353,7 @@ void MainMenu::runSettings()
             std::string("Debug log: ") + onOff[settings.debugMode] + " (on restart)",
             "Back",
         };
-        for (int i = 0; i < kRowCount; ++i)
-        {
-            const int y = kFirstY + i * kRowStep;
-            if (i == s.sel)
-                textLayer.draw(kMarkX, y, ">");
-            textLayer.draw(kTextX, y, labels[i]);
-        }
-        // Shown at the top of the next turn, by frame().
-        bgs.requestFlip();
+        paint("Settings", labels, kRowCount, s.sel, std::string());
     }
 
     if (changed)
@@ -284,47 +361,347 @@ void MainMenu::runSettings()
         settings.save();
         settings.apply();
     }
+}
 
-    bgs.setLetterbox(true);
-    if (inGame)
+namespace
+{
+    /// Let the player pick one of the five slots. Returns 1..5, or 0 for cancel.
+    ///
+    /// `forSaving` changes three things and nothing else: the title, whether an
+    /// occupied slot asks before it is used, and whether an empty one is a
+    /// refusal or the obvious choice.
+    ///
+    /// The caller owns the display -- every route in here is already inside a
+    /// ScreenTakeover -- so this only draws and reads input.
+    int pickSlot(bool forSaving)
     {
-        // Every buffer but the one holding the parked card. The text is opaque
-        // and it was drawn on all 192 rows, so the rows below the card view have
-        // to be handed back transparent or the next vertical pan would slide
-        // black through the view instead of the outgoing card
-        // (BgSurface::resetBuffer).
-        for (int b = 0; b < BgSurface::kBuffers; ++b)
-            if (b != bgs.parkedBuffer())
-                bgs.resetBuffer(b);
+        // Read once, on the way in. Five file headers is five seeks; doing it in
+        // the repaint would put them in the frame loop for a list that only
+        // changes when this screen itself writes a slot.
+        SaveGame::SlotInfo info[SaveGame::kSlotCount];
+        std::string labels[SaveGame::kSlotCount + 1];
+        const int rows = SaveGame::kSlotCount + 1;
+        const int rowBack = SaveGame::kSlotCount;
 
-        // Hands the card back. Everything else this screen drew on has to be
-        // rebuilt, and it drew on more than the one buffer endMovieTakeover
-        // names -- see CardSurface::invalidateAll.
-        (void)bgs.endMovieTakeover();
-        engine.surface().invalidateAll();
-        engine.applyScreenUpdate(true);
-        showPointer(true);
+        const auto rescan = [&]() {
+            for (int i = 0; i < SaveGame::kSlotCount; ++i)
+            {
+                info[i] = SaveGame::readSlotInfo(i + 1);
+                labels[i] = SaveGame::slotLabel(i + 1, info[i]);
+            }
+            labels[rowBack] = "Back";
+        };
+        rescan();
+
+        Screen s;
+        s.rows = rows;
+        std::string note;
+        // Which slot the player has been asked to confirm overwriting, or -1.
+        // An in-place prompt rather than a modal: the list is the context for
+        // the question, and covering it up to ask would take that away.
+        int confirming = -1;
+
+        while (true)
+        {
+            frame();
+            scanKeys();
+            const int down = keysDown();
+
+            touchPosition t = {};
+            const bool touched = (down & KEY_TOUCH) != 0;
+            if (touched)
+                touchRead(&t);
+
+            if (confirming >= 0)
+            {
+                // The prompt swallows the D-pad: moving the selection out from
+                // under a question about a particular slot would leave the
+                // answer attached to the wrong one.
+                if (down & KEY_A)
+                    return confirming;
+                if (down & (KEY_B | KEY_START))
+                {
+                    confirming = -1;
+                    note.clear();
+                    s.dirty = true;
+                }
+                if (!s.dirty)
+                    continue;
+                s.dirty = false;
+                paint(forSaving ? "Save game" : "Load game", labels, rows, s.sel, note);
+                continue;
+            }
+
+            const bool activate = s.step(down, t.px, t.py, touched);
+            if (down & (KEY_B | KEY_START))
+                return 0;
+
+            if (activate)
+            {
+                if (s.sel == rowBack)
+                    return 0;
+
+                const int slot = s.sel + 1;
+                const SaveGame::SlotInfo &si = info[s.sel];
+                if (forSaving)
+                {
+                    // A damaged slot counts as occupied. The file may be the
+                    // only copy of a game the player still wants to look at on a
+                    // PC, so it gets the same question a good one does.
+                    if (si.used || si.damaged)
+                    {
+                        confirming = slot;
+                        note = "Overwrite?  A: yes   B: no";
+                    }
+                    else
+                    {
+                        return slot;
+                    }
+                }
+                else if (si.damaged)
+                {
+                    // Three failures, three notes. "Load failed" for all of them
+                    // tells the player nothing they can do anything about.
+                    note = "Damaged - save over it to reuse";
+                }
+                else if (!si.used)
+                {
+                    // A row that simply ignored the button would read as a
+                    // frozen menu.
+                    note = "That slot is empty";
+                }
+                else
+                {
+                    return slot;
+                }
+                s.dirty = true;
+            }
+
+            if (!s.dirty)
+                continue;
+            s.dirty = false;
+            paint(forSaving ? "Save game" : "Load game", labels, rows, s.sel, note);
+        }
     }
-    // Outside the inGame branch: the strip is suppressed on the way in whether
-    // or not a game is running, so it has to be released either way.
-    showInventory(true);
+    /// One line of bad news and a way out.
+    ///
+    /// On the screen the player is looking at, and not only on the console: with
+    /// debug mode off the console says nothing at all (DebugLog.hpp), so a save
+    /// or load that silently did not happen would be found out about at the
+    /// worst possible moment. The caller already owns the display.
+    void showNotice(const char *title, const char *text)
+    {
+        Screen s;
+        s.rows = 1;
+        const std::string labels[1] = {"Back"};
+        while (true)
+        {
+            frame();
+            scanKeys();
+            const int down = keysDown();
+            touchPosition t = {};
+            const bool touched = (down & KEY_TOUCH) != 0;
+            if (touched)
+                touchRead(&t);
+            if (s.step(down, t.px, t.py, touched) || (down & (KEY_B | KEY_START)))
+                break;
+            if (!s.dirty)
+                continue;
+            s.dirty = false;
+            paint(title, labels, 1, 0, text);
+        }
+    }
+} // namespace
+
+void MainMenu::runSavePicker()
+{
+    if (!usable() || !global.hasFat)
+    {
+        DebugLog::warn("saves need the menu font and a card");
+        return;
+    }
+    ScreenTakeover screen;
+
+    // Riven's own menu and its journals are aspit cards, and Riven's Save button
+    // is ON one of them -- so this is reachable with the engine standing
+    // somewhere that is not a place in the game. Saving it would write a slot
+    // that loads back to the menu, and it could overwrite a real playthrough to
+    // do it.
+    //
+    // Refused rather than redirected: where the player came from is in
+    // ReturnStackId/ReturnCardId, but ReturnCardId is an RMAP GLOBAL id and
+    // turning one into the local id a save stores needs the target stack's own
+    // table, which is not the stack that is loaded. Saving the return position
+    // properly means storing global ids, and that is a format change rather
+    // than a fix.
+    if (engine.booted() && engine.stack().id == rivendata::StackId::Aspit)
+    {
+        showNotice("Save game", "Not from the menu - save in the game");
+        return;
+    }
+
+    const int slot = pickSlot(true);
+    if (slot == 0)
+        return;
+
+    const bool ok = SaveGame::writeSlot(slot, engine.buildSaveState());
+    DebugLog::note("SAVE slot %d %s", slot, ok ? "ok" : "FAILED");
+    if (!ok)
+        showNotice("Save game", "Could not write to the card");
+}
+
+bool MainMenu::runLoadPicker()
+{
+    if (!usable() || !global.hasFat)
+    {
+        DebugLog::warn("saves need the menu font and a card");
+        return false;
+    }
+    ScreenTakeover screen;
+
+    const int slot = pickSlot(false);
+    if (slot == 0)
+        return false;
+
+    SaveGame::SaveState state;
+    if (!SaveGame::readSlot(slot, state))
+    {
+        // The slot listed as usable -- its header parsed -- and the payload
+        // behind it did not. That is the length or the checksum catching a file
+        // the menu had already offered, so the player has to be told here; the
+        // list will keep showing it as a save until it is written over.
+        DebugLog::warn("load: slot %d would not read", slot);
+        showNotice("Load game", "That save is damaged");
+        return false;
+    }
+
+    if (!engine.booted())
+    {
+        // The boot menu. There is no engine to restore into yet, so the state is
+        // held for main() to hand to boot() -- which is what keeps a load from
+        // entering aspit card 1 and starting the intro on its way past.
+        load_ = std::move(state);
+        haveLoad_ = true;
+        return true;
+    }
+
+    // Mid-game. Note that this may be DEFERRED rather than done: opened from
+    // Riven's own Restore button we are inside a script, and restoreFrom holds
+    // the load until the interpreter is out of the stack it would replace. True
+    // means accepted either way, which is what the caller needs to know.
+    if (!engine.restoreFrom(state))
+    {
+        DebugLog::warn("load: slot %d could not be entered", slot);
+        return false;
+    }
+    return true;
+}
+
+void MainMenu::runInGameMenu()
+{
+    if (!usable())
+    {
+        DebugLog::warn("the in-game menu needs the menu font");
+        return;
+    }
+
+    enum Row
+    {
+        RowSave = 0,
+        RowLoad,
+        RowNotebook,
+        RowSettings,
+        RowResume,
+        kRowCount,
+    };
+
+    bool wantNotebook = false;
+    {
+        ScreenTakeover screen;
+        Screen s;
+        s.rows = kRowCount;
+
+        while (true)
+        {
+            frame();
+            scanKeys();
+            const int down = keysDown();
+
+            touchPosition t = {};
+            const bool touched = (down & KEY_TOUCH) != 0;
+            if (touched)
+                touchRead(&t);
+
+            if (down & (KEY_B | KEY_START))
+                break;
+
+            if (s.step(down, t.px, t.py, touched))
+            {
+                bool leave = false;
+                switch (s.sel)
+                {
+                case RowSave:
+                    runSavePicker();
+                    break;
+                case RowLoad:
+                    // A load replaces the card this menu is sitting on top of,
+                    // so there is nothing left to come back to: close on
+                    // success. Asking the picker rather than watching the card
+                    // id, because a card id is stack-LOCAL -- loading Jungle
+                    // island's card 155 while standing on Temple island's card
+                    // 155 would look like nothing had happened.
+                    leave = runLoadPicker();
+                    break;
+                case RowNotebook:
+                    // The notebook takes the screen ITSELF, and not the way a
+                    // port screen does: it claims a buffer and stops flipping
+                    // (NoteView.cpp), which cannot be nested inside this
+                    // screen's takeover. So this menu closes first and the
+                    // notebook is opened below, outside the guard.
+                    leave = true;
+                    wantNotebook = true;
+                    break;
+                case RowSettings:
+                    runSettings();
+                    break;
+                case RowResume:
+                    leave = true;
+                    break;
+                default:
+                    break;
+                }
+                if (leave)
+                    break;
+                s.dirty = true;
+            }
+
+            if (!s.dirty)
+                continue;
+            s.dirty = false;
+
+            const std::string labels[kRowCount] = {"Save game", "Load game", "Notebook",
+                                                   "Settings", "Resume"};
+            paint("Riven", labels, kRowCount, s.sel, std::string());
+        }
+    }
+
+    if (wantNotebook)
+        engine.runNotebook();
 }
 
 void MainMenu::run()
 {
     if (!usable())
     {
-        std::printf("no menu: starting the game directly\n");
+        DebugLog::warn("no menu: starting the game directly");
         return;
     }
 
     enum Row
     {
         RowNewGame = 0,
+        RowLoad,
         RowSettings,
-        // Load save belongs here, and does not exist yet: saves are the other
-        // half of milestone 9. A row that said so and did nothing would be
-        // worse than the gap.
         kRowCount,
     };
 
@@ -349,6 +726,16 @@ void MainMenu::run()
         {
             if (s.sel == RowNewGame)
                 break;
+            if (s.sel == RowLoad)
+            {
+                runLoadPicker();
+                if (haveLoad_)
+                    break; // main() boots straight into it
+                // runLoadPicker left the screen its own way; take it back.
+                bgs.setLetterbox(false);
+                showPointer(false);
+                s.dirty = true;
+            }
             if (s.sel == RowSettings)
             {
                 runSettings();
@@ -363,18 +750,8 @@ void MainMenu::run()
             continue;
         s.dirty = false;
 
-        textLayer.target(bgs.backBuffer());
-        textLayer.clear();
-        textLayer.draw(kTextX, kTitleY, "Riven");
-
-        const char *const labels[kRowCount] = {"New game", "Settings"};
-        for (int i = 0; i < kRowCount; ++i)
-        {
-            const int y = kFirstY + i * kRowStep;
-            if (i == s.sel)
-                textLayer.draw(kMarkX, y, ">");
-            textLayer.draw(kTextX, y, labels[i]);
-        }
+        const std::string labels[kRowCount] = {"New game", "Load game", "Settings"};
+        paint("Riven", labels, kRowCount, s.sel, std::string());
         // Shown at the top of the next turn, by frame().
         bgs.requestFlip();
     }

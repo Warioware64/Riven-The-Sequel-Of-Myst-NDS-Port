@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "DebugLog.hpp"
 #include "Global.hpp"
 #include "render/BgSurface.hpp"
 #include "tonccpy.h"
@@ -56,7 +57,7 @@ bool TextLayer::create()
         return true;
     if (!global.hasNitroFS || !bgs.exists())
     {
-        std::printf("no menu font: %s\n",
+        DebugLog::notice("no menu font: %s",
                     global.hasNitroFS ? "the card view is not up" : "no NitroFS");
         return false;
     }
@@ -64,7 +65,7 @@ bool TextLayer::create()
     fontTexture_ = loadFontTexture();
     if (fontTexture_ == nullptr)
     {
-        std::printf("no menu font: %s is missing\n", kFontTexture);
+        DebugLog::notice("no menu font: %s is missing", kFontTexture);
         return false;
     }
 
@@ -79,7 +80,7 @@ bool TextLayer::create()
         if (g_ctx[b] == nullptr)
         {
             destroy();
-            std::printf("no menu font: could not make a text context\n");
+            DebugLog::notice("no menu font: could not make a text context");
             return false;
         }
         NEA_Hw2DTextCtxMetadataLoadFAT(g_ctx[b], kFontMetadata);

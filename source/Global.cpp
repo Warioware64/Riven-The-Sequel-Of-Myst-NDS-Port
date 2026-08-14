@@ -1,5 +1,6 @@
 #include "Global.hpp"
 
+#include "DebugLog.hpp"
 #include "RivenData.hpp"
 
 Global global;
@@ -116,19 +117,27 @@ void Global::Init()
     dmaFillWords(0, VRAM_C, 128 * 1024);
     BG_PALETTE_SUB[0] = 0;
 
-    // The top screen is the log. Every diagnostic in this port is a std::printf --
-    // a movie that is not on the card, a card id a script asked for and the stack
-    // does not have, an external command nobody has written yet -- and on hardware
-    // stdout goes nowhere, so all of them are experienced as the game silently not
-    // doing something. A console on the sub engine costs one call and makes the
-    // whole set visible, with no work at any of the call sites.
+    // The top screen's console. Every diagnostic in this port reaches it through
+    // DebugLog, which decides -- in one function -- which of them a player with
+    // debug mode off actually sees: startup notices and a transient status line,
+    // and nothing else, because the rest of the screen is Riven's own splash and
+    // console glyphs are opaque white on top of it. See DebugLog.hpp.
+    //
+    // Standing it up here rather than in DebugLog costs one call and means the
+    // console exists before anything can fail, which is what lets the "cannot
+    // start" screens in main() have somewhere to print.
     //
     // Mode 5 keeps BG0 and BG1 tiled (only BG2/BG3 became bitmaps above), so the
     // console takes BG0. Map base 31 puts the map at the top of the 128 KB bank,
-    // well clear of the tiles at base 0; nothing else claims VRAM_C.
-    hasConsole = consoleInit(nullptr, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 0,
-                             false, true)
-                 != nullptr;
+    // well clear of the 3 KB of font at tile base 0.
+    //
+    // That gap is not spare room, it is the debug console's: BG1 is the other
+    // tiled layer and the libnds keyboard goes there, 27 KB of tiles at tile
+    // base 1 and its map at base 28. See the VRAM table in
+    // engine/DebugConsole.cpp -- these three numbers and TopBg's bitmap base are
+    // the whole of what claims VRAM_C, and they are chosen together.
+    console = consoleInit(nullptr, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 0, false,
+                          true);
 }
 
 void Global::EnsureDataDirs()
@@ -143,6 +152,7 @@ void Global::EnsureDataDirs()
     // error_code overload keeps a full or write-protected card from throwing.
     std::error_code ec;
     std::filesystem::create_directories(savesDir(), ec);
+    std::filesystem::create_directories(notesDir(), ec);
 }
 
 Global::DataStatus Global::CheckData() const
@@ -184,10 +194,10 @@ void Global::ReportOptionalData() const
         // The single most likely explanation for "the game shows no video", and
         // nothing downstream can tell it from a card that simply has no movie on
         // it: activateMlst only ever learns about one missing file at a time.
-        std::printf("no video/ on the card: converted with --no-video?\n");
+        rivenrt::DebugLog::notice("no video/ on the card: converted with --no-video?");
     }
     if (!std::filesystem::exists(cursorsDir(), ec))
-        std::printf("no cursors/ on the card: plain pointer\n");
+        rivenrt::DebugLog::notice("no cursors/ on the card: plain pointer");
 }
 
 const char *Global::DataStatusTitle(DataStatus s)
