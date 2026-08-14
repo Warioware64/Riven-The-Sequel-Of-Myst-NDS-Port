@@ -222,6 +222,20 @@ namespace
 
         check(f.seekToFrame(expectFrames) < 0, label + ": seeking past the end is refused");
         check(f.rewind() && f.position() == 0, label + ": rewind goes to frame 0");
+
+        // And that reading CARRIES ON in order from wherever the seek landed,
+        // which is what segment playback is: RvidPlayer::play(loop, start, stop)
+        // enters a movie part way through and reads a run of it (the telescope
+        // plays a fifth of one long movie per press).
+        if (expectFrames > 4)
+        {
+            const std::uint32_t from = expectFrames / 2;
+            const std::uint32_t want = expectFrames - from < 4 ? expectFrames - from : 4;
+            bool runOk = f.seekToFrame(from) == static_cast<std::int32_t>(from);
+            for (std::uint32_t i = 0; runOk && i < want; ++i)
+                runOk = f.readNext(frame) && frame.index == from + i;
+            check(runOk, label + ": a run reads in order from the middle of the file");
+        }
     }
 
     /// The check the codec comparison was replaced by: what is in the file is

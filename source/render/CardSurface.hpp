@@ -48,7 +48,13 @@ public:
     /// True while there is a RAM picture.
     bool exists() const { return texels_ != nullptr; }
 
-    /// The RAM picture, kViewW x kViewH ARGB1555. Write to it, then markRows().
+    /// The RAM picture as it should LOOK -- the card plus whatever movie
+    /// overlays are live. This is what publish() sends.
+    ///
+    /// Engine::pumpMovies is its one legal writer from outside this class, and
+    /// only for overlay frames: it must say so with noteOverlayRows() rather
+    /// than markRowMask(), or the pixels it wrote can never be taken back off.
+    /// Everything else draws through drawPicture()/clear().
     rivendata::Texel *texels() { return texels_; }
     const rivendata::Texel *texels() const { return texels_; }
 
@@ -70,6 +76,35 @@ public:
     /// composite returns.
     void markRowMask(std::uint32_t mask);
     void markAll();
+
+    // --- movie overlays -----------------------------------------------------
+
+    /// markRowMask, and remember that a MOVIE put those rows there.
+    ///
+    /// That is the whole difference between an overlay and a drawing: a drawing
+    /// is the card, an overlay is on top of it for as long as it plays.
+    void noteOverlayRows(std::uint32_t mask);
+
+    /// Take the overlays back off: every row an overlay has written since the
+    /// last refresh goes back to what the card's own drawing put there, and is
+    /// marked for publishing.
+    ///
+    /// RivenGraphics::updateScreen (riven_graphics.cpp:383-401), which repaints
+    /// the whole card from _mainScreen at every completed screen update and is
+    /// what makes an overlay's last frame disappear in the original. Cheap when
+    /// nothing composited, which is most updates.
+    ///
+    /// The caller must re-composite everything still playing straight after --
+    /// see Engine::recompositeOverlays. A restored row is card-wide and may be
+    /// shared with an overlay that has no new frame to draw.
+    void refreshFromClean();
+
+    /// Make an overlay's rect part of the card, so the next refresh keeps it.
+    ///
+    /// RivenVideo::disable (riven_video.cpp:288-301), and it is load-bearing:
+    /// gspit's pins play a movie, disable it and return without redrawing
+    /// anything, so the baked frame IS the puzzle's state (gspit.cpp:58-82).
+    void bakeRect(int x, int y, int w, int h);
 
     bool anyDirty(int buf) const { return dirty_[buf] != 0; }
 
@@ -100,7 +135,14 @@ public:
     void publish(BgSurface &bg, int buf);
 
 private:
+    /// What the screen should show: the card plus the overlays that are live.
     rivendata::Texel *texels_ = nullptr;
+    /// The card ALONE, as its own drawing left it -- ScummVM's _mainScreen. The
+    /// second plane is what makes an overlay undoable: a movie composites into
+    /// texels_ only, so the still it covers is still here to be put back.
+    rivendata::Texel *clean_ = nullptr;
+    /// Bands an overlay has written into texels_ since the last refresh.
+    std::uint32_t overlayRows_ = 0;
     std::uint32_t dirty_[BgSurface::kBuffers] = {};
 };
 

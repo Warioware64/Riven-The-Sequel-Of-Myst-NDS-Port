@@ -144,16 +144,25 @@ void Inventory::update(Engine &e)
     if (e.vars().get(VarId::ATrapBook) == 1)
         want |= 1 << (kInvTrapBook - kInvTrapBook);
 
+    // Reasons the strip may not be shown AT ALL, whatever the pointer is doing.
     // Hidden on aspit -- that is the menu and the journals themselves, and the
     // original hides it there too (riven_inventory.cpp:168-193). Hidden while a
     // fullscreen movie owns the screen, because it is a cutscene.
-    const bool hide = forcedHidden_ || suppressed_ || e.stack().id == StackId::Aspit
-                      || e.fullscreenMoviePlaying();
+    const bool blocked = forcedHidden_ || suppressed_ || e.stack().id == StackId::Aspit
+                         || e.fullscreenMoviePlaying();
 
-    if (want != shown_ || hide != hidden_)
+    // And the last condition, which is the pointer's: the strip appears when it
+    // is pointed at and not before. RivenInventory::isVisible ends on
+    // `mouse.y >= 392` (riven_inventory.cpp:194-195) -- the band under the
+    // picture -- and kBandTop is that line in DS rows. Without it Atrus's
+    // journal sat on the screen for the whole game.
+    const bool hide = blocked || e.pointerY() < kBandTop;
+
+    if (want != shown_ || hide != hidden_ || blocked != blocked_)
     {
         shown_ = want;
         hidden_ = hide;
+        blocked_ = blocked;
         layout();
         dirty_ = true;
     }
@@ -161,7 +170,12 @@ void Inventory::update(Engine &e)
 
 std::uint16_t Inventory::hitTest(int x, int y) const
 {
-    if (!exists() || hidden_ || y < kBandTop || y >= kBandBottom)
+    // blocked_ and not hidden_: the band test below IS the hover test, and
+    // hidden_ is one frame behind it. Engine::processInput calls this before
+    // Engine::frame gets to update(), so on the frame the pointer first enters
+    // the band hidden_ is still true -- and a tap that arrives with it, which is
+    // what a stylus tap on the strip looks like, would be thrown away.
+    if (!exists() || blocked_ || y < kBandTop || y >= kBandBottom)
         return 0;
     for (const Item &it : items_)
     {
@@ -217,7 +231,10 @@ void Inventory::setSuppressed(bool on)
     // knows the rest of the answer (the stack, a movie). Deciding "visible"
     // here would mean duplicating that test and getting to disagree with it.
     if (on)
+    {
+        blocked_ = true;
         hidden_ = true;
+    }
 }
 
 void Inventory::flush()

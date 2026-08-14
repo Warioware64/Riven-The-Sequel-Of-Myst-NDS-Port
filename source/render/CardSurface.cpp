@@ -18,6 +18,10 @@ namespace
 
     static_assert(CardSurface::kRowBlock == 8,
                   "BgSurface::uploadRows assumes an 8-row dirty block");
+
+    /// One plane. There are two of them -- see the members.
+    constexpr std::size_t kPlaneTexels = static_cast<std::size_t>(kViewW) * kViewH;
+    constexpr std::size_t kPlaneBytes = kPlaneTexels * sizeof(Texel);
 } // namespace
 
 bool CardSurface::create()
@@ -25,21 +29,25 @@ bool CardSurface::create()
     if (texels_ != nullptr)
         return true;
 
-    texels_ = static_cast<Texel *>(
-        std::malloc(static_cast<std::size_t>(kViewW) * kViewH * sizeof(Texel)));
-    if (texels_ == nullptr)
+    texels_ = static_cast<Texel *>(std::malloc(kPlaneBytes));
+    clean_ = static_cast<Texel *>(std::malloc(kPlaneBytes));
+    if (texels_ == nullptr || clean_ == nullptr)
+    {
+        // All or nothing: every path below assumes the two planes exist together.
+        destroy();
         return false;
+    }
     clear();
     return true;
 }
 
 void CardSurface::destroy()
 {
-    if (texels_ != nullptr)
-    {
-        std::free(texels_);
-        texels_ = nullptr;
-    }
+    std::free(texels_);
+    std::free(clean_);
+    texels_ = nullptr;
+    clean_ = nullptr;
+    overlayRows_ = 0;
     for (std::uint32_t &d : dirty_)
         d = 0;
 }
@@ -51,8 +59,9 @@ void CardSurface::clear()
     // Opaque black, not transparent: a transparent texel is skipped by the
     // blender and would show the 3D clear colour through the card.
     const Texel black = static_cast<Texel>(0x8000);
-    for (std::size_t i = 0, n = static_cast<std::size_t>(kViewW) * kViewH; i < n; ++i)
-        texels_[i] = black;
+    for (std::size_t i = 0; i < kPlaneTexels; ++i)
+        texels_[i] = clean_[i] = black;
+    overlayRows_ = 0;
     markAll();
 }
 
@@ -134,25 +143,92 @@ bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
     // overlay whose converted size does not match the card scale
     // (ImagePipeline.cpp:247-255). Resampling it properly would mean a second
     // filter on the DS for a case the eye cannot resolve at this size.
+    //
+    // BOTH PLANES, in the one loop. This is a script drawing, so it belongs to
+    // the card and has to reach `clean_`; it also has to be seen now, so it has
+    // to reach `texels_`. Mirroring afterwards instead would mean re-deriving
+    // this clipped rect a second time, one clamp away from disagreeing with the
+    // write it is meant to copy.
     for (int y = 0; y < dh; ++y)
     {
         const int sy = img.height == dh ? y : y * img.height / dh;
         const rivendata::Texel *src =
             img.texels.data() + static_cast<std::size_t>(sy) * img.width;
-        Texel *dst = texels_ + static_cast<std::size_t>(y0 + y) * kViewW + x0;
+        const std::size_t at = static_cast<std::size_t>(y0 + y) * kViewW + x0;
+        Texel *dst = texels_ + at;
+        Texel *keep = clean_ + at;
         if (img.width == dw)
         {
-            std::memcpy(dst, src, static_cast<std::size_t>(dw) * sizeof(Texel));
+            const std::size_t bytes = static_cast<std::size_t>(dw) * sizeof(Texel);
+            std::memcpy(dst, src, bytes);
+            std::memcpy(keep, src, bytes);
         }
         else
         {
             for (int x = 0; x < dw; ++x)
-                dst[x] = src[x * img.width / dw];
+                dst[x] = keep[x] = src[x * img.width / dw];
         }
     }
 
     markRows(y0, dh);
     return true;
+}
+
+void CardSurface::noteOverlayRows(std::uint32_t mask)
+{
+    overlayRows_ |= mask;
+    markRowMask(mask);
+}
+
+void CardSurface::refreshFromClean()
+{
+    if (texels_ == nullptr || overlayRows_ == 0)
+        return;
+
+    // Whole rows, not the overlay's rect. A dirty band is card-wide and `clean_`
+    // holds the right content for all of it, so restoring the band is both
+    // simpler and more correct than tracking rects -- and a band shared with a
+    // second, still-running overlay is put back by the recomposite that follows
+    // this (Engine::recompositeOverlays).
+    for (int b = 0; b < kRowBlocks; ++b)
+    {
+        if ((overlayRows_ & (1u << b)) == 0)
+            continue;
+        const int y0 = b * kRowBlock;
+        int rows = kRowBlock;
+        if (y0 + rows > kViewH)
+            rows = kViewH - y0;
+        if (rows <= 0)
+            continue;
+        const std::size_t at = static_cast<std::size_t>(y0) * kViewW;
+        std::memcpy(texels_ + at, clean_ + at,
+                    static_cast<std::size_t>(rows) * kViewW * sizeof(Texel));
+    }
+
+    markRowMask(overlayRows_);
+    overlayRows_ = 0;
+}
+
+void CardSurface::bakeRect(int x, int y, int w, int h)
+{
+    if (texels_ == nullptr || w <= 0 || h <= 0)
+        return;
+
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w > kViewW ? kViewW : x + w;
+    int y1 = y + h > kViewH ? kViewH : y + h;
+    if (x1 <= x0 || y1 <= y0)
+        return;
+
+    // No dirty marking: these texels are already in `texels_` and have already
+    // been published. All this decides is that they SURVIVE the next refresh.
+    const std::size_t bytes = static_cast<std::size_t>(x1 - x0) * sizeof(Texel);
+    for (int row = y0; row < y1; ++row)
+    {
+        const std::size_t at = static_cast<std::size_t>(row) * kViewW + x0;
+        std::memcpy(clean_ + at, texels_ + at, bytes);
+    }
 }
 
 void CardSurface::publish(BgSurface &bg, int buf)

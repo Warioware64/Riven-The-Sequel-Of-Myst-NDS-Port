@@ -70,7 +70,25 @@ public:
 
     /// Start (or restart) playback from frame 0, taking the audio stream if the
     /// movie has a soundtrack and nothing else already holds it.
-    bool play(bool loop);
+    bool play(bool loop) { return play(loop, 0, lastFrame()); }
+
+    /// The same for a SEGMENT: start at `startFrame` and finish after
+    /// `stopFrame`, both clamped to the file. Riven's telescope is what needs it
+    /// -- one press moves the tube a fifth of its travel, and the original plays
+    /// the matching slice of one long movie rather than five short ones
+    /// (tspit.cpp:xtexterior300_telescopeup).
+    ///
+    /// Every frame is a valid entry point (RvidFile::seekToFrame), so this is an
+    /// exact seek and the clock is offset to match. `loop` is ignored unless the
+    /// range is the whole movie: a loop rewinds to frame 0, which a segment does
+    /// not own.
+    bool play(bool loop, std::uint32_t startFrame, std::uint32_t stopFrame);
+
+    /// Last frame in the file, or 0 for an empty one.
+    std::uint32_t lastFrame() const
+    {
+        return file_.frameCount() > 0 ? file_.frameCount() - 1 : 0;
+    }
 
     /// Stop, releasing the audio stream but keeping the file open so the next
     /// play() does not have to re-read the header. Riven restarts the same movie
@@ -93,10 +111,23 @@ public:
     /// upload only those. Zero when nothing changed.
     std::uint32_t compositeInto(rivendata::Texel *dst);
 
+    /// Offer the picture already held to the next compositeInto, even though no
+    /// new frame has arrived.
+    ///
+    /// For a destination that was rebuilt underneath a still-playing overlay:
+    /// CardSurface::refreshFromClean puts a whole card-wide band back, which
+    /// takes any overlay in that band with it, and an overlay running at 15 fps
+    /// may have nothing new to say for another four published frames.
+    void refreshPicture() { liteDirty_ = havePicture_; }
+
     rivendata::VideoProfile profile() const { return file_.profile(); }
     int width() const { return file_.header().width; }
     int height() const { return file_.header().height; }
     std::uint32_t frameCount() const { return file_.frameCount(); }
+    /// The movie's frame rate as the converter found it, for a caller that has a
+    /// time and needs a frame (Engine::playMovieRange).
+    std::uint32_t fpsNum() const { return file_.header().fpsNum; }
+    std::uint32_t fpsDen() const { return file_.header().fpsDen; }
 
     int viewX() const { return viewX_; }
     int viewY() const { return viewY_; }
@@ -141,6 +172,11 @@ private:
 
     int viewX_ = 0;
     int viewY_ = 0;
+
+    /// The slice of the file this playback owns. 0..lastFrame() for a whole
+    /// movie, which is everything but the telescope.
+    std::uint32_t startFrame_ = 0;
+    std::uint32_t stopFrame_ = 0;
 
     bool playing_ = false;
     bool finished_ = false;

@@ -198,6 +198,12 @@ public:
     /// to put the pointer away with it.
     Cursor &cursor() { return cursor_; }
 
+    /// Where the pointer is, in DS screen pixels. Moved by the stylus and by the
+    /// D-pad alike (processInput), and read by the inventory strip, which shows
+    /// itself only while it is being pointed at.
+    int pointerX() const { return pointerX_; }
+    int pointerY() const { return pointerY_; }
+
     void activateSlst(std::uint16_t index);
     void playSlst(const rivendata::SoundRec &rec);
     void stopAllAmbient();
@@ -210,6 +216,14 @@ public:
     void enableMovie(std::uint16_t code, bool enabled);
     void disableAllMovies();
     void playMovie(std::uint16_t code, bool blocking);
+    /// Play the slice of a movie between two times, blocking until it is done.
+    ///
+    /// For the externals that animate a control one notch at a time out of one
+    /// long movie -- the telescope, whose five positions are five slices of the
+    /// same file. Times are the original's milliseconds; the frame numbers come
+    /// from the movie's own frame rate rather than an assumed one, because the
+    /// converter stores it (RvidHeader::fpsNum).
+    void playMovieRange(std::uint16_t code, std::uint32_t startMs, std::uint32_t endMs);
     void stopMovie(std::uint16_t code);
     /// Wait `ms`, pumping the loop. Opcode 14 (riven.cpp:661-667).
     void delay(std::uint32_t ms);
@@ -285,12 +299,24 @@ private:
     /// way ScummVM's own runScheduledTransition does (riven_graphics.cpp:549-609).
     void runScheduledTransition();
 
-    /// playMovie() with the code already resolved to a slot index.
-    void playMovieSlot(std::int32_t slot, bool blocking);
+    /// playMovie() with the code already resolved to a slot index. The frame
+    /// range defaults to the whole movie; RvidPlayer::play clamps it.
+    void playMovieSlot(std::int32_t slot, bool blocking, std::uint32_t startFrame = 0,
+                       std::uint32_t stopFrame = 0xFFFFFFFFu);
     /// Wait for the movie in slot INDEX `slot` to finish, pumping the loop.
-    void playMovieBlocking(std::int32_t slot);
+    /// `whole` says the play was not a segment, which is the only case that
+    /// bakes its last frame into the card (see kBakeBlockingMovies).
+    void playMovieBlocking(std::int32_t slot, bool whole);
+
+    /// Draw every LITE overlay that is still playing back onto the card picture,
+    /// after CardSurface::refreshFromClean has taken them all off.
+    void recompositeOverlays();
+    /// Make one overlay's last frame part of the card -- ScummVM's disable().
+    void bakeOverlay(MovieSlot &m);
 
     void enterCard();
+    /// The one ungated diagnostic: what the card that just settled ended up with.
+    void logCardSummary() const;
     /// The card's CardLeave script, run before it stops being the current card.
     void leaveCard();
 

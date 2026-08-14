@@ -15,13 +15,21 @@
 // the Myst port's top-screen text through a RAM strip does not arise here: a
 // 16-bit pixel is a halfword store, which VRAM keeps.
 //
-// TEXT IS DRAWN OVER TRANSPARENT, not over a filled background, and that is a
-// decision rather than an omission. A glyph is blitted as a rectangle, so the
-// transparent texels inside its box are written too -- anything painted
-// underneath would be punched out around every letter. Leaving the screen
-// transparent means the backdrop (black) shows through everywhere and the
-// question does not arise. White text on black is also what the port's
-// letterbox bands and its console already look like.
+// TEXT IS DRAWN OVER OPAQUE BLACK. A glyph is blitted as a rectangle, so the
+// transparent texels inside its box are written too and anything painted
+// underneath is punched out around every letter -- which is why nothing is
+// painted underneath: the screen is cleared to flat black and the glyphs are the
+// only thing on it. White on black is what the port's letterbox bands and its
+// console already look like.
+//
+// OPAQUE and not transparent, which is a correction rather than a preference.
+// BgSurface displays BOTH of its layers at once and "flips" by swapping their
+// priority (BgSurface.cpp:applyPriorities) -- it never hides one. A card picture
+// is opaque, so the layer underneath is genuinely covered; a transparent text
+// buffer is not. Clearing to transparent left the two menu buffers compositing
+// with each other, so every selection move showed the mark twice: once where the
+// buffer being drawn had just put it and once where the other buffer still had
+// it. Black fills the gaps that used to let the older pass through.
 
 #include <string>
 
@@ -51,8 +59,11 @@ public:
     /// Cheap: it re-aims the renderer, it does not reload the font.
     bool target(int buffer);
 
-    /// Fill the whole target buffer with transparent, so the black backdrop
-    /// shows. This is the layer's "clear the screen".
+    /// Fill the whole target buffer with opaque black. This is the layer's
+    /// "clear the screen", and opacity is the part that matters -- see above.
+    ///
+    /// It writes past the card view, so a screen that used it owes the buffer
+    /// back through BgSurface::resetBuffer on the way out.
     void clear();
 
     /// Draw `text` with its left edge at `x` and its top at `y`, in SCREEN

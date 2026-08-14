@@ -62,6 +62,17 @@ bool enabled();
 /// printf-style, one line, newline added. No-op when disabled.
 void log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/// A line that is NOT gated and is not a failure either: the diagnostic the
+/// console is worth spending rows on whether or not anyone asked for a trace.
+///
+/// One caller, deliberately -- Engine::enterCard's summary of the card that just
+/// settled. The budget argument at the top of this file is about a line per
+/// ASSET, which arrives faster than it can be read; a line per CARD arrives when
+/// the player walks somewhere, so the console still holds the last dozen moves
+/// and the failures among them. Anything that would print more often than a card
+/// change belongs in log().
+void note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
 /// A failure, which is NOT gated: it reaches the console whether the trace is
 /// on or not, and additionally reaches debug.log when it is.
 ///

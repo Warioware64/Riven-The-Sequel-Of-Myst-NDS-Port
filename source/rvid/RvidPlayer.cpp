@@ -152,12 +152,18 @@ void RvidPlayer::releaseAudio()
     ownsAudio_ = false;
 }
 
-bool RvidPlayer::play(bool loop)
+bool RvidPlayer::play(bool loop, std::uint32_t startFrame, std::uint32_t stopFrame)
 {
     if (!file_.isOpen())
         return false;
 
     stop();
+
+    const std::uint32_t last = file_.frameCount() > 0 ? file_.frameCount() - 1 : 0;
+    startFrame_ = startFrame > last ? last : startFrame;
+    stopFrame_ = stopFrame > last ? last : stopFrame;
+    if (stopFrame_ < startFrame_)
+        stopFrame_ = startFrame_;
 
     const bool full = file_.profile() == VideoProfile::Full;
     if (full)
@@ -182,7 +188,7 @@ bool RvidPlayer::play(bool loop)
     // own scratch, and a sink left installed would swallow that read whole.
     file_.setVideoSink(full ? &fullSink : nullptr, full ? &g_fullBlit : nullptr);
 
-    if (!file_.rewind())
+    if (file_.seekToFrame(startFrame_) < 0)
     {
         error_ = file_.error();
         return false;
@@ -191,7 +197,10 @@ bool RvidPlayer::play(bool loop)
     havePicture_ = false;
     liteDirty_ = false;
     finished_ = false;
-    loop_ = loop;
+    // A segment cannot loop: readNextFrame's loop path rewinds to frame 0, which
+    // is outside the range. Nothing asks for both -- the only caller that gives a
+    // range is the telescope, which blocks on one stroke.
+    loop_ = loop && startFrame_ == 0 && stopFrame_ == last;
     vbl_ = 0;
     clockStalled_ = false;
     lastSamples_ = 0;
@@ -235,31 +244,40 @@ void RvidPlayer::setVolume(int volume)
 std::uint32_t RvidPlayer::clockFrame() const
 {
     const RvidHeader &h = file_.header();
+    // Both clocks measure from play(), so both are offset by where play() began.
+    // Zero for a whole movie, which is nearly all of them.
     if (ownsAudio_ && !clockStalled_ && h.audioRate > 0)
     {
         // Which frame the soundtrack has reached. Only samples the hardware
         // really took are counted, so a player that falls behind stalls this
         // rather than being run away from.
         const std::uint64_t played = RivenAudio::streamSamplesPlayed();
-        return static_cast<std::uint32_t>(played * h.fpsNum
-                                         / (static_cast<std::uint64_t>(h.fpsDen) * h.audioRate));
+        return startFrame_
+               + static_cast<std::uint32_t>(
+                   played * h.fpsNum
+                   / (static_cast<std::uint64_t>(h.fpsDen) * h.audioRate));
     }
     // Silent movie: the DS refreshes at ~60 Hz.
     const std::uint32_t vblPerFrame =
         h.fpsNum > 0 ? (60u * h.fpsDen + h.fpsNum / 2) / h.fpsNum : 4u;
-    return vbl_ / (vblPerFrame > 0 ? vblPerFrame : 1);
+    return startFrame_ + vbl_ / (vblPerFrame > 0 ? vblPerFrame : 1);
 }
 
 bool RvidPlayer::readNextFrame()
 {
-    if (file_.atEnd())
+    // Past the end of what this playback owns. stopFrame_ is the last frame of
+    // the file for a whole movie, so this IS the old atEnd() test there; for a
+    // segment it stops early, before the frames belonging to the next stroke.
+    if (file_.position() > stopFrame_)
     {
         if (!loop_)
         {
             finished_ = true;
             return false;
         }
-        if (!file_.rewind())
+        // Back to the top of the range, which for the only movies that loop --
+        // whole ones -- is frame 0 (see the loop_ test in play()).
+        if (file_.seekToFrame(startFrame_) < 0)
         {
             finished_ = true;
             return false;
@@ -367,8 +385,10 @@ void RvidPlayer::pump()
     //
     // Audio is the one thing that cannot be skipped -- it is the clock -- so this
     // only ever runs when the clock is running, which means the ring is being fed.
+    // stopFrame_ and not frameCount(): skipping past the end of a segment would
+    // seek out of it, and the frames after it belong to somebody else's stroke.
     if (shown_ >= 0 && target > static_cast<std::uint32_t>(shown_) + kReadAheadFrames + 2
-        && target < file_.frameCount())
+        && target <= stopFrame_)
     {
         if (file_.seekToFrame(target) >= 0)
             shown_ = static_cast<std::int32_t>(target) - 1;

@@ -131,7 +131,12 @@ void TextLayer::clear()
     // Not NEA_Hw2DTextCtxClear: that only wipes the ctx's canvas rectangle, and
     // this has to reach the rows below the card view as well -- the buffer is
     // 256x256 and the screen is 192 of it.
-    toncset16(BgSurface::pixels(buffer_), 0,
+    //
+    // OPAQUE black, not transparent. See the header: both layers are displayed
+    // at once and only priority separates them, so the buffer being drawn is
+    // still on screen underneath the one that is finished. Opaque is what makes
+    // "the front buffer" mean anything.
+    toncset16(BgSurface::pixels(buffer_), static_cast<rivendata::Texel>(0x8000),
               static_cast<std::size_t>(BgSurface::kBufW) * BgSurface::kBufH);
 }
 

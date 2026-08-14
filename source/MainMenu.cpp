@@ -22,8 +22,12 @@ namespace
     // Layout. Rows are full-width for the hit test even though the label is not,
     // because a menu row on a touch screen is a band, not a word.
     constexpr int kTitleY = 24;
-    constexpr int kFirstY = 72;
-    constexpr int kRowStep = 24;
+    /// Six rows have to fit: kFirstY + 5*kRowStep + kLineHeight must land inside
+    /// the 192-row screen. At 72 and 24 the last row started AT 192 and the
+    /// settings screen's "Back" was drawn off the bottom of the display, along
+    /// with the selection mark whenever it was there.
+    constexpr int kFirstY = 56;
+    constexpr int kRowStep = 22;
     constexpr int kTextX = 40;
     /// The selection marker sits in the margin, so a row's text does not move
     /// when the selection lands on it.
@@ -80,16 +84,19 @@ namespace
         }
     };
 
-    /// Draw into the buffer that is not on screen, then flip. The engine is not
-    /// running, so nothing else is publishing and this has to drive the vblank
-    /// itself.
-    void present()
+    /// Wait for the vblank window and spend it the way the engine does: the flip
+    /// the last redraw asked for is committed FIRST, before any of this frame's
+    /// drawing (Engine::flushUploads).
+    ///
+    /// It used to be the other way round -- draw, then requestFlip and vblank in
+    /// one breath -- which put the priority-swap register write after a 128 KB
+    /// clear and a screenful of glyphs, well into active display. The swap then
+    /// took effect part way down the screen.
+    void frame()
     {
-        bgs.requestFlip();
+        NEA_WaitForVBL(static_cast<NEA_UpdateFlags>(0));
         bgs.vblank();
     }
-
-    void frame() { NEA_WaitForVBL(static_cast<NEA_UpdateFlags>(0)); }
 
     /// True when the port's screens can be drawn at all.
     bool usable() { return bgs.exists() && textLayer.ready(); }
@@ -250,7 +257,8 @@ void MainMenu::runSettings()
                 textLayer.draw(kMarkX, y, ">");
             textLayer.draw(kTextX, y, labels[i]);
         }
-        present();
+        // Shown at the top of the next turn, by frame().
+        bgs.requestFlip();
     }
 
     if (changed)
@@ -262,6 +270,15 @@ void MainMenu::runSettings()
     bgs.setLetterbox(true);
     if (inGame)
     {
+        // Every buffer but the one holding the parked card. The text is opaque
+        // and it was drawn on all 192 rows, so the rows below the card view have
+        // to be handed back transparent or the next vertical pan would slide
+        // black through the view instead of the outgoing card
+        // (BgSurface::resetBuffer).
+        for (int b = 0; b < BgSurface::kBuffers; ++b)
+            if (b != bgs.parkedBuffer())
+                bgs.resetBuffer(b);
+
         // Hands the card back. Everything else this screen drew on has to be
         // rebuilt, and it drew on more than the one buffer endMovieTakeover
         // names -- see CardSurface::invalidateAll.
@@ -340,17 +357,17 @@ void MainMenu::run()
                 textLayer.draw(kMarkX, y, ">");
             textLayer.draw(kTextX, y, labels[i]);
         }
-        present();
+        // Shown at the top of the next turn, by frame().
+        bgs.requestFlip();
     }
 
     // The engine draws the first card over whatever is here, and it draws into
-    // the buffer it thinks is clean -- so both buffers have to be given back
-    // empty rather than holding half a menu.
+    // the buffer it thinks is clean -- so every buffer has to be given back the
+    // way create() left it rather than holding half a menu. resetBuffer and not
+    // textLayer.clear(): the clear is opaque, and the rows below the card view
+    // owe the renderer transparency (BgSurface::resetBuffer).
     for (int b = 0; b < BgSurface::kBuffers; ++b)
-    {
-        textLayer.target(b);
-        textLayer.clear();
-    }
+        bgs.resetBuffer(b);
     bgs.setLetterbox(true);
     showPointer(true);
 }

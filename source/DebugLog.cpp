@@ -129,6 +129,8 @@ bool enabled() { return g_on; }
 
 namespace
 {
+    /// The three destinations. Everything printed here goes through this, so the
+    /// console, the emulator and the file never disagree about a line.
     void emit(const char *line)
     {
         std::printf("%s\n", line);
@@ -145,6 +147,14 @@ namespace
             std::fflush(g_file);
         }
     }
+
+    void emitv(const char *fmt, std::va_list ap)
+    {
+        char line[kLineMax];
+        const int n = std::vsnprintf(line, sizeof(line), fmt, ap);
+        if (n > 0)
+            emit(line);
+    }
 } // namespace
 
 void log(const char *fmt, ...)
@@ -152,24 +162,26 @@ void log(const char *fmt, ...)
     if (!g_on)
         return;
 
-    char line[kLineMax];
     std::va_list ap;
     va_start(ap, fmt);
-    const int n = std::vsnprintf(line, sizeof(line), fmt, ap);
+    emitv(fmt, ap);
     va_end(ap);
-    if (n > 0)
-        emit(line);
 }
 
 void warn(const char *fmt, ...)
 {
-    char line[kLineMax];
     std::va_list ap;
     va_start(ap, fmt);
-    const int n = std::vsnprintf(line, sizeof(line), fmt, ap);
+    emitv(fmt, ap); // g_file is null unless the trace is on, so this splits itself
     va_end(ap);
-    if (n > 0)
-        emit(line); // g_file is null unless the trace is on, so this splits itself
+}
+
+void note(const char *fmt, ...)
+{
+    std::va_list ap;
+    va_start(ap, fmt);
+    emitv(fmt, ap);
+    va_end(ap);
 }
 
 void screenshot()

@@ -367,6 +367,58 @@ int main()
         }
     }
 
+    // --- the track matrix ---------------------------------------------------
+    //
+    // A tMOV's coded size is not the size Riven draws it at: QuickTime's track
+    // matrix scales it, and 79 of a 5-CD install's 1054 movies carry one. The
+    // converter ignored it for a long time, so those movies went onto the card
+    // at twice or four times their size -- tspit's lever at 2x, the telescope
+    // button at 4x, both plainly wrong on the screen.
+    //
+    // Two named movies rather than a survey: one that carries a scale and one
+    // that does not, so a regression in either direction is caught. tspit 19 is
+    // the lever (128x80 coded, matrix 0.5) and tspit 43 the telescope's travel
+    // movie (80x112, matrix 1.0), which has always been right and must stay so.
+    for (const auto &stack : source.stacks)
+    {
+        if (stack.id != rivendata::StackId::Tspit)
+            continue;
+
+        ArchiveSet set;
+        std::vector<std::string> failures;
+        set.openAll(stack.dataArchives, failures);
+
+        struct Expect
+        {
+            std::uint16_t id;
+            int w, h;
+            const char *what;
+        };
+        // 128*0.5*256/608 = 26, 80*0.5*256/608 = 16; and 80*256/608 = 33,
+        // 112*256/608 = 47 for the unscaled one.
+        const Expect expects[] = {
+            {19, 26, 16, "carries a 0.5 track matrix"},
+            {43, 33, 47, "carries no track matrix"},
+        };
+        for (const Expect &e : expects)
+        {
+            const fs::path out = outDir / ("matrix-" + std::to_string(e.id) + ".rvid");
+            const VideoResult vr = convertMovie(set, e.id, out, ff);
+            if (!vr.ok)
+            {
+                check(false, "tMOV " + std::to_string(e.id) + ": " + vr.error);
+                continue;
+            }
+            check(vr.width == e.w && vr.height == e.h,
+                  "tspit tMOV " + std::to_string(e.id) + " " + e.what + ", so it converts to "
+                      + std::to_string(e.w) + "x" + std::to_string(e.h) + " (got "
+                      + std::to_string(vr.width) + "x" + std::to_string(vr.height) + ")");
+            check(vr.trackScaled == (e.id == 19),
+                  "tspit tMOV " + std::to_string(e.id) + " reports whether it was scaled");
+        }
+        break;
+    }
+
     std::printf("video: %d movies, %d with audio, %d with no video stream\n", movies,
                 withAudio, noVideo);
     for (const auto &[codec, n] : codecs)

@@ -44,15 +44,7 @@ bool BgSurface::create()
     }
 
     for (int b = 0; b < kBuffers; ++b)
-    {
-        Texel *p = pixels(b);
-        toncset16(p, kOpaqueBlack, static_cast<std::size_t>(kBufW) * kViewH);
-        // The rows below the picture. Written once and never again: a vertical
-        // pan scrolls them through the view, and transparent is what lets the
-        // outgoing card show through there instead of stale pixels.
-        toncset16(p + static_cast<std::size_t>(kBufW) * kViewH, kTransparent,
-                  static_cast<std::size_t>(kBufW) * (kBufH - kViewH));
-    }
+        resetBuffer(b);
 
     bound_[0] = 0;
     bound_[1] = 1;
@@ -69,6 +61,23 @@ bool BgSurface::create()
     bgShow(bgId_[1]);
     bgUpdate();
     return true;
+}
+
+void BgSurface::resetBuffer(int buf)
+{
+    if (buf < 0 || buf >= kBuffers)
+        return;
+
+    Texel *p = pixels(buf);
+    toncset16(p, kOpaqueBlack, static_cast<std::size_t>(kBufW) * kViewH);
+    // The rows below the picture. Transparent is what lets a vertical pan reveal
+    // the outgoing card there instead of stale pixels, and CardSurface's publish
+    // is bounded by kViewH -- so nothing puts them back once something has
+    // written over them. That is why this is a whole-buffer reset rather than
+    // create()'s one-time fill: the port's own screens draw on all 192 screen
+    // rows, and giving the screen back means giving these rows back too.
+    toncset16(p + static_cast<std::size_t>(kBufW) * kViewH, kTransparent,
+              static_cast<std::size_t>(kBufW) * (kBufH - kViewH));
 }
 
 void BgSurface::destroy()

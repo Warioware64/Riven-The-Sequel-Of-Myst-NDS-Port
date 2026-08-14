@@ -15,21 +15,19 @@ ZoomView zoomView;
 
 namespace
 {
-    /// The window is the CARD VIEW, not the whole screen, and the letterbox
-    /// stays on while the viewer is up.
+    /// The whole screen, letterbox off. A zoom is a 1:1 crop of a bigger
+    /// picture and there is nothing to frame it for.
     ///
-    /// The obvious thing is to use all 192 rows -- it is a 1:1 crop of a bigger
-    /// picture, so why frame it -- and it is wrong, because rows kViewH..255 of
-    /// every buffer are reserved. BgSurface fills them transparent ONCE and
-    /// never again (BgSurface.hpp:32-40), and CardSurface's republish is bounded
-    /// by kViewH, so anything written there is permanent: the band under the
-    /// card kept the zoom's pixels for the rest of the run.
-    ///
-    /// Framing the window as the card view means those rows are never written
-    /// and there is nothing to put back. The 27 rows are not lost, only moved --
-    /// the pannable range grows by exactly as much.
-    constexpr int kWindowW = rivendata::kViewW;
-    constexpr int kWindowH = rivendata::kViewH;
+    /// This was the card view for a while, and the reason was real: rows
+    /// kViewH..255 of every buffer are reserved. BgSurface fills them
+    /// transparent ONCE and never again (BgSurface.hpp:32-40) and CardSurface's
+    /// republish is bounded by kViewH, so anything written there used to be
+    /// permanent -- the band under the card kept the zoom's pixels for the rest
+    /// of the run. What was missing was a way to put them back;
+    /// BgSurface::resetBuffer is it, and Engine::toggleZoom calls it on the way
+    /// out. The 27 rows are worth the call: they are 16% more picture.
+    constexpr int kWindowW = rivendata::kScreenW;
+    constexpr int kWindowH = rivendata::kScreenH;
 
     static_assert(kMaxRpizW == rivendata::kCardW && kMaxRpizH == rivendata::kCardH,
                   "the .rpiz cap and the card size have drifted apart");
@@ -73,7 +71,11 @@ bool ZoomView::open(const std::string &path)
 
     DebugLog::log("ZOOM %dx%d, window at %d,%d", width_, height_, originX_, originY_);
 
+    // Both halves of taking the screen. The letterbox goes back on in
+    // Engine::toggleZoom and not in close(), because open() calls close() first
+    // and would turn it on between the two.
     bgs.beginMovieTakeover();
+    bgs.setLetterbox(false);
     return true;
 }
 

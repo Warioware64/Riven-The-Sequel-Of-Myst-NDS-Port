@@ -51,8 +51,16 @@ public:
 
     bool exists() const { return file_.loaded(); }
 
-    /// Recompute which books are shown, from the game's own variables. Cheap;
-    /// called once per frame from the engine's frame tail.
+    /// Recompute which books are shown, from the game's own variables and from
+    /// where the pointer is. Cheap; called once per frame from the engine's
+    /// frame tail.
+    ///
+    /// HOVER. The strip is only up while it is being pointed at, which is the
+    /// original's rule (`mouse.y >= 392`, riven_inventory.cpp:194) and not a
+    /// literal one here: the pointer is moved by the stylus AND by the D-pad,
+    /// and both count, because a DS has no hover of its own to borrow. Reading
+    /// it from Engine rather than taking a coordinate keeps the one pointer the
+    /// hotspots already hover with.
     void update(Engine &e);
 
     /// The tBMP id of the item at a screen point, or 0. Only the band is tested:
@@ -106,6 +114,10 @@ private:
     int shown_ = 0;
     bool forcedHidden_ = false; ///< set by Riven's scripts
     bool suppressed_ = false;   ///< set by the port's own screens
+    /// The strip may not be shown at all: a script, a port screen, aspit or a
+    /// cutscene. Separate from hidden_, which adds "and is being pointed at" --
+    /// hitTest wants the first question and flush() the second.
+    bool blocked_ = false;
     bool hidden_ = false;
     bool dirty_ = true;
 };

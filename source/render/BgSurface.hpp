@@ -83,6 +83,17 @@ public:
     int frontBuffer() const { return bound_[front_]; }
     int backBuffer() const { return bound_[front_ ^ 1]; }
 
+    /// Put a buffer back the way create() left it: opaque black for the picture
+    /// rows, transparent for everything below them.
+    ///
+    /// For a port screen on its way out. The menu and the settings screen turn
+    /// the letterbox off and draw on all 192 screen rows, which reaches past
+    /// kViewH -- and nothing else ever writes there, so what they leave behind
+    /// is permanent and a later vertical pan would slide it through the view.
+    /// (That is the bug 1f4daf8 fixed for the zoom viewer by shrinking its
+    /// window; a text screen cannot be shrunk the same way.)
+    void resetBuffer(int buf);
+
     /// Copy the 8-row blocks named in `mask` out of a kViewW x kViewH RAM
     /// picture into `buf`. Runs of adjacent blocks are copied in one go.
     void uploadRows(int buf, const rivendata::Texel *ram, std::uint32_t mask);
@@ -109,6 +120,9 @@ public:
     /// now stale, so the caller can mark it for a lazy rebuild.
     int endMovieTakeover();
     bool movieTakeover() const { return keep_ >= 0; }
+    /// The buffer holding the parked card, or -1. The one buffer a screen that
+    /// took the others over must not write, or reset.
+    int parkedBuffer() const { return keep_; }
 
     /// Start sliding/blending the back buffer (the new card) over the front one.
     /// Both must already hold their finished pictures.

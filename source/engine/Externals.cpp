@@ -5,8 +5,9 @@
 // check. ScummVM implements them per stack in engines/mohawk/riven_stacks/, and
 // the full set is milestone 6.
 //
-// What is here is what the boot path and the intro reach: aspit's menu and books,
-// and the two tspit commands the opening cutscene calls. Anything else is
+// What is here is what the boot path and the intro reach -- aspit's menu and
+// books, and the two tspit commands the opening cutscene calls -- plus the
+// telescope's cover combination and its up stroke. Anything else is
 // reported by name and does nothing, which makes an unported command a control
 // that does not respond rather than a crash -- and the log line names exactly
 // which one to write next.
@@ -107,14 +108,104 @@ namespace
     /// the card it wants does not exist in the full game; kept pointing at the
     /// menu so the name is not simply unhandled.
     void backToMenu(Engine &e) { e.changeToCard(1); }
+
+    /// RivenStack::getComboDigit (riven_stack.cpp:197-200). A combination is
+    /// stored as a decimal number whose digits are the buttons in order, so
+    /// digit 0 of 51234 is 5. Six powers for five digits: the divisor of digit n
+    /// is powers[n+1].
+    std::uint32_t comboDigit(std::uint32_t combo, std::uint32_t digit)
+    {
+        static const std::uint32_t powers[] = {100000, 10000, 1000, 100, 10, 1};
+        if (digit + 1 >= sizeof(powers) / sizeof(powers[0]))
+            return 0;
+        return (combo % powers[digit]) / powers[digit + 1];
+    }
+
+    /// TSpit::xtisland390_covercombo (tspit.cpp:165-178). The five buttons on the
+    /// telescope cover: press them in the order written on the island and the
+    /// hatch unlocks, get one wrong and the count goes back to nothing.
+    void xtisland390_covercombo(Engine &e, const std::uint16_t *args, std::size_t argCount)
+    {
+        if (argCount < 1 || args == nullptr)
+        {
+            std::printf("xtisland390_covercombo: no button number\n");
+            return;
+        }
+
+        std::uint32_t &correctDigits = e.vars().at(VarId::TCoverCombo);
+        if (correctDigits < 5
+            && args[0] == comboDigit(e.vars().get(VarId::TCorrectOrder), correctDigits))
+            ++correctDigits;
+        else
+            correctDigits = 0;
+
+        const Hotspot *openCover = e.hotspotByName("openCover");
+        if (openCover != nullptr)
+            e.enableHotspotByIndex(e.hotspotIndexOf(openCover), correctDigits == 5);
+    }
+
+    /// TSpit::xtexterior300_telescopeup (tspit.cpp:102-136). One press raises the
+    /// tube one of its five positions, and the animation is the matching slice of
+    /// one long movie -- which is what Engine::playMovieRange exists for.
+    ///
+    /// Without the sounds. The original names them ("tTeleMove", and "tTelDnMore"
+    /// when the tube will not move) and playCardSound resolves a name to a tWAV
+    /// through the archive's resource names (riven_sound.cpp:73-77), which the
+    /// converter does not keep -- Engine::playEffect takes an id. Same omission,
+    /// and the same reason, as the page turn in atrusBookPage above.
+    /// The half that can decide to do nothing. Split out so the caller can put
+    /// the card back exactly once, on every path -- see below.
+    void telescopeUpMove(Engine &e)
+    {
+        // No power, no telescope.
+        if (e.vars().get(VarId::TTeleValve) == 0)
+            return;
+
+        std::uint32_t &pos = e.vars().at(VarId::TTelescope);
+        if (pos >= 5)
+            return; // already at the top
+
+        // Where each position starts in the travel movie, in milliseconds
+        // (tspit.cpp:93). Six entries for five moves: a move runs from its own
+        // position to the next one.
+        static const std::uint32_t kStops[] = {0, 800, 1680, 2560, 3440, 4320};
+        const std::uint32_t from = pos >= 1 ? pos - 1 : 0;
+
+        // Two movies of the same travel, one with the cover on and one without.
+        e.playMovieRange(e.vars().get(VarId::TTeleCover) != 0 ? 4 : 5, kStops[from],
+                         kStops[from + 1]);
+
+        ++pos;
+    }
+
+    void xtexterior300_telescopeup(Engine &e)
+    {
+        // The button goes down whether or not anything comes of it.
+        e.playMovie(3, true);
+        telescopeUpMove(e);
+
+        // ALWAYS, and not only when the tube moved, which is where ScummVM
+        // stops -- it returns straight out of the two "nothing happens" paths.
+        //
+        // The button is a blocking play that runs to the movie's end, and both
+        // engines BAKE such a frame into the card: ScummVM's playBlocking()
+        // ends in disable() (riven_video.cpp:264-268), and this port matches it
+        // (Engine::kBakeBlockingMovies). tMOV 38 ends on a frame that is
+        // nothing like the still underneath it -- measured against all twenty
+        // of card 137's stills -- so once baked it is the card, and pressing
+        // the button with the valve shut leaves a 33x40 patch of it on screen
+        // until something redraws. ScummVM has the same hole here; the port
+        // does not want it, so it asks for the redraw.
+        //
+        // The card also draws the tube at its new position from the variable,
+        // so the moving case needed this anyway (ScummVM: enter(false)).
+        e.refreshCard();
+    }
 } // namespace
 
 void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t *args,
                         std::size_t argCount)
 {
-    (void)args;
-    (void)argCount;
-
     const std::string name = e.nameFromList(kExternalCommandNames, nameIndex);
     if (name.empty())
     {
@@ -235,6 +326,18 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
     }
     if (key == "xalaunchbrowser")
         return; // there is no browser to launch
+
+    // --- tspit: the telescope ------------------------------------------------
+    if (key == "xtisland390_covercombo")
+    {
+        xtisland390_covercombo(e, args, argCount);
+        return;
+    }
+    if (key == "xtexterior300_telescopeup")
+    {
+        xtexterior300_telescopeup(e);
+        return;
+    }
 
     // --- tspit: the opening cutscene ----------------------------------------
     // Both of these are EMPTY in ScummVM too -- tspit.cpp has them as a comment

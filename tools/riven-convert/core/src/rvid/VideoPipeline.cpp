@@ -35,6 +35,132 @@ namespace
     /// longer has to finish before a cancel is noticed.
     constexpr int kCancelCheckFrames = 1;
 
+    // --- the track matrix ---------------------------------------------------
+    //
+    // A tMOV's CODED size is not the size Riven draws it at. QuickTime's track
+    // header carries a 3x3 display matrix, and its `a` and `d` terms scale the
+    // track: 79 of the 1054 movies in a 5-CD install are authored at twice or
+    // four times the size they are shown at.
+    //
+    // ScummVM applies it -- QuickTimeParser::readTKHD keeps exactly these two
+    // terms as `scaleFactorX/Y = Rational(0x10000, xMod)`
+    // (common/formats/quicktime.cpp:480-491) and VideoTrackHandler::getWidth()
+    // returns width/scaleFactorX, which is what RivenVideo blits. Ignoring it
+    // here is why tspit's lever came out at twice its size and the telescope
+    // button at four times.
+    //
+    // Read from the resource rather than from ffprobe: ffprobe reports the coded
+    // size and exposes the matrix only as a rotation. The bytes are already in
+    // hand, and the walk is four atoms deep.
+
+    /// A 16.16 fixed-point matrix term as a double, or 1.0 for anything this
+    /// cannot read. Defaulting to 1.0 keeps a movie its coded size, which is
+    /// what every build before this one did.
+    struct TrackScale
+    {
+        double x = 1.0;
+        double y = 1.0;
+        bool identity() const { return x == 1.0 && y == 1.0; }
+    };
+
+    /// Half-open payload range of an atom.
+    struct AtomRange
+    {
+        std::size_t off = 0;
+        std::size_t end = 0;
+        bool found = false;
+    };
+
+    /// The first child of [off, end) with this type. Atoms are
+    /// `uint32 size, char type[4]` with the payload following, and a container's
+    /// payload is more atoms.
+    AtomRange childAtom(const std::vector<std::uint8_t> &d, const char *type,
+                        std::size_t off, std::size_t end)
+    {
+        while (off + 8 <= end && off + 8 <= d.size())
+        {
+            const std::uint32_t size = (static_cast<std::uint32_t>(d[off]) << 24)
+                                       | (static_cast<std::uint32_t>(d[off + 1]) << 16)
+                                       | (static_cast<std::uint32_t>(d[off + 2]) << 8)
+                                       | static_cast<std::uint32_t>(d[off + 3]);
+            if (size < 8)
+                break;
+            std::size_t next = off + size;
+            if (next > end)
+                next = end;
+            if (std::memcmp(&d[off + 4], type, 4) == 0)
+                return {off + 8, next, true};
+            off = next;
+        }
+        return {};
+    }
+
+    /// The same, following a chain of container types.
+    AtomRange descend(const std::vector<std::uint8_t> &d, std::initializer_list<const char *> path,
+                      std::size_t off, std::size_t end)
+    {
+        AtomRange at{off, end, true};
+        for (const char *type : path)
+        {
+            at = childAtom(d, type, at.off, at.end);
+            if (!at.found)
+                return {};
+        }
+        return at;
+    }
+
+    std::int32_t be32(const std::vector<std::uint8_t> &d, std::size_t at)
+    {
+        return static_cast<std::int32_t>((static_cast<std::uint32_t>(d[at]) << 24)
+                                         | (static_cast<std::uint32_t>(d[at + 1]) << 16)
+                                         | (static_cast<std::uint32_t>(d[at + 2]) << 8)
+                                         | static_cast<std::uint32_t>(d[at + 3]));
+    }
+
+    TrackScale readTrackScale(const std::vector<std::uint8_t> &bytes)
+    {
+        TrackScale s;
+        const AtomRange moov = childAtom(bytes, "moov", 0, bytes.size());
+        if (!moov.found)
+            return s;
+
+        // The VIDEO track, not the first one. jspit's tMOV 190 and 335 put their
+        // sound track first, and a sound track's matrix is the identity -- so
+        // taking whichever trak came first read 1:1 off the audio and left those
+        // two movies at four times their size, which is the whole bug again in
+        // the two files least likely to be looked at.
+        std::size_t off = moov.off;
+        while (off + 8 <= moov.end)
+        {
+            const AtomRange trak = childAtom(bytes, "trak", off, moov.end);
+            if (!trak.found)
+                break;
+            off = trak.end;
+
+            const AtomRange hdlr = descend(bytes, {"mdia", "hdlr"}, trak.off, trak.end);
+            // hdlr: 4 bytes of version/flags, then the component type and its
+            // subtype. The subtype is what says 'vide'.
+            if (!hdlr.found || hdlr.end < hdlr.off + 12
+                || std::memcmp(&bytes[hdlr.off + 8], "vide", 4) != 0)
+                continue;
+
+            const AtomRange tkhd = childAtom(bytes, "tkhd", trak.off, trak.end);
+            // tkhd's payload ends with the 36-byte matrix and then width and
+            // height, in both version 0 and version 1. `a` is the matrix's first
+            // term and `d` its fifth, so they sit 44 and 28 bytes from the end.
+            if (!tkhd.found || tkhd.end < tkhd.off + 44 || tkhd.end > bytes.size())
+                return s;
+            const std::int32_t a = be32(bytes, tkhd.end - 44);
+            const std::int32_t d = be32(bytes, tkhd.end - 28);
+            if (a > 0)
+                s.x = static_cast<double>(a) / 65536.0;
+            if (d > 0)
+                s.y = static_cast<double>(d) / 65536.0;
+            return s;
+        }
+        return s;
+    }
+
     /// Deletes the temporary .mov on the way out, however that happens.
     struct ScopedFile
     {
@@ -359,15 +485,33 @@ VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint1
     }
 
     // --- geometry ----------------------------------------------------------
-    // Everything on the DS is the card scaled by the same ratio, movies
-    // included, so an overlay lines up with the still it sits on. No padding:
-    // raw frames are the texels themselves.
-    const int dstW = std::max(1, video.width * kScaleNum / kScaleDen);
-    const int dstH = std::max(1, video.height * kScaleNum / kScaleDen);
+    // Two scales, in this order. First the TRACK MATRIX, which turns the coded
+    // size into the size Riven actually draws the movie at -- see readTrackScale
+    // above; 79 of the game's movies are authored bigger than they are shown.
+    // Then the card ratio, because everything on the DS is the card scaled by
+    // the same amount and an overlay has to line up with the still it sits on.
+    // No padding: raw frames are the texels themselves.
+    const TrackScale trackScale = readTrackScale(bytes);
+    const int cardW = std::max(1, static_cast<int>(video.width * trackScale.x));
+    const int cardH = std::max(1, static_cast<int>(video.height * trackScale.y));
+
+    // Truncating, as before. A movie of card-width W drawn at left L covers DS
+    // columns [toDsX(L), toDsX(L+W)), which is floor(W*s) wide or one more
+    // depending on L -- and L is a property of the MLST record, not of the
+    // movie, so it cannot be known here. floor() is the one that is never wide.
+    const int dstW = std::max(1, cardW * kScaleNum / kScaleDen);
+    const int dstH = std::max(1, cardH * kScaleNum / kScaleDen);
     const std::uint32_t frameBytes = rvidFrameBytes(dstW, dstH);
 
+    if (!trackScale.identity())
+        res.trackScaled = true;
+
+    // The SCALED size, not the coded one: fullscreen is about what covers the
+    // card. No shipped movie changes profile because of this -- nothing scaled
+    // is anywhere near 608x392 -- but the two sizes are no longer the same
+    // thing and this one has to say which it means.
     const VideoProfile profile =
-        video.fullscreen() ? VideoProfile::Full : VideoProfile::Lite;
+        (cardW >= kCardW && cardH >= kCardH) ? VideoProfile::Full : VideoProfile::Lite;
     res.profile = profile;
     res.width = dstW;
     res.height = dstH;

@@ -168,6 +168,15 @@ nothing.
 Options button. Zip mode (off by default, as in the original), transitions, water,
 a master volume and the debug log, kept in `_nds/riven_nds/data/settings.dat`.
 
+**The top screen always says where you are.** Every card that settles prints one
+line — `CARD tspit/300 pic=5 mov=3/4 hs=12/14 snd=1` — the picture actually on
+screen, the movie players open against the MLST records the card has, the
+hotspots actually clickable out of the ones it has, and the ambient layers
+actually playing. Anything missing (a
+picture, a movie, a sound, a card a script asked for) prints its own line beside
+it. No setting turns this on; it is a line per card, so the console still holds
+the last dozen moves.
+
 **Debug log** turns the top screen into a trace instead of a picture: the stack
 and card being entered with its PLST/HSPT/SLST/MLST counts, and a line for every
 picture, sound, movie and zoom twin as it is loaded, with the ids and rectangles
@@ -175,6 +184,18 @@ the scripts asked for. It goes to the console, to `nocashMessage` (so an emulato
 gets it for free) and to `_nds/riven_nds/data/debug.log`. **SELECT+L** writes the
 bottom screen to `shotNNN.bmp`, **SELECT+R** dumps every mapped VRAM bank to
 `vramNNN/`. It is read once at startup, so it takes effect on the next boot.
+
+**If your card was converted before the track-matrix fix**, 79 of the game's 1054
+movies are on it at twice or four times their size — a tMOV's coded size is not
+the size Riven draws it at, and the converter used to ignore the QuickTime track
+matrix that says so. Delete just those and convert again:
+
+```bash
+python3 tools/stale-movies.py /path/to/riven _nds/riven_nds/data | xargs -r rm -v
+```
+
+The run then logs `N movie(s) were scaled down by their track matrix`; N should
+match. `--force` also works and redoes everything.
 
 ### Tests
 

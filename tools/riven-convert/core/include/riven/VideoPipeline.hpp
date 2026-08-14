@@ -69,6 +69,11 @@ struct MovieProbe
 
     bool hasVideo() const { return !videoCodec.empty() && width > 0 && height > 0; }
     bool hasAudio() const { return !audioCodec.empty(); }
+    /// Whether the CODED size covers the card. The conversion decides the
+    /// profile from the size after the track matrix instead (convertMovieBytes),
+    /// because that is what the movie is drawn at; the two differ for the 79
+    /// movies that carry a scale, none of which is anywhere near this big. This
+    /// is the census's answer, for --movie-report and the tests.
     bool fullscreen() const;
     double rate() const
     {
@@ -110,6 +115,11 @@ struct VideoResult
     bool hasAudio = false;
     /// What ffprobe called the source codec, for --movie-report's census.
     std::string codec;
+    /// The movie's QuickTime track matrix was not 1:1, so `width`/`height` are
+    /// smaller than the coded size. 79 of a 5-CD install's 1054 movies. Worth
+    /// reporting because a run's count of these is the check that the scale
+    /// reached everything it should.
+    bool trackScaled = false;
 };
 
 /// Convert tMOV `id` from `set` and write `out` atomically.

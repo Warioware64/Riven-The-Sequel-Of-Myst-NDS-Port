@@ -725,6 +725,7 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                 };
 
                 int unsupported = 0;
+                int trackScaled = 0;
 
                 // A .rvid written by an older build is rejected outright by the
                 // ARM9 (isRvid is a hard version equality), and mtimes cannot see
@@ -751,6 +752,18 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                             out.logf(Severity::Warning, stage,
                                      "movie %u converted without its soundtrack: %s",
                                      j.id, vr.audioError.c_str());
+                        // The count of these is what says the track matrix
+                        // reached everything: 79 of a 5-CD install's 1054
+                        // movies carry one, and before it was applied every one
+                        // of them was drawn at twice or four times its size.
+                        if (vr.trackScaled)
+                        {
+                            ++trackScaled;
+                            out.logf(Severity::Info, stage,
+                                     "movie %u is authored larger than it is shown: "
+                                     "%dx%d after the track matrix",
+                                     j.id, vr.width, vr.height);
+                        }
                         ++result.moviesWritten;
                         result.videoFrames += static_cast<std::uint64_t>(vr.frames);
                         result.bytesWritten += vr.bytes;
@@ -783,6 +796,10 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                     out.logf(Severity::Warning, stage,
                              "%d movie(s) use a codec this converter does not decode",
                              unsupported);
+                if (trackScaled > 0)
+                    out.logf(Severity::Info, stage,
+                             "%d movie(s) were scaled down by their track matrix",
+                             trackScaled);
             }
 
             // --- sound ------------------------------------------------------

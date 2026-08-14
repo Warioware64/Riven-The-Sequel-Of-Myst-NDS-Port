@@ -217,6 +217,11 @@ void Engine::playSlst(const SoundRec &rec)
                       vol * global256 / 256, bal, rec.loop != 0 ? "loop" : "once", slot);
         if (slot >= 0)
             ambientSlots_[ambientCount_++] = slot;
+        else
+            // A sound is a file on the card like everything else, and a missing
+            // one used to be visible only inside the trace -- so a card that had
+            // gone quiet said nothing at all with the trace off.
+            DebugLog::warn("card %u: ambient %u will not play", cardId_, rec.soundIds[i]);
     }
 }
 
@@ -231,6 +236,11 @@ void Engine::activateSlst(std::uint16_t index)
             playSlst(s);
             return;
         }
+    // The same gap activatePlst reports for a picture, and it was silent here.
+    // ScummVM treats it as fatal (RivenCard::getSound errors out,
+    // riven_card.cpp:792-800); a line is enough, since the only consequence is a
+    // card that stays quiet.
+    DebugLog::warn("card %u: no SLST record %u", cardId_, index);
 }
 
 void Engine::playEffect(std::uint16_t twavId, int volume)
@@ -242,6 +252,8 @@ void Engine::playEffect(std::uint16_t twavId, int volume)
                                         false);
     DebugLog::log("  sfx %u vol %d -> slot %d", twavId, volume == 0 ? 255 : volume,
                   effectSlot_);
+    if (effectSlot_ < 0)
+        DebugLog::warn("card %u: sound %u will not play", cardId_, twavId);
 }
 
 void Engine::stopEffects()
@@ -385,8 +397,14 @@ void Engine::enableMovie(std::uint16_t code, bool enabled)
     if (slot < 0)
         return;
     movies_[slot].enabled = enabled;
+    // Opcode 28 is ScummVM's disable(), and disable() bakes: the frame it was
+    // showing becomes part of the card. gspit's pins are exactly this -- play,
+    // disable, return, and the baked frame is where the pins now are.
     if (!enabled && movies_[slot].open)
+    {
+        bakeOverlay(movies_[slot]);
         movies_[slot].player.stop();
+    }
 }
 
 void Engine::disableAllMovies()
@@ -395,7 +413,10 @@ void Engine::disableAllMovies()
     {
         movies_[i].enabled = false;
         if (movies_[i].open)
+        {
+            bakeOverlay(movies_[i]); // opcode 29, same disable() as above
             movies_[i].player.stop();
+        }
     }
 }
 
@@ -412,7 +433,36 @@ void Engine::playMovie(std::uint16_t code, bool blocking)
     playMovieSlot(slot, blocking);
 }
 
-void Engine::playMovieSlot(std::int32_t slot, bool blocking)
+void Engine::playMovieRange(std::uint16_t code, std::uint32_t startMs, std::uint32_t endMs)
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0)
+    {
+        std::printf("card %u: no movie activated as %u\n", cardId_, code);
+        return;
+    }
+    if (!ensureSlotOpen(slot))
+        return;
+
+    // The movie's own rate, not an assumed one: 15/1 on every Riven movie
+    // measured so far, but the converter stores what it found (RivenVideo.hpp).
+    const RvidPlayer &p = movies_[slot].player;
+    const std::uint32_t num = p.fpsNum();
+    const std::uint32_t den = p.fpsDen();
+    if (num == 0 || den == 0)
+    {
+        playMovieSlot(slot, true);
+        return;
+    }
+    const auto frameAt = [num, den](std::uint32_t ms) {
+        return static_cast<std::uint32_t>(static_cast<std::uint64_t>(ms) * num
+                                          / (1000ull * den));
+    };
+    playMovieSlot(slot, true, frameAt(startMs), frameAt(endMs));
+}
+
+void Engine::playMovieSlot(std::int32_t slot, bool blocking, std::uint32_t startFrame,
+                           std::uint32_t stopFrame)
 {
     if (!ensureSlotOpen(slot))
         return;
@@ -444,7 +494,7 @@ void Engine::playMovieSlot(std::int32_t slot, bool blocking)
         bgs.beginMovieTakeover();
     }
 
-    if (!ms.player.play(loop))
+    if (!ms.player.play(loop, startFrame, stopFrame))
     {
         std::printf("card %u: movie %u will not play: %s\n", cardId_, ms.movieId,
                     ms.player.error());
@@ -453,8 +503,44 @@ void Engine::playMovieSlot(std::int32_t slot, bool blocking)
         return;
     }
 
+    // Whether the play ran to the movie's own end, which is the only thing the
+    // bake below turns on -- and only playMovieSlot knows it.
+    const bool whole = startFrame == 0 && stopFrame == 0xFFFFFFFFu;
     if (blocking)
-        playMovieBlocking(slot);
+        playMovieBlocking(slot, whole);
+}
+
+/// Draw every overlay that is still playing back onto the card picture.
+///
+/// The counterpart to CardSurface::refreshFromClean, which does not know what is
+/// playing and restores card-wide bands. An overlay that has no new frame is
+/// asked for the one it is holding (RvidPlayer::refreshPicture), because at 15
+/// fps "no new frame" lasts four published frames and the hole would be seen.
+void Engine::recompositeOverlays()
+{
+    if (!surface_.exists())
+        return;
+    for (MovieSlot &m : movies_)
+    {
+        if (!m.open || !m.enabled || !m.player.isPlaying()
+            || m.player.profile() != VideoProfile::Lite)
+            continue;
+        m.player.refreshPicture();
+        surface_.noteOverlayRows(m.player.compositeInto(surface_.texels()));
+    }
+}
+
+/// Make a LITE overlay's last frame part of the card, the way ScummVM's
+/// RivenVideo::disable does (riven_video.cpp:288-301).
+///
+/// Called where the original calls disable(), and nowhere else: what does NOT
+/// bake is what a screen update is free to wipe.
+void Engine::bakeOverlay(MovieSlot &m)
+{
+    if (!surface_.exists() || !m.open || m.player.profile() != VideoProfile::Lite)
+        return;
+    surface_.bakeRect(m.player.viewX(), m.player.viewY(), m.player.width(),
+                      m.player.height());
 }
 
 void Engine::stopMovie(std::uint16_t code)
@@ -476,7 +562,27 @@ void Engine::idleFrame()
     pumpMovies();
 }
 
-void Engine::playMovieBlocking(std::int32_t slot)
+namespace
+{
+    /// Whether a blocking play that ran to the movie's own end bakes its last
+    /// frame into the card, the way ScummVM's playBlocking() with no end time
+    /// does -- it finishes with disable() (riven_video.cpp:264-268), and
+    /// disable() bakes.
+    ///
+    /// A CONVENTION, not a requirement, which is why it is a switch. The bake
+    /// that is load-bearing is the explicit one on opcodes 28 and 29: gspit's
+    /// pins play a RANGED segment and then disable it by hand
+    /// (gspit.cpp:58-82), and a ranged play never reaches here with `whole`.
+    /// Nothing is known to depend on THIS one, and it is what keeps a blocking
+    /// movie's last frame on a card that never redraws -- the telescope button
+    /// on tspit 137 is exactly that, and needs an explicit refreshCard()
+    /// because of it (Externals.cpp). Set false and that class of leftover
+    /// disappears at the next screen update instead; the risk is a card that
+    /// was relying on the frame the way the pins do.
+    constexpr bool kBakeBlockingMovies = true;
+} // namespace
+
+void Engine::playMovieBlocking(std::int32_t slot, bool whole)
 {
     if (slot < 0 || slot >= kMovieSlots)
         return;
@@ -494,9 +600,13 @@ void Engine::playMovieBlocking(std::int32_t slot)
             break; // let the player out of a long cutscene
     }
     if (full)
+    {
         endFullscreenMovie(ms); // stops it too
-    else
-        ms.player.stop();
+        return;
+    }
+    if (whole && kBakeBlockingMovies)
+        bakeOverlay(ms);
+    ms.player.stop();
 }
 
 void Engine::delay(std::uint32_t ms)
@@ -562,6 +672,21 @@ void Engine::applyScreenUpdate(bool force)
         runHandlers(card_->scripts, ScriptEvent::CardUpdate, false);
     updateDepth_ = 0;
     runningUpdate_ = false;
+
+    // Take the movie overlays off the card, then put back the ones still
+    // playing. RivenGraphics::updateScreen (riven_graphics.cpp:383-401) repaints
+    // the whole card from _mainScreen at exactly this moment, which is what
+    // makes a finished overlay disappear in the original instead of staying
+    // where it stopped -- an overlay only outlives its movie if something baked
+    // it (CardSurface::bakeRect).
+    //
+    // Both halves, and in this order: refreshFromClean restores whole card-wide
+    // bands, so an overlay that shares a band with the one that stopped goes
+    // with it and has to be drawn again. Straight away, not next frame:
+    // flushUploads() runs BEFORE pumpMovies() in frame() and idleFrame() alike,
+    // so leaving it would publish the hole first.
+    surface_.refreshFromClean();
+    recompositeOverlays();
 
     // The batch is closed, so the new picture is complete. Without a transition
     // the pixels reach VRAM in the next flushUploads() and appear in one flip;
@@ -783,6 +908,17 @@ void Engine::toggleZoom()
     {
         zoomView.close();
         mode_ = Mode::Card;
+        // The viewer draws on all 192 rows, which reaches past the card view
+        // into the rows BgSurface fills transparent once and never again. Give
+        // every buffer it could have written back the way create() left them,
+        // or a later vertical pan slides zoom pixels through the view
+        // (BgSurface::resetBuffer). Before endMovieTakeover, which is what still
+        // knows which buffer holds the parked card.
+        for (int b = 0; b < BgSurface::kBuffers; ++b)
+            if (b != bgs.parkedBuffer())
+                bgs.resetBuffer(b);
+        bgs.setLetterbox(true);
+
         // The card was parked untouched while the viewer had the screen, so
         // this is a rebind. Every buffer that is not the parked one holds zoom
         // pixels, not just the one endMovieTakeover names, so none of them may
@@ -926,6 +1062,54 @@ void Engine::enterCard()
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%s card %u", displayName(stack_.id), cardId_);
     status_ = buf;
+
+    logCardSummary();
+}
+
+/// One line per card, on the console whether or not the trace is on.
+///
+/// WHAT THE CARD ENDED UP WITH, which is why it is here at the bottom of
+/// enterCard rather than next to the trace's own CARD header at the top. The
+/// header is the card's shape before any of its scripts run -- how many records
+/// it HAS -- and it is the right thing to open a trace with, because everything
+/// logged after it belongs to this card. It is the wrong thing to answer "the
+/// game drew nothing" with: what matters there is which picture is actually up,
+/// how many movies actually opened, how many hotspots are actually clickable and
+/// whether the ambience actually started. Those are known only once the load and
+/// enter scripts have run, and every early return above this point is a card
+/// that handed over to another one, whose own summary follows.
+///
+/// Ungated because it is one line and the player caused it -- see DebugLog::note.
+void Engine::logCardSummary() const
+{
+    if (card_ == nullptr)
+        return;
+
+    // Both counts read "what there is / what the card has to work with", which is
+    // the comparison that answers the question. Movie slots outlive a card on
+    // purpose -- activateMlst keeps a slot whose movie has not changed -- so the
+    // open count is players held right now and not this card's own, which is
+    // exactly why the MLST count is beside it.
+    std::size_t movies = 0;
+    for (const MovieSlot &m : movies_)
+        if (m.open)
+            ++movies;
+
+    std::size_t hotspots = 0;
+    for (std::size_t i = 0; i < hotspotEnabled_.size(); ++i)
+        if (hotspotEnabled_[i])
+            ++hotspots;
+
+    // pic=- and not pic=0: no PLST record covered the whole view, which is a
+    // real state (an overlay-only card) and not the id zero.
+    char pic[8] = "-";
+    if (cardPicture_ != 0)
+        std::snprintf(pic, sizeof(pic), "%u", cardPicture_);
+
+    DebugLog::note("CARD %s/%u pic=%s mov=%zu/%zu hs=%zu/%zu snd=%d%s",
+                   stackName(stack_.id), cardId_, pic, movies, card_->mlst.size(), hotspots,
+                   hotspotEnabled_.size(), ambientCount_,
+                   card_->zipModePlace != 0 ? " zip" : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -1234,8 +1418,11 @@ void Engine::pumpMovies()
         if (!m.open || !m.enabled || !m.player.isPlaying())
             continue;
         m.player.pump();
+        // noteOverlayRows and not markRowMask: these rows are a MOVIE's, and the
+        // difference is what lets the next screen update take them back off
+        // again (CardSurface::refreshFromClean).
         if (m.player.profile() == VideoProfile::Lite && surface_.exists())
-            surface_.markRowMask(m.player.compositeInto(surface_.texels()));
+            surface_.noteOverlayRows(m.player.compositeInto(surface_.texels()));
 
         // A fullscreen movie that has run out has to give the buffers back, and
         // only the blocking path used to do it. Opcode 33 does not block, so a
@@ -1290,12 +1477,6 @@ void Engine::flushUploads()
         }
     }
 
-    // The zoom viewer publishes through the same door as everything else, and
-    // after the card's own publish is skipped above -- movieTakeover() is true
-    // while it is up, which is how it took the buffers in the first place.
-    if (mode_ == Mode::Zoom)
-        zoomView.publish();
-
     // The one place video registers are written, and the reason it belongs here:
     // the caller has just come back from NEA_WaitForVBL.
     bgs.vblank();
@@ -1306,6 +1487,22 @@ void Engine::flushUploads()
     // order that keeps everything else where it must be.
     cursor_.flush();
     inventory_.flush();
+
+    // The zoom viewer publishes through the same door as everything else, and
+    // after the card's own publish is skipped above -- movieTakeover() is true
+    // while it is up, which is how it took the buffers in the first place.
+    //
+    // LAST, after everything the window is for, because it is the one upload
+    // that does not fit in it. A pan repaints all 49 152 texels of the window
+    // through a palette, one halfword store at a time, every frame a direction
+    // is held: several milliseconds against a ~4.5 ms blank. Ahead of
+    // bgs.vblank() it pushed the priority swap out into active display and the
+    // flip tore across the middle of the screen; ahead of the OAM writes it
+    // would do the same to the cursor. The pixels themselves never needed the
+    // window -- nothing is scanning the buffer they go to -- and the flip this
+    // asks for is committed at the next frame's vblank instead.
+    if (mode_ == Mode::Zoom)
+        zoomView.publish();
 }
 
 void Engine::frame()
