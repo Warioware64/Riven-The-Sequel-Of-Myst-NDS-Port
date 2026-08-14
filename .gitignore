@@ -1,6 +1,5 @@
 # Prerequisites
 *.d
-codegraph.json
 # Compiled Object files
 *.slo
 *.lo
@@ -43,9 +42,14 @@ codegraph.json
 build/
 Build/
 build-*/
+# The CodeGraph index, which is rebuilt from the source. codegraph.json beside
+# it is CONFIG and is tracked -- it is what un-ignores helpSrc/myst-nds-port/
+# for the indexer.
 .codegraph/
+# Reference material only: ScummVM, FastVideoDS and the Myst port, checked out
+# to be read rather than built (docs/licensing.md -- none of it is compiled into
+# this project, and ScummVM is GPL).
 helpSrc/
-docs/
 # architectds emits its ninja files at the repo root
 build.ninja
 .ninja_deps
@@ -66,10 +70,16 @@ compile_commands.json
 
 # vcpkg
 vcpkg_installed/
-*.nds
+
 # debug information files
 *.dwo
 
 # test output & cache
 Testing/
 .cache/
+
+# The ROM. A build artifact: ./make.sh produces it from this tree, and the
+# README says so. It used to be tracked AND listed here, which meant the line
+# did nothing and every rebuild committed another copy of a 435 KB binary.
+*.nds
+
