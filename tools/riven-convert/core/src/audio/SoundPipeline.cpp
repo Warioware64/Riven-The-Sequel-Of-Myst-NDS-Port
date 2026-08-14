@@ -38,8 +38,17 @@ namespace
     /// seconds is 6.9 MB as PCM16 -- stay ADPCM, where they are still audible.
     /// kPcm16Budget is the line, and it is shared so the runtime budgets against
     /// the same number.
-    void encodeFromPcm(RsndSource &src, const std::vector<std::int16_t> &mono)
+    ///
+    /// The loudness compressor lives HERE, at the funnel every PCM path reaches,
+    /// for the same reason the master gain lives inside slotVolumes on the DS: a
+    /// stage that has to be remembered at each call site is a stage that will be
+    /// forgotten at the next one. src.sampleRate is set before every call.
+    void encodeFromPcm(RsndSource &src, const std::vector<std::int16_t> &pcmIn,
+                       bool compress)
     {
+        const std::vector<std::int16_t> mono =
+            compress ? compressMono(pcmIn, src.sampleRate) : pcmIn;
+
         src.sampleCount = static_cast<std::uint32_t>(mono.size());
 
         const std::uint64_t pcmBytes =
@@ -132,7 +141,8 @@ std::vector<std::uint8_t> encodeRsnd(const RsndSource &src)
     return out;
 }
 
-SoundResult convertSound(const ArchiveSet &set, std::uint16_t id, const fs::path &out)
+SoundResult convertSound(const ArchiveSet &set, std::uint16_t id, const fs::path &out,
+                         bool compress)
 {
     const auto bytes = set.read("tWAV", id);
     if (bytes.empty())
@@ -141,11 +151,11 @@ SoundResult convertSound(const ArchiveSet &set, std::uint16_t id, const fs::path
         res.error = "tWAV " + std::to_string(id) + " could not be read";
         return res;
     }
-    return convertSoundBytes(bytes, id, out);
+    return convertSoundBytes(bytes, id, out, compress);
 }
 
 SoundResult convertSoundBytes(const std::vector<std::uint8_t> &bytes, std::uint16_t id,
-                              const fs::path &out)
+                              const fs::path &out, bool compress)
 {
     SoundResult res;
 
@@ -173,12 +183,18 @@ SoundResult convertSoundBytes(const std::vector<std::uint8_t> &bytes, std::uint1
     switch (info.encoding)
     {
     case TwavEncoding::Adpcm:
-        if (info.channels == 1)
+        if (info.channels == 1 && !compress)
         {
             // The whole point of choosing IMA for the DS: the source already IS
             // IMA, one continuous stream from state {0,0}, so the samples pass
             // through untouched apart from the nibble order the DS expects.
             // Nothing is decoded and re-quantised, so nothing is lost.
+            //
+            // Only reachable with the compressor off. Compressing is a change to
+            // the samples, so it cannot be done without decoding them, and a mono
+            // sound left alone here while every other sound was lifted would be
+            // the one thing worse than the extra ADPCM generation: a handful of
+            // sounds 10 dB below the rest of the game.
             src.nibbles.assign(data, data + dataBytes);
             if (kMohawkHighNibbleFirst)
                 swapNibbles(src.nibbles.data(), src.nibbles.size());
@@ -188,9 +204,9 @@ SoundResult convertSoundBytes(const std::vector<std::uint8_t> &bytes, std::uint1
         }
         else
         {
-            const auto stereo = decodeIma(data, dataBytes, info.sampleCount, info.channels,
-                                          kMohawkHighNibbleFirst);
-            encodeFromPcm(src, downmixToMonoWithMakeup(stereo, info.channels));
+            const auto decoded = decodeIma(data, dataBytes, info.sampleCount, info.channels,
+                                           kMohawkHighNibbleFirst);
+            encodeFromPcm(src, downmixToMonoWithMakeup(decoded, info.channels), compress);
         }
         break;
 
@@ -202,7 +218,8 @@ SoundResult convertSoundBytes(const std::vector<std::uint8_t> &bytes, std::uint1
             res.unsupported = true;
             return res;
         }
-        encodeFromPcm(src, readRawPcm(data, dataBytes, info.bitsPerSample, info.channels));
+        encodeFromPcm(src, readRawPcm(data, dataBytes, info.bitsPerSample, info.channels),
+                      compress);
         break;
 
     case TwavEncoding::Mp2:
@@ -225,7 +242,7 @@ SoundResult convertSoundBytes(const std::vector<std::uint8_t> &bytes, std::uint1
             rate = kTargetRate;
         }
         src.sampleRate = static_cast<std::uint16_t>(rate);
-        encodeFromPcm(src, mono);
+        encodeFromPcm(src, mono, compress);
         break;
     }
     }

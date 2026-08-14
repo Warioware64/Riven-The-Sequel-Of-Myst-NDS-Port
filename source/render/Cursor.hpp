@@ -43,8 +43,19 @@ public:
     /// Where the hot point is, in DS screen pixels.
     void moveTo(int x, int y);
 
-    /// Hidden while a fullscreen movie owns the screen, and by kCursorHide.
+    /// The mode-level owner: the screens that take the display away from the
+    /// card view entirely (the menu, the zoom viewer) and have to put the
+    /// pointer away with it.
     void setVisible(bool on);
+
+    /// The per-frame one: engine state that hides the pointer without taking the
+    /// display away. A blocking movie and a fullscreen cutscene, re-derived
+    /// every frame in Engine::flushUploads.
+    ///
+    /// Separate from setVisible because the two have different owners and
+    /// different lifetimes -- one bool shared between them would have a movie
+    /// ending un-hide a pointer the menu had put away.
+    void setBlocked(bool on);
 
     /// Push position and shape to OAM. Must run in the vblank window: it ends in
     /// a DMA to OAM, like every other upload in this engine.
@@ -64,6 +75,7 @@ private:
     int x_ = 128;
     int y_ = 96;
     bool visible_ = true;
+    bool blocked_ = false;
     bool dirty_ = true;
 };
 

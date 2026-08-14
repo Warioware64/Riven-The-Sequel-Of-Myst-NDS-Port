@@ -58,6 +58,15 @@ public:
     rivendata::Texel *texels() { return texels_; }
     const rivendata::Texel *texels() const { return texels_; }
 
+    /// The card ALONE, without the overlays -- see `clean_` below.
+    ///
+    /// The water effect is its one reader, and reading it rather than texels_ is
+    /// what keeps a ripple from feeding on itself: every SFXE copy takes its
+    /// pixels from the undisturbed card, so a frame's result depends only on the
+    /// still, never on the frame before it (riven_graphics.cpp:465-479, which
+    /// reads _mainScreen and writes the visible screen).
+    const rivendata::Texel *clean() const { return clean_; }
+
     /// Draw a .rpic into `cardRect`, which is a PLST rectangle in Riven's
     /// original 608x392 coordinates. The file's own size is whatever the
     /// converter produced, so it is scaled to the rectangle -- the rectangle is

@@ -55,6 +55,58 @@ std::string Engine::moviePath(std::uint16_t tmovId) const
 }
 
 // ---------------------------------------------------------------------------
+// Water
+// ---------------------------------------------------------------------------
+
+void Engine::activateFlst(std::uint16_t index)
+{
+    if (card_ == nullptr)
+        return;
+    for (const FlstRec &f : card_->flst)
+    {
+        if (f.index != index)
+            continue;
+        water_.load(global.sfxeDir() + stackName(stack_.id) + "/"
+                    + std::to_string(f.sfxeId) + ".rsfx");
+        return;
+    }
+    // Not a failure, and not warn(): the original does nothing here too
+    // (riven_card.cpp:914-922 just falls out of the loop), and most cards that
+    // carry an FLST at all carry an empty one -- 1751 of the 2307 in a retail
+    // copy -- so an ungated line would sit on the console for the whole game.
+    // The effect that WAS running keeps running, which is also the original's
+    // behaviour: only a match reschedules.
+    DebugLog::log("card %u: no water effect %u", cardId_, index);
+}
+
+void Engine::pumpWater()
+{
+    if (!water_.active())
+        return;
+
+    // The player's Water setting reaches here as Riven's own variable, which is
+    // what the original tests too (riven_graphics.cpp:773). So turning water off
+    // in the settings screen stops the ripple where it stands, and turning it
+    // back on starts it again -- no reload, no card re-entry.
+    if (vars_.get(VarId::WaterEnabled) == 0)
+        return;
+
+    // Nothing to ripple when the card is not the thing on screen. The zoom
+    // viewer and a fullscreen movie both own the buffers outright, and writing
+    // into the card surface underneath them would only dirty rows that get
+    // published the moment they hand it back.
+    if (mode_ != Mode::Card || bgs.movieTakeover())
+        return;
+
+    // Through the overlay channel, not markRowMask: a ripple is on top of the
+    // card exactly the way a LITE movie's frame is, and the next screen update
+    // has to be able to take it off again. That is what the original does --
+    // updateScreen re-copies the effect surface from the untouched one
+    // (riven_graphics.cpp:391) and the effect's next tick draws it back.
+    surface_.noteOverlayRows(water_.update(surface_));
+}
+
+// ---------------------------------------------------------------------------
 // Names
 // ---------------------------------------------------------------------------
 
@@ -192,36 +244,96 @@ void Engine::activatePlst(std::uint16_t index)
 void Engine::stopAllAmbient()
 {
     for (int i = 0; i < ambientCount_; ++i)
-        RivenAudio::stopSound(ambientSlots_[i]);
+        if (ambientSlots_[i] >= 0)
+            RivenAudio::stopSound(ambientSlots_[i]);
     ambientCount_ = 0;
+    // stopAllSLST clears it too (riven_sound.cpp:116), and it has to: an SLST
+    // re-activated after opcode 12, opcode 37 or a stack change would otherwise
+    // recognise its own bed, decide it was still sounding and start nothing --
+    // leaving the card silent for as long as the player stayed on it.
+    mainAmbientId_ = -1;
 }
 
+/// One layer of an SLST, started. The mix is the record's:
+/// globalVolume scales every layer, 0..256 (RivenData.hpp:397).
+void Engine::startAmbientLayer(const SoundRec &rec, std::size_t i)
+{
+    if (ambientCount_ >= RivenAudio::kSoundSlots)
+    {
+        DebugLog::warn("card %u: SLST has more layers than channels", cardId_);
+        return;
+    }
+    const int global256 = rec.globalVolume == 0 ? 256 : rec.globalVolume;
+    const int vol = i < rec.volumes.size() ? rec.volumes[i] : 255;
+    const int bal = i < rec.balances.size() ? rec.balances[i] : 0;
+    const int slot = RivenAudio::playSound(soundPath(rec.soundIds[i]),
+                                           vol * global256 / 256, bal, rec.loop != 0);
+    DebugLog::log("  slst %u vol %d bal %d %s -> slot %d", rec.soundIds[i],
+                  vol * global256 / 256, bal, rec.loop != 0 ? "loop" : "once", slot);
+    // Recorded EVEN WHEN IT FAILED, as -1. The layer exists in the record either
+    // way, and this list is indexed by layer -- dropping the failures would slide
+    // the later layers down and the next activation of this bed would start one
+    // of them all over again.
+    ambientSlots_[ambientCount_++] = slot;
+    if (slot < 0)
+        // A sound is a file on the card like everything else, and a missing one
+        // used to be visible only inside the trace -- so a card that had gone
+        // quiet said nothing at all with the trace off.
+        DebugLog::warn("card %u: ambient %u will not play", cardId_, rec.soundIds[i]);
+}
+
+/// RivenSoundManager::playSLST (riven_sound.cpp:79-113).
+///
+/// The whole of this is one test: is the new record's FIRST sound the one
+/// already sounding? If it is, this is the same ambient bed continuing and
+/// nothing may be stopped or restarted -- only layers the new record adds are
+/// started, and the mix is adjusted underneath the sounds that carry on.
+///
+/// It is not a micro-optimisation. A layer here is a whole resident buffer read
+/// off the SD card (RivenAudio::playSound), so a needless restart is both a gap
+/// in the music and a stall during card entry -- and the shipped game has only
+/// 47 distinct beds across its 2137 SLST-1 records, so the great majority of
+/// card changes, and every opcode-19 refresh, are this case.
 void Engine::playSlst(const SoundRec &rec)
 {
-    stopAllAmbient();
+    if (rec.soundIds.empty())
+        return; // riven_sound.cpp:80-82
 
-    // globalVolume scales every layer, 0..256 (RivenData.hpp:397).
-    const int global256 = rec.globalVolume == 0 ? 256 : rec.globalVolume;
-    for (std::size_t i = 0; i < rec.soundIds.size(); ++i)
+    const bool sameBed = static_cast<std::int32_t>(rec.soundIds[0]) == mainAmbientId_;
+    if (!sameBed)
     {
-        if (ambientCount_ >= RivenAudio::kSoundSlots)
-        {
-            DebugLog::warn("card %u: SLST has more layers than channels", cardId_);
-            break;
-        }
-        const int vol = i < rec.volumes.size() ? rec.volumes[i] : 255;
-        const int bal = i < rec.balances.size() ? rec.balances[i] : 0;
-        const int slot = RivenAudio::playSound(soundPath(rec.soundIds[i]),
-                                               vol * global256 / 256, bal, rec.loop != 0);
-        DebugLog::log("  slst %u vol %d bal %d %s -> slot %d", rec.soundIds[i],
-                      vol * global256 / 256, bal, rec.loop != 0 ? "loop" : "once", slot);
-        if (slot >= 0)
-            ambientSlots_[ambientCount_++] = slot;
-        else
-            // A sound is a file on the card like everything else, and a missing
-            // one used to be visible only inside the trace -- so a card that had
-            // gone quiet said nothing at all with the trace off.
-            DebugLog::warn("card %u: ambient %u will not play", cardId_, rec.soundIds[i]);
+        // A different bed. stopAllAmbient() zeroes ambientCount_, which is what
+        // lets the loop below start from it and serve both branches.
+        stopAllAmbient();
+        mainAmbientId_ = rec.soundIds[0];
+    }
+    else
+    {
+        DebugLog::log("  slst %u already sounding: kept", rec.soundIds[0]);
+    }
+
+    // addAmbientSounds: GROWS the list and never shrinks it. A record with fewer
+    // layers than the one before leaves the extras playing, which reads like a
+    // bug and is what the original does.
+    for (std::size_t i = static_cast<std::size_t>(ambientCount_); i < rec.soundIds.size();
+         ++i)
+        startAmbientLayer(rec, i);
+
+    // setTargetVolumes: the layers that carried over keep their sound and take
+    // the new record's mix. Nothing to do on the other branch -- they were just
+    // started at exactly this volume.
+    if (!sameBed)
+        return;
+    const int global256 = rec.globalVolume == 0 ? 256 : rec.globalVolume;
+    for (int i = 0; i < ambientCount_ && static_cast<std::size_t>(i) < rec.volumes.size();
+         ++i)
+    {
+        if (ambientSlots_[i] < 0)
+            continue; // a layer whose file would not load; it still holds its place
+        const std::size_t at = static_cast<std::size_t>(i);
+        const int bal = at < rec.balances.size() ? rec.balances[at] : 0;
+        RivenAudio::setSoundVolume(ambientSlots_[i], rec.volumes[at] * global256 / 256,
+                                   bal);
     }
 }
 
@@ -560,6 +672,7 @@ void Engine::idleFrame()
 
     RivenAudio::pump();
     pumpMovies();
+    pumpWater();
 }
 
 namespace
@@ -582,12 +695,30 @@ namespace
     constexpr bool kBakeBlockingMovies = true;
 } // namespace
 
+Engine::CursorHide::CursorHide(Engine &e) : eng(e)
+{
+    ++eng.cursorSuppress_;
+}
+
+Engine::CursorHide::~CursorHide()
+{
+    if (--eng.cursorSuppress_ < 0)
+        eng.cursorSuppress_ = 0;
+}
+
 void Engine::playMovieBlocking(std::int32_t slot, bool whole)
 {
     if (slot < 0 || slot >= kMovieSlots)
         return;
     MovieSlot &ms = movies_[slot];
     const bool full = ms.player.profile() == VideoProfile::Full;
+
+    // No pointer over a video. riven_video.cpp:216 and :268 bracket the whole of
+    // playBlocking this way, and it is every blocking movie -- a fullscreen
+    // cutscene and a small overlay alike, which is why this is here and not on
+    // the fullscreen test below. Scoped rather than a hide/show pair because the
+    // `full` branch returns early.
+    CursorHide hideCursor{*this};
 
     // The original blocks the script here, and the game leans on it: a cutscene
     // that returned immediately would have the next command draw over it.
@@ -871,6 +1002,10 @@ void Engine::resetCardState()
     // Otherwise an opcode-13 shape from the last card is still on screen until
     // the pointer happens to cross a hotspot.
     cursor_.setShape(rivendata::kCursorMain);
+    // An effect belongs to the card that asked for it, and the original throws
+    // it away with the card (riven_card.cpp:57). Without this a lagoon's ripple
+    // would keep running over the next room's walls.
+    water_.clear();
     currentHotspot_ = nullptr;
     queued_.clear();
     updateDepth_ = 0;
@@ -1045,6 +1180,23 @@ void Engine::enterCard()
     // something (riven_card.cpp:690-694).
     if (!activatedPlst_ && !card_->plst.empty())
         activatePlst(1);
+
+    // And its other half, which was missing: SLST 1 unless a script already
+    // activated one (riven_card.cpp:694). Without it activatedSlst_ was written
+    // and never read, and a card with no opcode 40 of its own simply inherited
+    // whatever bed was already playing -- which sounded right often enough to
+    // hide that it was luck.
+    //
+    // Only safe because playSlst now recognises a bed that is already sounding:
+    // this fires on EVERY card entry, and enterCard is also what opcode 19
+    // re-runs, so without that test this line would restart the music on every
+    // card change and every lever pull.
+    //
+    // The emptiness guard is RivenCard::playSound's `index <= _soundList.size()`
+    // (riven_card.cpp:698-703) and it is what keeps the 170 cards with an empty
+    // SLST quiet. Every one of the other 2137 carries a record indexed 1.
+    if (!activatedSlst_ && !card_->slst.empty())
+        activateSlst(1);
 
     // After the load script, before the screen update: the load script may have
     // enabled or disabled hotspots, and zip mode has the last word on the ones
@@ -1485,6 +1637,18 @@ void Engine::flushUploads()
     // positions were decided by processInput() late in the previous frame, so the
     // pointer is one frame behind the stylus -- 16 ms, and the cost of the loop
     // order that keeps everything else where it must be.
+    //
+    // The two reasons a video puts the pointer away, resolved here because this
+    // is the one place per frame that both are known: a blocking play, which is
+    // scoped and counted (CursorHide), and a fullscreen movie owning the screen,
+    // which is derived -- opcode 33 can start one and let the script carry on,
+    // so there is no scope to hang a guard on. Inventory.cpp:151-152 is the same
+    // rule for the strip next to it.
+    //
+    // This runs BEFORE pumpMovies() in frame() and idleFrame() alike, so on the
+    // frame a fullscreen movie ends, endFullscreenMovie has not run yet and the
+    // pointer stays away one frame longer. 16 ms, and the right side to err on.
+    cursor_.setBlocked(cursorSuppress_ > 0 || fullscreenMoviePlaying());
     cursor_.flush();
     inventory_.flush();
 
@@ -1515,6 +1679,11 @@ void Engine::frame()
 
     RivenAudio::pump();
     pumpMovies();
+    // Next to pumpMovies in BOTH loops, because the original's updateEffects is
+    // called from doFrame -- which is what playBlocking spins. So Riven's water
+    // keeps moving underneath a blocking movie, and a cutscene over a lagoon
+    // does not freeze the lagoon.
+    pumpWater();
 
     processInput();
 

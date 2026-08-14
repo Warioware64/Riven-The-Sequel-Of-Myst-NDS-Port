@@ -47,6 +47,10 @@ namespace
             "  --no-video          skip the movies (by far the longest stage)\n"
             "  --no-cursors        skip Riven's own cursors (read from riven.exe)\n"
             "  --no-extras         skip the inventory art (read from extras.mhk)\n"
+            "  --no-compress       leave the audio dynamics alone. The sounds and\n"
+            "                      movies are compressed and lifted by default,\n"
+            "                      because Riven's peaks are already at full scale\n"
+            "                      and no runtime volume can make it louder\n"
             "  --ffmpeg <path>     the ffmpeg binary, or the folder holding it. The\n"
             "                      movie stage decodes through ffmpeg; without this\n"
             "                      it is looked for on PATH. Not needed with\n"
@@ -316,6 +320,10 @@ int main(int argc, char **argv)
             opts.video = false;
         else if (a == "--no-cursors")
             opts.cursors = false;
+        else if (a == "--no-compress")
+        {
+            opts.compressAudio = false;
+        }
         else if (a == "--no-extras")
             opts.extras = false;
         else if (a == "--ffmpeg")

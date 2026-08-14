@@ -127,6 +127,14 @@ void Cursor::setVisible(bool on)
     dirty_ = true;
 }
 
+void Cursor::setBlocked(bool on)
+{
+    if (on == blocked_)
+        return;
+    blocked_ = on;
+    dirty_ = true;
+}
+
 void Cursor::apply()
 {
     if (obj_ == nullptr)
@@ -135,7 +143,7 @@ void Cursor::apply()
     // 9000 is a real cursor in riven.exe and is entirely transparent -- the
     // original hides the pointer by drawing nothing. Hiding the sprite is the
     // same thing and costs no OAM.
-    if (shape_ == kCursorHide || !visible_)
+    if (shape_ == kCursorHide || !visible_ || blocked_)
     {
         NEA_Hw2DOBJSetVisible(obj_, false);
         return;

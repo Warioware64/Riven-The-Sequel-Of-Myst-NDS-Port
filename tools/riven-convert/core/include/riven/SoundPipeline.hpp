@@ -204,6 +204,54 @@ std::vector<std::int16_t> downmixToMonoWithMakeup(const std::vector<std::int16_t
 std::vector<std::int16_t> resampleMono(const std::vector<std::int16_t> &pcm, int srcRate,
                                        int dstRate);
 
+// --- Loudness --------------------------------------------------------------
+//
+// THIS IS THE ONE STAGE THAT CHANGES THE MATERIAL rather than transporting it,
+// so the reasoning is worth stating in full.
+//
+// Riven's audio is not quiet, it is DYNAMIC. Measured over the 5-CD release:
+// the median tWAV sits at -16 dBFS RMS with its peak on the rail, a crest
+// factor of 16 dB, and the opening cutscene's four movies average -32, -20, -18
+// and -14 dB with peaks at 0. Every one of those peaks is already at full scale
+// -- partly the mastering, partly ADPCM's predictor overshooting on transients.
+//
+// So there is NO headroom for a gain. A multiplier above 1.0 clips something
+// that is already against the ceiling, and that is true of the sounds, of the
+// movies, and of the intro in particular. The only way to make the game louder
+// is to spend the crest factor: raise the body of the signal and hold the peaks.
+//
+// Done here rather than on the DS because compressing before the ADPCM encoder
+// lets the quantiser adapt to the louder signal. Doing it after the decode, at
+// playback, would lift the quantisation noise by exactly as much as the signal.
+//
+// The makeup is a CONSTANT, not a per-file normalisation. That is what keeps the
+// relative loudness the game was mixed with: every sound moves by the same
+// amount, and only the compressor's own action -- which is larger on loud
+// material than on quiet -- changes the balance between them, by a couple of dB.
+// downmixToMonoWithMakeup's rule about never pushing a sound past where it
+// started does not survive this, and cannot: that rule is what was making the
+// port quiet.
+
+/// Compressor settings, gathered so the numbers are in one place and a test can
+/// state them. Threshold and makeup are dB relative to full scale.
+struct Loudness
+{
+    double thresholdDb = -20.0; ///< where the compressor starts to act
+    double ratio = 3.0;         ///< 3:1 above the knee
+    double kneeDb = 6.0;        ///< soft knee, centred on the threshold
+    double makeupDb = 10.0;     ///< constant, applied to everything
+    double ceilingDb = -1.0;    ///< nothing is allowed above this
+    double attackMs = 5.0;
+    double releaseMs = 120.0;
+};
+
+/// Compress `pcm` in place-ish and return it. Mono only, and `sampleRate` is
+/// needed because the attack and release are in milliseconds.
+///
+/// A no-op on empty input. The result never exceeds `cfg.ceilingDb`.
+std::vector<std::int16_t> compressMono(const std::vector<std::int16_t> &pcm, int sampleRate,
+                                       const Loudness &cfg = {});
+
 /// Rate every decoded-then-re-encoded sound lands on.
 inline constexpr int kTargetRate = 22050;
 
@@ -243,7 +291,7 @@ struct SoundResult
 
 /// Convert tWAV `id` from `set` and write `out` atomically.
 SoundResult convertSound(const ArchiveSet &set, std::uint16_t id,
-                         const std::filesystem::path &out);
+                         const std::filesystem::path &out, bool compress = true);
 
 /// The same, on bytes already pulled out of the archive.
 ///
@@ -252,6 +300,6 @@ SoundResult convertSound(const ArchiveSet &set, std::uint16_t id,
 /// this function -- which touches nothing shared -- runs on workers. It matters most
 /// on the DVD release, where every ambient is an MPEG-2 Layer II decode.
 SoundResult convertSoundBytes(const std::vector<std::uint8_t> &bytes, std::uint16_t id,
-                              const std::filesystem::path &out);
+                              const std::filesystem::path &out, bool compress = true);
 
 } // namespace riven

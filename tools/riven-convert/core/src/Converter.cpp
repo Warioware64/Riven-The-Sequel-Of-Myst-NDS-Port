@@ -870,7 +870,7 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                         continue;
                     }
 
-                    SoundResult sr = convertSound(soundSet, job.id, job.out);
+                    SoundResult sr = convertSound(soundSet, job.id, job.out, opts.compressAudio);
                     report(job, sr);
                 }
 

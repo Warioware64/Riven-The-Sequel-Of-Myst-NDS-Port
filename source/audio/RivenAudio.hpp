@@ -70,8 +70,23 @@ std::uint32_t streamFree();
 /// not this: a caller sets what the movie asks for and forgets about it.
 void streamSetVolume(int volume);
 
-/// The player's master gain, 0..255 (255 = unity), applied to EVERYTHING --
-/// the ambient layers, the one-shot effects and the movie soundtrack.
+/// Gain arithmetic. 256 is unity; the master gain runs to kGainMax, which is
+/// twice that, because the port needs to be able to make a quiet cutscene
+/// LOUDER and not only quieter.
+inline constexpr int kGainUnity = 256;
+inline constexpr int kGainMax = 2 * kGainUnity;
+
+/// The player's master gain as a 0..255 setting byte, spread across the whole
+/// 0..kGainMax range -- so 127 is roughly unity and 255 is twice it. Applied to
+/// EVERYTHING: the ambient layers, the one-shot effects and the movie
+/// soundtrack.
+///
+/// ABOVE UNITY IT REACHES THE MOVIE SOUNDTRACK ONLY, and that asymmetry is the
+/// hardware's, not a choice. Ambient and effects are played by DS sound
+/// channels straight out of their own buffers, and a channel's volume register
+/// stops at 127 with a divider that can only divide -- so the sample data's own
+/// amplitude is a hard ceiling for them. The soundtrack is mixed in software by
+/// streamCallback, which is the one place there is room to multiply.
 ///
 /// Applied here rather than at the call sites so that no future caller can
 /// forget it, and applied to the sounds already playing rather than only to the

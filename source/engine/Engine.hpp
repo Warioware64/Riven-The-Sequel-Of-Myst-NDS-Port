@@ -34,6 +34,7 @@
 #include "render/CardSurface.hpp"
 #include "render/Cursor.hpp"
 #include "render/Inventory.hpp"
+#include "render/WaterEffect.hpp"
 #include "render/ZoomView.hpp"
 #include "rvid/RvidPlayer.hpp"
 
@@ -198,15 +199,46 @@ public:
     /// to put the pointer away with it.
     Cursor &cursor() { return cursor_; }
 
+    /// Put the pointer away for the length of a blocking sequence.
+    /// RivenVideo::playBlocking brackets its whole wait with hideCursor() and
+    /// showCursor() (riven_video.cpp:216 and :268), for any blocking video --
+    /// a fullscreen cutscene and a small overlay alike.
+    ///
+    /// Counted and scope-bound, which is the sibling Myst port's convention
+    /// (MystEngine::CursorHide) and for its reason: a hand-written hide/show
+    /// pair leaks the hidden state on an early return, and playMovieBlocking
+    /// has one. The guard only moves the counter -- flushUploads re-derives the
+    /// sprite's visibility from it every frame.
+    ///
+    /// The two bodies are out of line only because clang does not extend a
+    /// class's complete-class context into its nested classes the way the
+    /// standard and gcc do, and cursorSuppress_ is declared below.
+    struct CursorHide
+    {
+        Engine &eng;
+        explicit CursorHide(Engine &e);
+        ~CursorHide();
+        CursorHide(const CursorHide &) = delete;
+        CursorHide &operator=(const CursorHide &) = delete;
+    };
+
     /// Where the pointer is, in DS screen pixels. Moved by the stylus and by the
     /// D-pad alike (processInput), and read by the inventory strip, which shows
     /// itself only while it is being pointed at.
     int pointerX() const { return pointerX_; }
     int pointerY() const { return pointerY_; }
 
+    /// Opcode 44 (riven_scripts.cpp:750). Start the card's water effect: the
+    /// FLST record with this index names an SFXE, and that is the ripple.
+    /// RivenCard::activateWaterEffect (riven_card.cpp:914-922).
+    void activateFlst(std::uint16_t index);
+
     void activateSlst(std::uint16_t index);
     void playSlst(const rivendata::SoundRec &rec);
     void stopAllAmbient();
+    /// Start layer `i` of `rec` on a free slot. Shared by the two paths through
+    /// playSlst so the mix and the reporting cannot drift apart.
+    void startAmbientLayer(const rivendata::SoundRec &rec, std::size_t i);
     void playEffect(std::uint16_t twavId, int volume);
     void stopEffects();
 
@@ -326,6 +358,10 @@ private:
     void initializeZipMode();
     void processInput();
     void pumpMovies();
+    /// One engine frame of the card's water effect, if it has one and the player
+    /// has not turned water off. RivenGraphics::updateEffects
+    /// (riven_graphics.cpp:772-780).
+    void pumpWater();
 
     /// A frame's screen work: publish what the scripts changed, flip, step a
     /// transition, write OAM. Called straight after NEA_WaitForVBL because that
@@ -355,6 +391,12 @@ private:
     CardSurface surface_;
     Cursor cursor_;
     Inventory inventory_;
+    /// The card's water, if it activated any. One at a time, like the original:
+    /// scheduleWaterEffect replaces whatever was running (riven_graphics.cpp:403).
+    WaterEffect water_;
+
+    /// How many CursorHide guards are alive. Read once a frame in flushUploads.
+    int cursorSuppress_ = 0;
 
     /// The pointer, in DS screen pixels. Persistent on purpose: a stylus has no
     /// hover, so a pointer that existed only while the stylus was down could
@@ -393,9 +435,23 @@ private:
     std::int32_t pressedHotspot_ = -1;
 
     MovieSlot movies_[kMovieSlots];
-    /// SLST layers currently sounding, as returned by RivenAudio::playSound.
+    /// The current SLST's layers: one entry per layer IN THE RECORD, holding the
+    /// RivenAudio::playSound slot, or -1 for a layer that did not start.
+    ///
+    /// Parallel to the record's layers and not packed to the ones that sound,
+    /// because playSlst grows this list rather than rebuilding it: a packed array
+    /// would make a failed layer shift every later one down, so the next
+    /// activation of the same bed would start an already-sounding layer a second
+    /// time and the mix would be applied to the wrong slots.
     int ambientSlots_[RivenAudio::kSoundSlots] = {};
     int ambientCount_ = 0;
+    /// The first sound id of the SLST now sounding, or -1. ScummVM's
+    /// _mainAmbientSoundId (riven_sound.cpp:38), and the one value that decides
+    /// whether an SLST is this bed CONTINUING or a different one starting --
+    /// which is the whole of playSlst's behaviour. Only 47 distinct beds exist
+    /// across the 2137 SLST-1 records in the shipped game, so most card changes
+    /// are a continuation and restarting one is both audible and an SD read.
+    std::int32_t mainAmbientId_ = -1;
     int effectSlot_ = -1;
 
     std::vector<rivendata::Command> queued_;

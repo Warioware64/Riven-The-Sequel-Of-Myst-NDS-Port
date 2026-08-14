@@ -33,6 +33,26 @@ namespace
     /// when the selection lands on it.
     constexpr int kMarkX = 20;
 
+    /// Steps on the volume row, and the one place the byte and the number on
+    /// screen are tied together.
+    ///
+    /// Twenty steps across the whole gain range, which now runs to twice unity
+    /// (Settings.hpp), so a step is 10% and level 10 is 100%. Shown as a
+    /// percentage rather than as "10": the useful thing to know about this
+    /// control is where normal is, and a bare number does not say.
+    ///
+    /// The control used to step masterVolume itself by 255/kVolumeSteps and let
+    /// the label re-derive the number. An integer step does not divide 255, so
+    /// the ladder missed both ends -- from full it stopped at 5, never 0 -- and
+    /// the label showed the same number at either side of the wrap. Stepping the
+    /// LEVEL and deriving the byte from it cannot drift: level*255/kVolumeSteps
+    /// puts volumeLevel() back on the same level.
+    constexpr int kVolumeSteps = 20;
+    int volumeLevel(std::uint8_t v)
+    {
+        return (v * kVolumeSteps + 127) / 255;
+    }
+
     int rowAt(int y, int rows)
     {
         if (y < kFirstY)
@@ -199,15 +219,13 @@ void MainMenu::runSettings()
                 break;
             case RowVolume:
             {
-                // Ten steps, wrapping, so one control works for both a D-pad
+                // Twenty steps, wrapping, so one control works for both a D-pad
                 // and a touch. LEFT goes down, everything else goes up.
-                const int step = 255 / 10;
-                int v = settings.masterVolume;
-                if (down & KEY_LEFT)
-                    v = v < step ? 255 : v - step;
-                else
-                    v = v > 255 - step ? 0 : v + step;
-                settings.masterVolume = static_cast<std::uint8_t>(v);
+                int level = volumeLevel(settings.masterVolume);
+                level += (down & KEY_LEFT) != 0 ? -1 : 1;
+                level = level < 0 ? kVolumeSteps : (level > kVolumeSteps ? 0 : level);
+                settings.masterVolume =
+                    static_cast<std::uint8_t>(level * 255 / kVolumeSteps);
                 changed = true;
                 // Live, so the slider is heard while it moves.
                 settings.apply();
@@ -242,8 +260,8 @@ void MainMenu::runSettings()
         const std::string labels[kRowCount] = {
             std::string("Zip mode: ") + onOff[settings.zipMode],
             std::string("Transitions: ") + onOff[settings.transitions],
-            std::string("Water: ") + onOff[settings.water] + " (not yet animated)",
-            "Volume: " + std::to_string((settings.masterVolume * 10 + 127) / 255),
+            std::string("Water: ") + onOff[settings.water],
+            "Volume: " + std::to_string(volumeLevel(settings.masterVolume) * 10) + "%",
             // The only row that does not take effect where it is set:
             // DebugLog::begin reads it once, at startup, because it takes the
             // top screen away from the picture as it does so.

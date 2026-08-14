@@ -331,9 +331,10 @@ namespace
             break;
         }
 
-        // 44: pick the card's water effect. Water is converted (sfxe/) but not
-        // yet animated on the DS; the still underneath is what shows.
+        // 44: pick the card's water effect, by FLST index
+        // (riven_scripts.cpp:750).
         case Op::ActivateFLST: // 44
+            e.activateFlst(arg(c, 0));
             break;
 
         // 45: zip mode -- jump to the previously visited card whose NAME

@@ -180,4 +180,105 @@ std::vector<std::int16_t> resampleMono(const std::vector<std::int16_t> &pcm, int
     return out;
 }
 
+std::vector<std::int16_t> compressMono(const std::vector<std::int16_t> &pcm, int sampleRate,
+                                       const Loudness &cfg)
+{
+    if (pcm.empty() || sampleRate <= 0)
+        return pcm;
+
+    constexpr double kFullScale = 32768.0;
+    // Below this the level is treated as silence rather than as -inf dB, which
+    // would send the gain computer to infinity on a run of zero samples.
+    constexpr double kFloor = 1.0 / kFullScale;
+
+    const double knee = cfg.kneeDb > 0.0 ? cfg.kneeDb : 0.0;
+    const double lower = cfg.thresholdDb - knee / 2.0;
+    const double upper = cfg.thresholdDb + knee / 2.0;
+    const double slope = 1.0 - 1.0 / cfg.ratio;
+
+    // One-pole envelope coefficients. exp(-1/(t*rate)) is the usual form: the
+    // envelope reaches 63% of a step in t seconds.
+    const auto coeff = [sampleRate](double ms) {
+        const double n = ms * 0.001 * sampleRate;
+        return n > 0.0 ? std::exp(-1.0 / n) : 0.0;
+    };
+    const double aAttack = coeff(cfg.attackMs);
+    const double aRelease = coeff(cfg.releaseMs);
+
+    const double makeup = std::pow(10.0, cfg.makeupDb / 20.0);
+    const double ceiling = std::pow(10.0, cfg.ceilingDb / 20.0) * kFullScale;
+
+    // LOOK-AHEAD, and it is not a refinement -- without it this does not work.
+    //
+    // An envelope follower cannot react to a transient it has not seen yet, so a
+    // 5 ms attack lets the first 5 ms of every hit through ungained, the makeup
+    // pushes it past the ceiling and the clamp below hard-clips it. Measured on
+    // b_Sounds: half the sounds landed exactly on the ceiling, which is the
+    // clamp doing the compressor's job, audibly.
+    //
+    // Delaying the audio by the attack time while the gain is computed from the
+    // undelayed signal puts the gain reduction fully in place BEFORE the
+    // transient arrives. The output stays time-aligned with the input -- the
+    // delay is internal, not a shift -- and the clamp goes back to being the
+    // backstop it is meant to be.
+    const std::size_t lookahead =
+        static_cast<std::size_t>(cfg.attackMs * 0.001 * sampleRate) + 1;
+
+    std::vector<std::int16_t> out(pcm.size());
+    std::vector<std::int16_t> delay(lookahead, 0);
+    std::size_t di = 0;
+    double env = 0.0;
+
+    for (std::size_t i = 0; i < pcm.size() + lookahead; ++i)
+    {
+        // Past the end the follower is fed silence, which lets the last
+        // `lookahead` samples out of the delay line under a releasing gain.
+        const std::int16_t in = i < pcm.size() ? pcm[i] : static_cast<std::int16_t>(0);
+        const double s = static_cast<double>(in) / kFullScale;
+        const double mag = s < 0.0 ? -s : s;
+
+        // Peak follower: jump up at the attack rate, fall back at the release
+        // rate. Following the peak rather than the RMS is what lets the ceiling
+        // below be a promise instead of a hope.
+        const double a = mag > env ? aAttack : aRelease;
+        env = mag + a * (env - mag);
+
+        const std::int16_t held = delay[di];
+        delay[di] = in;
+        di = di + 1 < lookahead ? di + 1 : 0;
+        if (i < lookahead)
+            continue; // still filling the delay line
+
+        const double levelDb = 20.0 * std::log10(env > kFloor ? env : kFloor);
+
+        // The gain computer, in dB. Below the knee nothing happens; above it the
+        // signal is pushed back towards the threshold by (1 - 1/ratio) of its
+        // excess; across the knee the two meet as a parabola so there is no
+        // audible corner where the compressor switches on.
+        double reduceDb = 0.0;
+        if (levelDb > upper)
+            reduceDb = (cfg.thresholdDb - levelDb) * slope;
+        else if (knee > 0.0 && levelDb > lower)
+        {
+            const double over = levelDb - lower;
+            reduceDb = -slope * over * over / (2.0 * knee);
+        }
+
+        double v = static_cast<double>(held) * std::pow(10.0, reduceDb / 20.0) * makeup;
+
+        // The backstop. With the default settings the compressed peak lands
+        // around -3 dBFS and this never fires, but the settings are a struct and
+        // a caller may choose otherwise; a converter must not emit a sample that
+        // wraps on the DS.
+        if (v > ceiling)
+            v = ceiling;
+        else if (v < -ceiling)
+            v = -ceiling;
+
+        out[i - lookahead] = static_cast<std::int16_t>(std::lround(v));
+    }
+
+    return out;
+}
+
 } // namespace riven

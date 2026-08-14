@@ -258,6 +258,57 @@ int main()
             check(s > 0, "full-scale input does not wrap through the gain");
     }
 
+    // --- the loudness compressor --------------------------------------------
+    {
+        const auto rms = [](const std::vector<std::int16_t> &v) {
+            double acc = 0.0;
+            for (const std::int16_t s : v)
+                acc += static_cast<double>(s) * s;
+            return v.empty() ? 0.0 : std::sqrt(acc / static_cast<double>(v.size()));
+        };
+        const auto peak = [](const std::vector<std::int16_t> &v) {
+            std::int32_t p = 0;
+            for (const std::int16_t s : v)
+                p = std::max(p, s < 0 ? -static_cast<std::int32_t>(s) : s);
+            return p;
+        };
+
+        check(compressMono({}, kTargetRate).empty(), "empty in, empty out");
+
+        // Length and alignment: the look-ahead is an internal delay, so the
+        // output must be the same length and must NOT be shifted in time.
+        const auto tone = sweep(8192);
+        const auto out = compressMono(tone, kTargetRate);
+        check(out.size() == tone.size(), "the compressor does not change the length");
+
+        // The ceiling is the promise the whole stage rests on -- a sample past it
+        // wraps on the DS.
+        const Loudness cfg;
+        const auto ceiling = static_cast<std::int32_t>(
+            std::lround(std::pow(10.0, cfg.ceilingDb / 20.0) * 32768.0));
+        check(peak(out) <= ceiling, "nothing comes out above the ceiling");
+
+        // Quiet material is below the threshold, so it gets the makeup and
+        // nothing else: that is what preserves the relative loudness between
+        // sounds. -40 dBFS plus 10 dB of makeup is still far from the knee.
+        std::vector<std::int16_t> quiet(tone.size());
+        for (std::size_t i = 0; i < tone.size(); ++i)
+            quiet[i] = static_cast<std::int16_t>(tone[i] / 100);
+        const double gainDb =
+            20.0 * std::log10(rms(compressMono(quiet, kTargetRate)) / rms(quiet));
+        check(gainDb > cfg.makeupDb - 0.5 && gainDb < cfg.makeupDb + 0.5,
+              "material under the threshold gets the makeup gain and nothing else");
+
+        // And loud material gets less, which is the compression doing its job.
+        check(20.0 * std::log10(rms(out) / rms(tone)) < gainDb,
+              "material over the threshold is lifted less than material under it");
+
+        // Full scale in, no wrap out -- the case the ceiling exists for.
+        const std::vector<std::int16_t> rail(4096, 32767);
+        for (const std::int16_t s : compressMono(rail, kTargetRate))
+            check(s > 0, "full-scale input does not wrap through the compressor");
+    }
+
     // --- nibble order -------------------------------------------------------
     {
         auto data = encodeIma(sweep(4096).data(), 4096);

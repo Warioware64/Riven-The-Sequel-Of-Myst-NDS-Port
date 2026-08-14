@@ -534,6 +534,13 @@ VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint1
             // than a failure.
             res.audioError = err;
         }
+        // The same loudness stage the sounds get (SoundPipeline.hpp), and the
+        // one the opening cutscene needs most: its four movies average -32, -20,
+        // -18 and -14 dB with their peaks already on the rail, so there is
+        // nothing to be gained by a multiplier and everything by spending that
+        // crest factor. Before the IMA encoder below, so the quantiser adapts.
+        if (!mono.empty())
+            mono = compressMono(mono, kTargetRate);
     }
     const int audioRate = kTargetRate;
     res.hasAudio = !mono.empty();

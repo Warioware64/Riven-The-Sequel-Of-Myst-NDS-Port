@@ -42,8 +42,9 @@ namespace
     bool g_streamOpen = false;
     int g_streamRate = 0;
 
-    /// The player's master gain, 0..255. Settings::apply owns it.
-    int g_master = 255;
+    /// The player's master gain as a multiplier, 0..kGainMax with kGainUnity as
+    /// 1.0. Settings::apply owns it, through the 0..255 setting byte.
+    int g_masterGain = RivenAudio::kGainUnity;
 
     /// Decoder state carried across a movie's frames. Each RVID audio block
     /// begins with its own state word, so this is reseeded per block rather than
@@ -108,8 +109,19 @@ namespace
         for (std::uint32_t i = 0; i < give; ++i)
         {
             std::int32_t s = g_ring[(out_ + i) % kRingSamples];
-            if (g_streamVolume < 256)
+            if (g_streamVolume != RivenAudio::kGainUnity)
+            {
+                // The one place in the port with room to make something LOUDER:
+                // these samples are mixed in software, where a hardware channel
+                // can only be turned down. Above unity it has to saturate --
+                // Riven's own soundtracks are mastered close to full scale, so
+                // wrapping would be heard as a tear rather than as clipping.
                 s = (s * g_streamVolume) >> 8;
+                if (s > 32767)
+                    s = 32767;
+                else if (s < -32768)
+                    s = -32768;
+            }
             out[i * 2] = static_cast<std::int16_t>(s);
             out[i * 2 + 1] = static_cast<std::int16_t>(s);
         }
@@ -206,7 +218,13 @@ namespace
     /// caller is added.
     void slotVolumes(int volume, int balance, int &left, int &right)
     {
-        const int base = clampVolume(volume * g_master / 255 * 127 / 255);
+        // Clamped at unity, because this ends in a hardware channel's volume
+        // register: 127 with a divider that only divides, so the sample's own
+        // amplitude is the ceiling. The top half of the master range is a boost
+        // the movie soundtrack can take and these cannot (RivenAudio.hpp).
+        const int gain = g_masterGain > RivenAudio::kGainUnity ? RivenAudio::kGainUnity
+                                                              : g_masterGain;
+        const int base = clampVolume(volume * gain / RivenAudio::kGainUnity * 127 / 255);
         int leftScale = 127;
         int rightScale = 127;
         panScaleFor(balance, leftScale, rightScale);
@@ -257,7 +275,13 @@ bool RivenAudio::streamOpen(int sampleRate)
     g_ringIn = 0;
     g_ringOut = 0;
     g_samplesPlayed = 0;
-    g_streamVolume = 256;
+    // A fresh stream asks for unity and the master is folded straight back in.
+    // Assigning g_streamVolume directly here would drop the player's setting for
+    // as long as it took someone to call streamSetVolume -- which today is the
+    // very next line in RvidPlayer::play, and tomorrow is whatever a second
+    // caller remembers to do.
+    g_streamRequested = RivenAudio::kGainUnity;
+    g_streamVolume = g_streamRequested * g_masterGain / RivenAudio::kGainUnity;
     g_streamRate = sampleRate;
     std::memset(g_ring, 0, sizeof(g_ring));
 
@@ -297,14 +321,19 @@ std::uint32_t RivenAudio::streamFree() { return kRingSamples - streamQueued(); }
 
 void RivenAudio::streamSetVolume(int volume)
 {
-    g_streamRequested = volume < 0 ? 0 : (volume > 256 ? 256 : volume);
-    g_streamVolume = g_streamRequested * g_master / 255;
+    g_streamRequested = volume < 0 ? 0 : (volume > kGainUnity ? kGainUnity : volume);
+    g_streamVolume = g_streamRequested * g_masterGain / kGainUnity;
 }
 
 void RivenAudio::setMasterVolume(int volume)
 {
-    g_master = volume < 0 ? 0 : (volume > 255 ? 255 : volume);
-    g_streamVolume = g_streamRequested * g_master / 255;
+    // The setting byte spans the WHOLE gain range, so 127 is about unity and 255
+    // is twice it (RivenAudio.hpp). The stream takes all of it; slotVolumes
+    // clamps its own copy back to unity because a hardware channel cannot go
+    // above the sample it is playing.
+    const int v = volume < 0 ? 0 : (volume > 255 ? 255 : volume);
+    g_masterGain = v * kGainMax / 255;
+    g_streamVolume = g_streamRequested * g_masterGain / kGainUnity;
 
     // Everything already sounding, so the slider is heard while it moves rather
     // than at the next card. setSoundVolume goes back through slotVolumes, which

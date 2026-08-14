@@ -53,6 +53,14 @@ struct Options
     bool cursors = true;
     bool extras = true;
 
+    /// Spend Riven's crest factor to make the game audible on DS speakers:
+    /// compress and lift the sounds and the movie soundtracks
+    /// (SoundPipeline.hpp's Loudness note). On by default because without it the
+    /// port is quiet in a way no runtime volume control can fix -- every peak in
+    /// the source is already at full scale. Off is the untouched material, for
+    /// comparing the two.
+    bool compressAudio = true;
+
 
     /// Where ffmpeg is. The video stage decodes through it (riven/FFmpeg.hpp),
     /// so this is the one external tool the converter needs. Empty means "search
