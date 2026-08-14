@@ -186,12 +186,25 @@ int main()
     int worstMax = 0;
     int parityChecked = 0;
 
+    int placed = 0, unplaced = 0, placementClashes = 0, spanChecked = 0;
+
     for (const auto &stack : source.stacks)
     {
         ArchiveSet set;
         std::vector<std::string> failures;
         set.openAll(stack.dataArchives, failures);
         const auto ids = set.resourceIds("tMOV");
+
+        // Every movie's MLST position, and the count of movies placed twice.
+        //
+        // The converter keeps ONE position per movie, and its whole right to do
+        // that is this number being zero: a movie drawn at two lefts would need
+        // two sizes, and only one is written. Measured zero across all eight
+        // stacks of a 5-CD install; if a DVD or GOG build differs, this is what
+        // says so.
+        int clashes = 0;
+        const auto placements = collectMoviePlacements(set, &clashes);
+        placementClashes += clashes;
 
         for (std::size_t i = 0; i < ids.size(); ++i)
         {
@@ -212,6 +225,10 @@ int main()
             if (m.hasAudio())
                 ++withAudio;
 
+            const auto pit = placements.find(id);
+            const MoviePlacement *place = pit == placements.end() ? nullptr : &pit->second;
+            (place != nullptr ? placed : unplaced) += 1;
+
             // Converting every movie would be a full conversion run; two per
             // stack is enough to catch the pipeline having stopped working.
             if (i % std::max<std::size_t>(1, ids.size() / 2) != 0 || converted >= 16)
@@ -220,7 +237,7 @@ int main()
             const fs::path out =
                 outDir / (std::string(rivendata::stackName(stack.id)) + "-"
                           + std::to_string(id) + ".rvid");
-            const VideoResult vr = convertMovie(set, id, out, ff);
+            const VideoResult vr = convertMovie(set, id, out, ff, place);
             if (!vr.ok)
             {
                 check(false, "tMOV " + std::to_string(id) + ": " + vr.error);
@@ -228,6 +245,26 @@ int main()
             }
             ++converted;
             outBytes += vr.bytes;
+
+            // The size rule, stated in full: an overlay covers the DS columns
+            // between its two card-space edges mapped through toDsX -- not its
+            // card-space length scaled, which is a pixel short whenever the two
+            // fractions carry. The parity check further down cannot see this:
+            // it compares two downscales of the movie AT vr.width, so it is
+            // blind to vr.width itself being wrong.
+            if (place != nullptr)
+            {
+                const int spanW = rivendata::toDsX(place->left + vr.cardWidth)
+                                - rivendata::toDsX(place->left);
+                const int spanH = rivendata::toDsY(place->top + vr.cardHeight)
+                                - rivendata::toDsY(place->top);
+                check(vr.width == std::max(1, spanW) && vr.height == std::max(1, spanH),
+                      "tMOV " + std::to_string(id) + " covers the columns its MLST "
+                      "position spans: " + std::to_string(spanW) + "x"
+                          + std::to_string(spanH) + " (got " + std::to_string(vr.width)
+                          + "x" + std::to_string(vr.height) + ")");
+                ++spanChecked;
+            }
 
             // Re-read the header exactly as the DS will.
             std::vector<std::uint8_t> file(vr.bytes);
@@ -367,18 +404,28 @@ int main()
         }
     }
 
-    // --- the track matrix ---------------------------------------------------
+    // --- the two things that decide an overlay's size -----------------------
     //
-    // A tMOV's coded size is not the size Riven draws it at: QuickTime's track
-    // matrix scales it, and 79 of a 5-CD install's 1054 movies carry one. The
-    // converter ignored it for a long time, so those movies went onto the card
-    // at twice or four times their size -- tspit's lever at 2x, the telescope
-    // button at 4x, both plainly wrong on the screen.
+    // The TRACK MATRIX. A tMOV's coded size is not the size Riven draws it at:
+    // QuickTime's track matrix scales it, and 79 of a 5-CD install's 1054
+    // movies carry one. The converter ignored it for a long time, so those
+    // movies went onto the card at twice or four times their size -- tspit's
+    // lever at 2x, the telescope button at 4x, both plainly wrong on the screen.
     //
-    // Two named movies rather than a survey: one that carries a scale and one
-    // that does not, so a regression in either direction is caught. tspit 19 is
-    // the lever (128x80 coded, matrix 0.5) and tspit 43 the telescope's travel
-    // movie (80x112, matrix 1.0), which has always been right and must stay so.
+    // The SPAN. A movie of card-width W at left L covers DS columns
+    // [toDsX(L), toDsX(L+W)). The converter scaled the length instead, and
+    // floor(W*s) is one short whenever the two fractions carry -- 583 of the
+    // 1055 movies, which is why the lever stayed a pixel out of its still after
+    // the matrix was fixed.
+    //
+    // Three named movies, chosen so each failure is distinguishable. tspit 19 is
+    // card 15's lever: 128x80 coded, matrix 0.5, at (48,307), and its span is
+    // one wider AND one taller than the scaled length -- 27x17 against 26x16.
+    // tspit 21 is card 18's porthole: 432x256, no matrix, at (4,72), so it
+    // separates the span from the matrix -- 182x108 against 181x107. tspit 43 is
+    // the telescope's travel movie: 80x112, no matrix, at (504,232), where span
+    // and length agree at 33x47. It has always been right and must stay so,
+    // which is exactly why it showed nothing when the lever was investigated.
     for (const auto &stack : source.stacks)
     {
         if (stack.id != rivendata::StackId::Tspit)
@@ -387,23 +434,30 @@ int main()
         ArchiveSet set;
         std::vector<std::string> failures;
         set.openAll(stack.dataArchives, failures);
+        const auto placements = collectMoviePlacements(set);
 
         struct Expect
         {
             std::uint16_t id;
             int w, h;
+            bool matrix;
             const char *what;
         };
-        // 128*0.5*256/608 = 26, 80*0.5*256/608 = 16; and 80*256/608 = 33,
-        // 112*256/608 = 47 for the unscaled one.
         const Expect expects[] = {
-            {19, 26, 16, "carries a 0.5 track matrix"},
-            {43, 33, 47, "carries no track matrix"},
+            {19, 27, 17, true, "is the lever: a 0.5 track matrix, and a span wider than its length"},
+            {21, 182, 108, false, "is card 18's porthole: no matrix, and a span wider than its length"},
+            {43, 33, 47, false, "is the telescope: no matrix, and a span its length already matched"},
         };
         for (const Expect &e : expects)
         {
             const fs::path out = outDir / ("matrix-" + std::to_string(e.id) + ".rvid");
-            const VideoResult vr = convertMovie(set, e.id, out, ff);
+            const auto pit = placements.find(e.id);
+            check(pit != placements.end(),
+                  "tspit tMOV " + std::to_string(e.id) + " is placed by an MLST");
+            if (pit == placements.end())
+                continue;
+
+            const VideoResult vr = convertMovie(set, e.id, out, ff, &pit->second);
             if (!vr.ok)
             {
                 check(false, "tMOV " + std::to_string(e.id) + ": " + vr.error);
@@ -413,7 +467,7 @@ int main()
                   "tspit tMOV " + std::to_string(e.id) + " " + e.what + ", so it converts to "
                       + std::to_string(e.w) + "x" + std::to_string(e.h) + " (got "
                       + std::to_string(vr.width) + "x" + std::to_string(vr.height) + ")");
-            check(vr.trackScaled == (e.id == 19),
+            check(vr.trackScaled == e.matrix,
                   "tspit tMOV " + std::to_string(e.id) + " reports whether it was scaled");
         }
         break;
@@ -425,6 +479,15 @@ int main()
         std::printf("  %-8s %d\n", codec.c_str(), n);
     check(movies > 0, "the install has movies");
     check(noVideo == 0, "ffprobe describes a video stream in every movie");
+
+    // The placement survey. Both of these are what lets the converter size a
+    // movie from one position: every movie has one, and no movie has two.
+    std::printf("  MLST placement: %d movies placed, %d unplaced, %d placed twice; "
+                "%d spans checked\n",
+                placed, unplaced, placementClashes, spanChecked);
+    check(unplaced == 0, "every movie in the install is placed by an MLST");
+    check(placementClashes == 0, "no movie is placed at two different positions");
+    check(spanChecked > 0, "the span rule was checked on real movies");
 
     if (parityChecked > 0)
     {

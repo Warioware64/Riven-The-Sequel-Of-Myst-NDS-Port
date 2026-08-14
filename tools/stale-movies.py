@@ -18,6 +18,11 @@ Then convert again.  The run logs "N movie(s) were scaled down by their track
 matrix"; N should equal the count this printed.  `--force` is always correct too,
 and always slow.
 
+SUPERSEDED.  kVideoVersion is 5 now, and the per-stack `.format` stamp makes the
+converter redo every movie on a card written by an older build without being
+asked -- which covers the 79 this script was for, and the 583 the overlay-span
+fix changed as well.  Running it first saves nothing.
+
 This is a one-off migration aid.  Nothing depends on it, and once every card in
 circulation has been redone it can go.
 """

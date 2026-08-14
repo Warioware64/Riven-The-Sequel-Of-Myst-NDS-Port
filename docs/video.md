@@ -101,6 +101,45 @@ movie on top of a card the 3D engine is drawing.
 The rule is `width >= kCardW && height >= kCardH`, applied by the converter and
 recorded in the header so the player never infers it.
 
+## The size of an overlay
+
+Two scales stand between a tMOV's coded size and the size on the card, in this
+order.
+
+First the **track matrix**. QuickTime's track header carries a 3x3 display
+matrix, and its `a` and `d` terms scale the track: 79 of the 1054 movies are
+authored bigger than they are shown, 65 at 0.5 and 12 at 0.25, two of them
+non-uniform. ScummVM applies it as `scaleFactorX/Y = Rational(0x10000, xMod)`.
+Read the VIDEO track, not the first one -- jspit's tMOV 190 and 335 put a sound
+track first, and a sound track's matrix is the identity.
+
+Then the **span**. This is not the card-space size scaled; it is the DS columns
+that size covers *at the position the movie is drawn*. A movie of card-width `W`
+at MLST left `L` covers
+
+```
+[ toDsX(L), toDsX(L + W) )
+```
+
+which is `floor(W * 256/608)` wide **or one more**, depending on where `L` falls
+between two DS columns. It is the same two-endpoint mapping a PLST rect gets in
+`CardSurface::drawPicture` and a water run gets in `WaterEffect`, and for the
+same reason: scaling a length loses the pixel that mapping both ends keeps.
+
+The converter used to scale the length, because `L` looked like a property of
+the MLST record rather than of the movie. It is not: across the eight stacks,
+every one of the 1055 movies appears at exactly **one** `(left, top)`, so
+`collectMoviePlacements` can hand the video stage the position before it sizes
+anything. Under the old rule 583 of the 1055 were a pixel short in at least one
+axis -- 259 in x, 156 in y, 168 in both -- and each of them was also resampled at
+a slightly wrong ratio, so its content drifted against the still underneath,
+worst at the right and bottom edge. tspit's lever (tMOV 19, 64x40 at (48,307))
+came out 26x16 where its span is 27x17; card 18's porthole (tMOV 21, 432x256 at
+(4,72)) 181x107 where its span is 182x108.
+
+No FULL movie is affected: all 181 are 608x392 at (0,0), which is 256x165 either
+way. No movie's span runs past the card edge, so nothing new is clipped.
+
 ## Size
 
 Raw is 7.62 GB of video, measured over every movie in the install:

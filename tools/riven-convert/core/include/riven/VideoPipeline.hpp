@@ -29,6 +29,7 @@
 #include "RivenVideo.hpp"
 #include "riven/Archive.hpp"
 #include "riven/FFmpeg.hpp"
+#include "riven/MovieList.hpp"
 #include "riven/Progress.hpp"
 
 namespace riven
@@ -112,6 +113,13 @@ struct VideoResult
     rivendata::VideoProfile profile = rivendata::VideoProfile::Lite;
     int width = 0;
     int height = 0;
+    /// The size Riven draws the movie at, in card coordinates: the coded size
+    /// with the track matrix applied, before the 608 -> 256 scale. `width` is
+    /// the DS columns this covers at the movie's MLST position, which is a
+    /// pixel more than scaling this length for 583 of the 1055 movies -- so the
+    /// two are worth being able to compare.
+    int cardWidth = 0;
+    int cardHeight = 0;
     bool hasAudio = false;
     /// What ffprobe called the source codec, for --movie-report's census.
     std::string codec;
@@ -124,11 +132,19 @@ struct VideoResult
 
 /// Convert tMOV `id` from `set` and write `out` atomically.
 ///
+/// `place` is the movie's MLST position (riven/MovieList.hpp), and it decides
+/// the converted size: an overlay of card-width W at left L covers DS columns
+/// [toDsX(L), toDsX(L+W)), which is one wider than floor(W*s) for 583 of the
+/// game's 1055 movies. Null falls back to the length scale, which is right only
+/// when the two agree -- the synthetic movies in the tests, and any movie no
+/// MLST names.
+///
 /// `cancel` may be null. When it is not, it is checked once per frame and the
 /// ffmpeg child is killed before the cancellation propagates -- which is the one
 /// place a long movie used to be uninterruptible.
 VideoResult convertMovie(const ArchiveSet &set, std::uint16_t id,
                          const std::filesystem::path &out, const FFmpegPaths &ff,
+                         const MoviePlacement *place = nullptr,
                          const CancelToken *cancel = nullptr);
 
 /// The same, on bytes already pulled out of the archive.
@@ -139,6 +155,7 @@ VideoResult convertMovie(const ArchiveSet &set, std::uint16_t id,
 /// touches nothing shared, runs on workers.
 VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint16_t id,
                               const std::filesystem::path &out, const FFmpegPaths &ff,
+                              const MoviePlacement *place = nullptr,
                               const CancelToken *cancel = nullptr);
 
 } // namespace riven

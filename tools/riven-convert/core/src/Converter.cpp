@@ -739,6 +739,20 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                              "video was converted by an older build: redoing it");
                 const bool redoAll = opts.force || formatChanged;
 
+                // Where each movie is drawn. A movie's DS size follows from its
+                // MLST position, not from the movie alone -- VideoPipeline's
+                // geometry comment says why. Read here rather than in the card
+                // stage: --no-cards skips that block entirely and the video
+                // stage has to stand on its own.
+                int placementClashes = 0;
+                const auto placements = collectMoviePlacements(set, &placementClashes);
+                if (placementClashes > 0)
+                    out.logf(Severity::Warning, stage,
+                             "%d movie(s) are placed at more than one position in this "
+                             "copy of the game; the first was used and the others will "
+                             "be a pixel out",
+                             placementClashes);
+
                 const auto report = [&](MovieJob &j, VideoResult &vr) {
                     if (!vr.ok)
                     {
@@ -783,7 +797,11 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                         continue;
                     }
 
-                    VideoResult vr = convertMovie(set, job.id, job.out, ffmpeg, &cancel);
+                    const auto pit = placements.find(job.id);
+                    const MoviePlacement *place =
+                        pit == placements.end() ? nullptr : &pit->second;
+                    VideoResult vr =
+                        convertMovie(set, job.id, job.out, ffmpeg, place, &cancel);
                     report(job, vr);
                 }
 

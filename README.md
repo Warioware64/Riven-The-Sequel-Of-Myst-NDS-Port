@@ -185,17 +185,16 @@ gets it for free) and to `_nds/riven_nds/data/debug.log`. **SELECT+L** writes th
 bottom screen to `shotNNN.bmp`, **SELECT+R** dumps every mapped VRAM bank to
 `vramNNN/`. It is read once at startup, so it takes effect on the next boot.
 
-**If your card was converted before the track-matrix fix**, 79 of the game's 1054
-movies are on it at twice or four times their size — a tMOV's coded size is not
-the size Riven draws it at, and the converter used to ignore the QuickTime track
-matrix that says so. Delete just those and convert again:
+**If your card was converted by an older build**, just convert again — the video
+stage notices by itself and logs `video was converted by an older build: redoing
+it`. There is nothing to delete first, and `tools/stale-movies.py` is no longer
+worth running.
 
-```bash
-python3 tools/stale-movies.py /path/to/riven _nds/riven_nds/data | xargs -r rm -v
-```
-
-The run then logs `N movie(s) were scaled down by their track matrix`; N should
-match. `--force` also works and redoes everything.
+That redo is not optional. Movies are versioned, the ARM9 rejects a file it does
+not recognise, and two fixes changed what is on the card: the QuickTime **track
+matrix**, which put 79 of the 1054 movies on at twice or four times their size,
+and the overlay **span**, which left 583 of them a pixel short of the still they
+sit on — tspit's lever was both. It is the long stage; expect hours.
 
 ### Tests
 

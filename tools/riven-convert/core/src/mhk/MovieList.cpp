@@ -36,6 +36,32 @@ std::vector<rivendata::MovieRec> parseMlst(ResourceReader &r)
     return out;
 }
 
+std::unordered_map<std::uint16_t, MoviePlacement> collectMoviePlacements(const ArchiveSet &set,
+                                                                        int *conflicts)
+{
+    std::unordered_map<std::uint16_t, MoviePlacement> out;
+    int clashes = 0;
+
+    // MLST ids are card ids: one list per card, and resourceIds() hands them
+    // back sorted, which is what makes "the first record wins" stable.
+    for (const std::uint16_t card : set.resourceIds("MLST"))
+    {
+        const auto bytes = set.read("MLST", card);
+        ResourceReader r(bytes);
+        for (const rivendata::MovieRec &m : parseMlst(r))
+        {
+            const MoviePlacement place{m.left, m.top};
+            const auto [it, inserted] = out.emplace(m.movieId, place);
+            if (!inserted && (it->second.left != place.left || it->second.top != place.top))
+                ++clashes;
+        }
+    }
+
+    if (conflicts != nullptr)
+        *conflicts = clashes;
+    return out;
+}
+
 std::vector<rivendata::FlstRec> parseFlst(ResourceReader &r)
 {
     std::vector<rivendata::FlstRec> out;

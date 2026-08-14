@@ -113,12 +113,15 @@ enum : std::uint8_t
     kFrameRepeat = 1 << 0,
 };
 
-/// 4 is the soundtrack's makeup gain (shared/RivenSound.hpp) reaching movies too:
-/// same layout, different samples, so old files are current-looking and quiet.
-/// 3 dropped the codec: frames are raw texels, and the keyframe index became a
-/// per-frame index. 2 added a quantiser setting, 1 had none. Nothing that reads
-/// this has ever shipped, so there is no migration.
-inline constexpr std::uint16_t kVideoVersion = 4;
+/// 5 sizes an overlay from the DS columns it covers rather than from its length
+/// scaled: same layout, different geometry, so old files are current-looking and
+/// a pixel short -- 583 of the 1055. 4 is the soundtrack's makeup gain
+/// (shared/RivenSound.hpp) reaching movies too: same layout, different samples,
+/// so old files are current-looking and quiet. 3 dropped the codec: frames are
+/// raw texels, and the keyframe index became a per-frame index. 2 added a
+/// quantiser setting, 1 had none. Nothing that reads this has ever shipped, so
+/// there is no migration.
+inline constexpr std::uint16_t kVideoVersion = 5;
 
 /// Bytes one frame's picture takes at these dimensions. No padding and no
 /// alignment: the DS samples ARGB1555 directly, and for a FULL movie the width is

@@ -431,7 +431,8 @@ MovieProbe probeMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint16_t
 }
 
 VideoResult convertMovie(const ArchiveSet &set, std::uint16_t id, const fs::path &out,
-                         const FFmpegPaths &ff, const CancelToken *cancel)
+                         const FFmpegPaths &ff, const MoviePlacement *place,
+                         const CancelToken *cancel)
 {
     const auto bytes = set.readMovie(id);
     if (bytes.empty())
@@ -446,12 +447,12 @@ VideoResult convertMovie(const ArchiveSet &set, std::uint16_t id, const fs::path
                                  : " is not a readable QuickTime movie");
         return res;
     }
-    return convertMovieBytes(bytes, id, out, ff, cancel);
+    return convertMovieBytes(bytes, id, out, ff, place, cancel);
 }
 
 VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint16_t id,
                               const fs::path &out, const FFmpegPaths &ff,
-                              const CancelToken *cancel)
+                              const MoviePlacement *place, const CancelToken *cancel)
 {
     VideoResult res;
     const std::string what = "tMOV " + std::to_string(id);
@@ -495,12 +496,22 @@ VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint1
     const int cardW = std::max(1, static_cast<int>(video.width * trackScale.x));
     const int cardH = std::max(1, static_cast<int>(video.height * trackScale.y));
 
-    // Truncating, as before. A movie of card-width W drawn at left L covers DS
-    // columns [toDsX(L), toDsX(L+W)), which is floor(W*s) wide or one more
-    // depending on L -- and L is a property of the MLST record, not of the
-    // movie, so it cannot be known here. floor() is the one that is never wide.
-    const int dstW = std::max(1, cardW * kScaleNum / kScaleDen);
-    const int dstH = std::max(1, cardH * kScaleNum / kScaleDen);
+    // A movie of card-width W drawn at left L covers DS columns
+    // [toDsX(L), toDsX(L+W)) -- the SAME two-endpoint mapping a PLST rect gets
+    // in CardSurface::drawPicture and a water run gets in WaterEffect. Scaling
+    // the LENGTH instead is floor(W*s), which is one pixel short whenever the
+    // two fractions carry: 583 of the game's 1055 movies, tspit's lever among
+    // them, which is what put its overlay a pixel inside the still it sits on.
+    //
+    // L used to be unknown here, and that is why this was a length. It is not:
+    // collectMoviePlacements reads it out of the MLSTs, where every one of the
+    // 1055 movies has exactly one position.
+    const int dstW = place != nullptr
+                         ? std::max(1, toDsX(place->left + cardW) - toDsX(place->left))
+                         : std::max(1, cardW * kScaleNum / kScaleDen);
+    const int dstH = place != nullptr
+                         ? std::max(1, toDsY(place->top + cardH) - toDsY(place->top))
+                         : std::max(1, cardH * kScaleNum / kScaleDen);
     const std::uint32_t frameBytes = rvidFrameBytes(dstW, dstH);
 
     if (!trackScale.identity())
@@ -515,6 +526,8 @@ VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint1
     res.profile = profile;
     res.width = dstW;
     res.height = dstH;
+    res.cardWidth = cardW;
+    res.cardHeight = cardH;
     res.codec = video.videoCodec;
 
     const int fpsNum = video.fpsNum;
