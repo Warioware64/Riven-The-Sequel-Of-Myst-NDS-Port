@@ -108,6 +108,16 @@ public:
     /// shared with an overlay that has no new frame to draw.
     void refreshFromClean();
 
+    /// Bumped every time something rewrites the card underneath the overlays --
+    /// a drawing, a clear, a refresh, a bake.
+    ///
+    /// For an effect that has to put back what it drew over, and so keeps a copy
+    /// of the pixels it covered: those pixels are only worth putting back if
+    /// nothing else has redrawn that part of the card since. FliesEffect is the
+    /// one caller. Water does not need it -- it re-reads clean() every tick and
+    /// so cannot hold a stale copy of anything.
+    std::uint32_t generation() const { return generation_; }
+
     /// Make an overlay's rect part of the card, so the next refresh keeps it.
     ///
     /// RivenVideo::disable (riven_video.cpp:288-301), and it is load-bearing:
@@ -152,6 +162,8 @@ private:
     rivendata::Texel *clean_ = nullptr;
     /// Bands an overlay has written into texels_ since the last refresh.
     std::uint32_t overlayRows_ = 0;
+    /// How many times the card underneath has been rewritten. See generation().
+    std::uint32_t generation_ = 0;
     std::uint32_t dirty_[BgSurface::kBuffers] = {};
 };
 

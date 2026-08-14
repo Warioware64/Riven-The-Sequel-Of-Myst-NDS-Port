@@ -304,9 +304,11 @@ partial the converter salvages what it can and says how much it lost.
 5. ✅ DS engine: stills and navigation — boots into aspit card 1, draws the card,
    hit-tests hotspots in original coordinates, changes card and stack
 6. 🔨 Scripts — the whole simple-opcode table is implemented, zip mode (45)
-   included; the per-stack external commands are only aspit's menu, books and
-   options plus the two tspit's opening cutscene calls. The rest report their
-   name and do nothing
+   included; the per-stack external commands are aspit's menu, books and options,
+   the two tspit opening-cutscene calls and the telescope, the insects (`xflies`,
+   on 112 jungle and garden cards) and the jspit sunners — the three lagoon
+   alerts plus the four idle timers behind them, which is what put a card timer
+   in the engine. The rest report their name and do nothing
 7. ✅ Audio — `sound/<stack>/<id>.rsnd`, lossless PCM16 where it fits and
    bit-exact ADPCM passthrough where it does not, played on the DS's hardware
    channels with SLST volume and balance

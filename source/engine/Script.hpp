@@ -36,4 +36,16 @@ void runCommandList(Engine &engine, const std::vector<rivendata::Command> &comma
 void runExternalCommand(Engine &engine, std::uint16_t nameIndex,
                         const std::uint16_t *args, std::size_t argCount);
 
+/// Arm the card's timer, if the card it has just entered wants one.
+///
+/// RivenStack::installCardTimer (riven_stack.cpp:272) is empty and every stack
+/// but jspit inherits it; JSpit::installCardTimer (jspit.cpp:785-802) is the only
+/// override in the game, and it keys on the RMAP global id so that the four
+/// sunner cards get their idle animation. Called from changeToCard and nowhere
+/// else -- riven.cpp:643 -- so a refreshCard does not restart the wait.
+///
+/// Here rather than in Engine for the same reason runExternalCommand is: it is
+/// per-stack game logic, and this file is where the port keeps that.
+void installCardTimer(Engine &engine);
+
 } // namespace rivenrt

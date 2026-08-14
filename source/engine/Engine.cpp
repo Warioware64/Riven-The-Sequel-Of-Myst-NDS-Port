@@ -80,31 +80,44 @@ void Engine::activateFlst(std::uint16_t index)
     DebugLog::log("card %u: no water effect %u", cardId_, index);
 }
 
-void Engine::pumpWater()
+void Engine::setFliesEffect(int count, bool fireflies)
 {
-    if (!water_.active())
-        return;
+    flies_.start(count, fireflies);
+}
 
-    // The player's Water setting reaches here as Riven's own variable, which is
-    // what the original tests too (riven_graphics.cpp:773). So turning water off
-    // in the settings screen stops the ripple where it stands, and turning it
-    // back on starts it again -- no reload, no card re-entry.
-    if (vars_.get(VarId::WaterEnabled) == 0)
-        return;
-
-    // Nothing to ripple when the card is not the thing on screen. The zoom
+void Engine::pumpEffects()
+{
+    // Nothing to draw over when the card is not the thing on screen. The zoom
     // viewer and a fullscreen movie both own the buffers outright, and writing
     // into the card surface underneath them would only dirty rows that get
     // published the moment they hand it back.
+    //
+    // Ahead of both effects, unlike the water test below it: this is about
+    // whether the card surface may be touched at all.
     if (mode_ != Mode::Card || bgs.movieTakeover())
         return;
 
-    // Through the overlay channel, not markRowMask: a ripple is on top of the
+    // Through the overlay channel, not markRowMask: an effect is on top of the
     // card exactly the way a LITE movie's frame is, and the next screen update
     // has to be able to take it off again. That is what the original does --
     // updateScreen re-copies the effect surface from the untouched one
     // (riven_graphics.cpp:391) and the effect's next tick draws it back.
-    surface_.noteOverlayRows(water_.update(surface_));
+    //
+    // The player's Water setting reaches here as Riven's own variable, which is
+    // what the original tests too (riven_graphics.cpp:773). So turning water off
+    // in the settings screen stops the ripple where it stands, and turning it
+    // back on starts it again -- no reload, no card re-entry.
+    //
+    // AND IT GATES THE WATER ONLY. The original's updateEffects tests
+    // waterenabled on the water branch and nothing on the flies branch
+    // (riven_graphics.cpp:772-780); hoisting it to the top of this function
+    // would make a setting about ripples silently switch off every firefly in
+    // the jungle.
+    if (water_.active() && vars_.get(VarId::WaterEnabled) != 0)
+        surface_.noteOverlayRows(water_.update(surface_));
+
+    if (flies_.active())
+        surface_.noteOverlayRows(flies_.update(surface_));
 }
 
 // ---------------------------------------------------------------------------
@@ -669,11 +682,16 @@ void Engine::stopMovie(std::uint16_t code)
 void Engine::idleFrame()
 {
     NEA_WaitForVBL(static_cast<NEA_UpdateFlags>(0));
+    // The clock advances here as well as in frame(), because this is the loop a
+    // blocking movie spins: a timer counted only in frame() would stand still
+    // for the length of a cutscene and then fire the moment one ended. The two
+    // loops are mutually exclusive, so nothing is counted twice.
+    ++frames_;
     flushUploads();
 
     RivenAudio::pump();
     pumpMovies();
-    pumpWater();
+    pumpEffects();
     // Here as well as in frame(), so a "note taken" raised by the notebook or
     // during a blocking movie still expires -- both spin this loop and never
     // reach the other one.
@@ -743,6 +761,123 @@ void Engine::playMovieBlocking(std::int32_t slot, bool whole)
     if (whole && kBakeBlockingMovies)
         bakeOverlay(ms);
     ms.player.stop();
+}
+
+bool Engine::movieEnded(std::uint16_t code) const
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0 || !movies_[slot].open)
+        return true;
+    const RvidPlayer &p = movies_[slot].player;
+    return !p.isPlaying() || p.finished();
+}
+
+std::uint32_t Engine::movieDurationMs(std::uint16_t code) const
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0 || !movies_[slot].open)
+        return 0;
+    const RvidPlayer &p = movies_[slot].player;
+    const std::uint32_t num = p.fpsNum();
+    const std::uint32_t den = p.fpsDen();
+    if (num == 0)
+        return 0;
+    return static_cast<std::uint32_t>(static_cast<std::uint64_t>(p.frameCount()) * 1000ull
+                                      * den / num);
+}
+
+bool Engine::playMovieUntilClick(std::uint16_t code)
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0)
+    {
+        // NOT a warning, unlike playMovie's. ScummVM's openSlot on a code no
+        // MLST record claimed hands back an empty handle whose endOfVideo() is
+        // already true (riven_video.cpp:309-322), so the original falls straight
+        // out of this loop -- and the sunners timers poll often enough that a
+        // line here would be a line every few seconds.
+        return false;
+    }
+
+    // seek(0) + enable() + play(), which is what openSlot's caller does before
+    // this loop: playMovieSlot always restarts from the first frame.
+    playMovieSlot(slot, false);
+    MovieSlot &ms = movies_[slot];
+
+    // Same as playMovieBlocking: no pointer over a video (riven_video.cpp:216).
+    CursorHide hideCursor{*this};
+
+    // RivenStack::mouseForceUp (riven_stack.cpp:318-321), and it is load-bearing
+    // here: the click that walked the player onto this card is very likely still
+    // held when its CardEnter script reaches this, and without the latch the
+    // alert would be cut short by the press that caused it.
+    bool armed = false;
+    bool clicked = false;
+    while (ms.player.isPlaying() && !ms.player.finished() && !quit_)
+    {
+        idleFrame();
+
+        scanKeys();
+        if (!armed)
+            armed = (keysHeld() & (KEY_TOUCH | KEY_A)) == 0;
+        else if ((keysDown() & (KEY_TOUCH | KEY_A)) != 0)
+        {
+            clicked = true;
+            break;
+        }
+        // The cutscene skip, as everywhere else. It counts as the click: the
+        // player asked to get on with it, and the sunners react either way.
+        if ((keysDown() & (KEY_B | KEY_START)) != 0)
+        {
+            clicked = true;
+            break;
+        }
+    }
+
+    // Every movie this is used on is a small overlay -- the sunners are a corner
+    // of the lagoon, not a cutscene -- but a fullscreen one took two buffers on
+    // the way in and has to give them back, and stop() alone does not.
+    if (ms.player.profile() == VideoProfile::Full)
+    {
+        endFullscreenMovie(ms);
+        return clicked;
+    }
+
+    // stop(), NEVER bakeOverlay(). ScummVM's sunnersPlayVideo ends in stop()
+    // (jspit.cpp:558) and only playBlocking ends in disable() -- so the last
+    // frame here stays an overlay and the next screen update takes it off, which
+    // is what puts the sunners back where the still has them.
+    ms.player.stop();
+    return clicked;
+}
+
+// ---------------------------------------------------------------------------
+// The card timer
+// ---------------------------------------------------------------------------
+
+void Engine::installTimer(TimerProc proc, std::uint32_t ms)
+{
+    timerProc_ = proc;
+    timerDeadline_ = frames_ + msToFrames(ms);
+}
+
+void Engine::removeTimer()
+{
+    timerProc_ = nullptr;
+    timerDeadline_ = 0;
+}
+
+void Engine::checkTimer()
+{
+    if (timerProc_ == nullptr || inTimer_ || frames_ < timerDeadline_)
+        return;
+
+    // The proc is NOT cleared first: re-arming or removing itself is its job,
+    // and every one of them ends in one or the other (riven_stack.cpp:383).
+    const TimerProc proc = timerProc_;
+    inTimer_ = true;
+    proc(*this);
+    inTimer_ = false;
 }
 
 void Engine::delay(std::uint32_t ms)
@@ -903,6 +1038,12 @@ bool Engine::changeToStack(StackId id)
     if (booted_ && stack_.id == id)
         return true;
 
+    // A timer is a card's, and a card belongs to a stack: the sunners procs
+    // resolve RMAP global ids, and against the wrong stack's table that is a
+    // different card entirely. changeToCard does this too, but the boot path and
+    // a load reach here without going through one.
+    removeTimer();
+
     // The card that is going away gets its leave script first, while its stack is
     // still loaded -- the script lives in the vector that is about to be replaced.
     leaveCard();
@@ -961,11 +1102,24 @@ bool Engine::changeToCard(std::uint16_t cardId)
         return false;
     }
 
+    // Before the leave script, where riven.cpp:630 puts it. A timer belongs to
+    // the card that installed it and its proc addresses that card's movie codes;
+    // the moment the card is going away it must not be able to fire again.
+    removeTimer();
+
     leaveCard();
     card_ = next;
     cardId_ = cardId;
     resetCardState();
+
+    // enterCard can itself change the card -- a CardEnter external that links
+    // away, which is exactly what the sunners alerts do -- and that inner
+    // changeToCard has already installed the timer the destination wants. So
+    // this only arms one if the card really is still the one we entered.
+    const Card *const entered = card_;
     enterCard();
+    if (card_ == entered)
+        installCardTimer(*this); // riven.cpp:643
     return true;
 }
 
@@ -1035,9 +1189,11 @@ void Engine::resetCardState()
     // the pointer happens to cross a hotspot.
     cursor_.setShape(rivendata::kCursorMain);
     // An effect belongs to the card that asked for it, and the original throws
-    // it away with the card (riven_card.cpp:57). Without this a lagoon's ripple
-    // would keep running over the next room's walls.
+    // it away with the card (riven_card.cpp:57-58, which clears both). Without
+    // this a lagoon's ripple would keep running over the next room's walls, and
+    // the jungle's fireflies would follow the player indoors.
     water_.clear();
+    flies_.clear();
     currentHotspot_ = nullptr;
     queued_.clear();
     updateDepth_ = 0;
@@ -1782,6 +1938,7 @@ void Engine::frame()
     // NEA_WaitForVBL, so the flip and the sprite writes go first, and only then
     // the decoding and the scripts -- which are what fill the buffers the NEXT
     // frame will publish.
+    ++frames_; // the clock -- see idleFrame(), which advances the same one
     flushUploads();
 
     RivenAudio::pump();
@@ -1790,7 +1947,7 @@ void Engine::frame()
     // called from doFrame -- which is what playBlocking spins. So Riven's water
     // keeps moving underneath a blocking movie, and a cutscene over a lagoon
     // does not freeze the lagoon.
-    pumpWater();
+    pumpEffects();
     // Before processInput, so a status raised by a button this frame gets its
     // full hold rather than being ticked once on the frame it appeared.
     DebugLog::pumpStatus();
@@ -1802,6 +1959,17 @@ void Engine::frame()
     // handler is an animation nobody can see.
     if (mode_ == Mode::Zoom)
         return;
+
+    // The card's timer, if it is due. RivenStack::onFrame (riven_stack.cpp:326-333):
+    // skipped while there are queued scripts, and -- this is the part that
+    // matters -- reached only from the OUTER loop. ScummVM gets that by queueing
+    // the proc as a script rather than calling it ("so that they don't run when
+    // the doFrame method is called from an inner game loop", riven_stack.cpp:387-390);
+    // here it falls out of where the call sits, because idleFrame() is the inner
+    // loop and does not have this line. Below the Zoom return above, so a proc
+    // cannot start a movie under a viewer that owns the buffers.
+    if (card_ != nullptr && queued_.empty() && !runningQueued_)
+        checkTimer();
 
     if (!queued_.empty() && !runningQueued_)
     {

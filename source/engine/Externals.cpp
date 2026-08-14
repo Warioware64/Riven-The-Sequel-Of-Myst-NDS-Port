@@ -18,6 +18,7 @@
 // converter keeps the lists.
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -202,6 +203,271 @@ namespace
         // so the moving case needed this anyway (ScummVM: enter(false)).
         e.refreshCard();
     }
+
+    // --- jspit: the sunners -------------------------------------------------
+    //
+    // Four cards down the lagoon steps (RMAP 0x77d6, 0x79bd, 0x7beb, 0xb6ca --
+    // jspit 621, 627, 629, 632) share one piece of state: jsunners, which is 0
+    // while the creatures are basking, 1 once they have been startled and 2 once
+    // they have left. Two halves make them alive:
+    //
+    //   * the ALERT, run from each card's CardEnter script, which plays the
+    //     reaction to the player arriving and lets a click cut it short; and
+    //   * the TIMER, armed on the way in, which plays a random idle movie every
+    //     few seconds for as long as the player stands there.
+    //
+    // The timers are why Engine has a timer at all. jsunnertime is their clock,
+    // and the cards zero it themselves on entry (every one of the four has
+    // `SetVar jsunnertime 0` in its CardEnter), so nothing here has to worry
+    // about a stamp from a previous session -- and the re-anchor below rewrites
+    // a stale one within a single poll anyway.
+
+    /// ScummVM's getRandomNumberRng: INCLUSIVE at both ends
+    /// (common/random.cpp:56 -- getRandomNumber(max - min) + min, and
+    /// getRandomNumber(n) itself returns 0..n).
+    int randomBetween(int lo, int hi)
+    {
+        return lo + std::rand() % (hi - lo + 1);
+    }
+
+    /// JSpit::sunnersPlayVideo (jspit.cpp:542-567). Play a sunner movie and
+    /// watch for a click; a click startles them, sends the player on to
+    /// `destGlobalId`, and -- this is what the return value is for -- means the
+    /// caller is now standing on a different card.
+    bool sunnersPlayVideo(Engine &e, std::uint16_t code, std::uint32_t destGlobalId,
+                          bool sunnersShouldFlee)
+    {
+        if (!e.playMovieUntilClick(code))
+            return false;
+
+        if (sunnersShouldFlee)
+            e.vars().set(VarId::JSunners, 1);
+
+        // ScummVM builds a one-command ChangeCard script here; the port can just
+        // ask, and does it the same way as the destination is named -- by RMAP
+        // global id, because a local card number means nothing across stacks.
+        const std::int32_t local = e.stack().localCardForGlobal(destGlobalId);
+        if (local < 0)
+        {
+            DebugLog::warn("sunners: no card for global id %lu",
+                           static_cast<unsigned long>(destGlobalId));
+            return false;
+        }
+        e.changeToCard(static_cast<std::uint16_t>(local));
+        return true;
+    }
+
+    /// The MLST "code" of a record addressed by its INDEX.
+    ///
+    /// Only the beach timer needs this, and it needs it because ScummVM's
+    /// version conflates the two: jspit.cpp:692-694 hands the same number to
+    /// RivenCard::playMovie, which takes an index, and to openSlot, which takes
+    /// a code. On card 632 they happen to agree (records 1..8 sit on codes 1..8)
+    /// and the bug is invisible; it is not a coincidence worth relying on.
+    std::uint16_t codeForMlstIndex(Engine &e, std::uint16_t index)
+    {
+        const Card *const card = e.card();
+        if (card != nullptr)
+            for (const MovieRec &m : card->mlst)
+                if (m.index == index)
+                    return m.slot;
+        return index;
+    }
+
+    void sunnersTopStairsTimer(Engine &e);
+    void sunnersMidStairsTimer(Engine &e);
+    void sunnersLowerStairsTimer(Engine &e);
+    void sunnersBeachTimer(Engine &e);
+
+    /// JSpit::sunnersTopStairsTimer (jspit.cpp:569-598).
+    ///
+    /// The shape all four share, and every part of it is load-bearing:
+    ///
+    ///   * gone means gone -- once jsunners is not 0 the timer removes itself
+    ///     rather than re-arming, because there is no movie left to play;
+    ///   * nothing is started on top of a movie that is still running, which is
+    ///     what the movieEnded() test is for -- the poll comes round every half
+    ///     second and the movies are seconds long;
+    ///   * the re-anchor of jsunnertime sits INSIDE that test but OUTSIDE the
+    ///     if/else, so it runs on the "not due yet" pass as well. Move it into
+    ///     either arm and the first wait either never expires or expires at once.
+    ///
+    /// The one deliberate divergence is the early return after a click. The
+    /// original falls through to installTimer (jspit.cpp:597) even though
+    /// sunnersPlayVideo has just changed the card -- which overwrites the timer
+    /// the destination installed on the way in, and leaves a proc addressing
+    /// movie codes that belong to the card the player has left.
+    void sunnersTopStairsTimer(Engine &e)
+    {
+        if (e.vars().get(VarId::JSunners) != 0)
+        {
+            e.removeTimer();
+            return;
+        }
+
+        std::uint32_t timerTime = 500;
+        if (e.movieEnded(1))
+        {
+            const std::uint32_t sunnerTime = e.vars().get(VarId::JSunnerTime);
+            if (sunnerTime == 0)
+            {
+                timerTime = static_cast<std::uint32_t>(randomBetween(2, 15)) * 1000;
+            }
+            else if (sunnerTime < e.clock())
+            {
+                const std::uint16_t code = static_cast<std::uint16_t>(randomBetween(1, 3));
+                if (sunnersPlayVideo(e, code, 0x79BD, false))
+                    return; // gone to another card; its own timer is armed
+                timerTime = e.movieDurationMs(code)
+                            + static_cast<std::uint32_t>(randomBetween(2, 15)) * 1000;
+            }
+            e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
+        }
+        e.installTimer(sunnersTopStairsTimer, timerTime);
+    }
+
+    /// JSpit::sunnersMidStairsTimer (jspit.cpp:600-637). Codes 2, 3 and 4 with
+    /// 4 four times as likely as the other two, and a click flees to the bottom
+    /// of the steps.
+    void sunnersMidStairsTimer(Engine &e)
+    {
+        if (e.vars().get(VarId::JSunners) != 0)
+        {
+            e.removeTimer();
+            return;
+        }
+
+        std::uint32_t timerTime = 500;
+        if (e.movieEnded(1))
+        {
+            const std::uint32_t sunnerTime = e.vars().get(VarId::JSunnerTime);
+            if (sunnerTime == 0)
+            {
+                timerTime = static_cast<std::uint32_t>(randomBetween(1, 10)) * 1000;
+            }
+            else if (sunnerTime < e.clock())
+            {
+                const int r = randomBetween(0, 5); // getRandomNumber(5)
+                const std::uint16_t code = r == 4 ? 2 : (r == 5 ? 3 : 4);
+                if (sunnersPlayVideo(e, code, 0x7BEB, true))
+                    return;
+                timerTime = static_cast<std::uint32_t>(randomBetween(1, 10)) * 1000;
+            }
+            e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
+        }
+        e.installTimer(sunnersMidStairsTimer, timerTime);
+    }
+
+    /// JSpit::sunnersLowerStairsTimer (jspit.cpp:639-668).
+    void sunnersLowerStairsTimer(Engine &e)
+    {
+        if (e.vars().get(VarId::JSunners) != 0)
+        {
+            e.removeTimer();
+            return;
+        }
+
+        std::uint32_t timerTime = 500;
+        if (e.movieEnded(1))
+        {
+            const std::uint32_t sunnerTime = e.vars().get(VarId::JSunnerTime);
+            if (sunnerTime == 0)
+            {
+                timerTime = static_cast<std::uint32_t>(randomBetween(1, 30)) * 1000;
+            }
+            else if (sunnerTime < e.clock())
+            {
+                const std::uint16_t code = static_cast<std::uint16_t>(randomBetween(3, 5));
+                if (sunnersPlayVideo(e, code, 0xB6CA, true))
+                    return;
+                timerTime = static_cast<std::uint32_t>(randomBetween(1, 30)) * 1000;
+            }
+            e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
+        }
+        e.installTimer(sunnersLowerStairsTimer, timerTime);
+    }
+
+    /// JSpit::sunnersBeachTimer (jspit.cpp:670-703). The odd one out: the beach
+    /// card's script does not activate these six records, so the timer has to do
+    /// it itself before it can play one -- and there is nothing to click through
+    /// here, because the player is already as close as they can get.
+    void sunnersBeachTimer(Engine &e)
+    {
+        if (e.vars().get(VarId::JSunners) != 0)
+        {
+            e.removeTimer();
+            return;
+        }
+
+        std::uint32_t timerTime = 500;
+        if (e.movieEnded(3))
+        {
+            const std::uint32_t sunnerTime = e.vars().get(VarId::JSunnerTime);
+            if (sunnerTime == 0)
+            {
+                timerTime = static_cast<std::uint32_t>(randomBetween(1, 30)) * 1000;
+            }
+            else if (sunnerTime < e.clock())
+            {
+                const std::uint16_t index = static_cast<std::uint16_t>(randomBetween(3, 8));
+                e.activateMlst(index, false);
+                e.playMovie(codeForMlstIndex(e, index), true);
+                timerTime = static_cast<std::uint32_t>(randomBetween(1, 30)) * 1000;
+            }
+            e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
+        }
+        e.installTimer(sunnersBeachTimer, timerTime);
+    }
+
+    /// JSpit::xjlagoon700_alert (jspit.cpp:487-500). Mid-staircase: the sunners
+    /// look up, and moving on startles them.
+    void xjlagoon700_alert(Engine &e)
+    {
+        if (e.vars().get(VarId::JSunners) != 0)
+            return; // gone; nothing to react
+        sunnersPlayVideo(e, 1, 0x7BEB, true);
+    }
+
+    /// JSpit::xjlagoon800_alert (jspit.cpp:502-522). Lower staircase, and the
+    /// first card that can show them actually leaving -- two movies back to back,
+    /// because the pair was shot as two.
+    void xjlagoon800_alert(Engine &e)
+    {
+        const std::uint32_t sunners = e.vars().get(VarId::JSunners);
+        if (sunners == 0)
+        {
+            sunnersPlayVideo(e, 1, 0xB6CA, true);
+            return;
+        }
+        if (sunners != 1)
+            return; // already 2: they left the last time the player came down
+
+        e.playMovie(2, true);
+        e.playMovie(6, true);
+        e.vars().set(VarId::JSunners, 2);
+        // enter(false): the card draws its own "they are gone" still from
+        // jsunners, which has just changed under it.
+        e.refreshCard();
+    }
+
+    /// JSpit::xjlagoon1500_alert (jspit.cpp:524-540). The beach.
+    void xjlagoon1500_alert(Engine &e)
+    {
+        const std::uint32_t sunners = e.vars().get(VarId::JSunners);
+        if (sunners == 0)
+        {
+            // No click to watch for and nowhere to be sent: there is no card
+            // beyond this one, so the original plays it blocking and so does this.
+            e.playMovie(3, true);
+            return;
+        }
+        if (sunners != 1)
+            return;
+
+        e.playMovie(2, true);
+        e.vars().set(VarId::JSunners, 2);
+        e.refreshCard();
+    }
 } // namespace
 
 void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t *args,
@@ -369,7 +635,64 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
     if (key == "xtchotakesbook")
         return; // "And now Cho takes the trap book"
 
+    // --- jspit: the sunners --------------------------------------------------
+    if (key == "xjlagoon700_alert")
+    {
+        xjlagoon700_alert(e);
+        return;
+    }
+    if (key == "xjlagoon800_alert")
+    {
+        xjlagoon800_alert(e);
+        return;
+    }
+    if (key == "xjlagoon1500_alert")
+    {
+        xjlagoon1500_alert(e);
+        return;
+    }
+
+    // --- everywhere: the insects --------------------------------------------
+    // RivenStack::xflies (riven_stack.cpp:193-195), registered on the base class
+    // rather than per stack because two islands use it: jspit's jungle by night
+    // (fireflies) and by day, and gspit's. args[0] is the fireflies flag and
+    // args[1] the count, which the shipped data keeps between 1 and 5.
+    if (key == "xflies")
+    {
+        if (argCount >= 2)
+            e.setFliesEffect(args[1], args[0] == 1);
+        return;
+    }
+
     DebugLog::warn("external command: %s is not implemented", name.c_str());
+}
+
+void installCardTimer(Engine &e)
+{
+    // JSpit::installCardTimer (jspit.cpp:785-802) is the only override of an
+    // otherwise empty base (riven_stack.cpp:272), so every other stack falls
+    // through to nothing. No removeTimer in the default case: changeToCard has
+    // already cleared it before this is reached.
+    if (e.stack().id != StackId::Jspit)
+        return;
+
+    switch (e.globalCardId(e.cardId()))
+    {
+    case 0x77d6: // Sunners, top of stairs
+        e.installTimer(sunnersTopStairsTimer, 500);
+        break;
+    case 0x79bd: // Sunners, middle of stairs
+        e.installTimer(sunnersMidStairsTimer, 500);
+        break;
+    case 0x7beb: // Sunners, bottom of stairs
+        e.installTimer(sunnersLowerStairsTimer, 500);
+        break;
+    case 0xb6ca: // Sunners, shoreline
+        e.installTimer(sunnersBeachTimer, 500);
+        break;
+    default:
+        break;
+    }
 }
 
 } // namespace rivenrt

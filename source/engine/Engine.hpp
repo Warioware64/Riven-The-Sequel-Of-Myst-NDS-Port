@@ -35,6 +35,7 @@
 #include "engine/Vars.hpp"
 #include "render/CardSurface.hpp"
 #include "render/Cursor.hpp"
+#include "render/FliesEffect.hpp"
 #include "render/Inventory.hpp"
 #include "render/WaterEffect.hpp"
 #include "render/ZoomView.hpp"
@@ -274,6 +275,11 @@ public:
     /// RivenCard::activateWaterEffect (riven_card.cpp:914-922).
     void activateFlst(std::uint16_t index);
 
+    /// RivenGraphics::setFliesEffect (riven_graphics.cpp:754-757), behind
+    /// xflies. `count` is 1..5 and `fireflies` picks which of the two creatures
+    /// it is. Replaces whatever was flying.
+    void setFliesEffect(int count, bool fireflies);
+
     void activateSlst(std::uint16_t index);
     void playSlst(const rivendata::SoundRec &rec);
     void stopAllAmbient();
@@ -300,6 +306,48 @@ public:
     void stopMovie(std::uint16_t code);
     /// Wait `ms`, pumping the loop. Opcode 14 (riven.cpp:661-667).
     void delay(std::uint32_t ms);
+
+    /// Play a movie and let the player cut it short by clicking.
+    ///
+    /// JSpit::sunnersPlayVideo's wait loop (jspit.cpp:542-567), which is the one
+    /// place Riven plays a movie the player is EXPECTED to interrupt: the sunners
+    /// bask until you move, and moving is what startles them. True means the
+    /// player ended it; false means it ran out.
+    ///
+    /// Deliberately not playMovieBlocking with an extra key test -- it does not
+    /// bake (see the body), and it has to ignore the click that is still held
+    /// from the move that got here.
+    bool playMovieUntilClick(std::uint16_t code);
+
+    /// Whether the movie on `code` has stopped -- ScummVM's
+    /// `!oldVideo || oldVideo->endOfVideo()` (jspit.cpp:578). A code no MLST
+    /// record on this card ever claimed counts as ended, because openSlot on one
+    /// hands back an empty handle that is already at its end
+    /// (riven_video.cpp:309-322).
+    bool movieEnded(std::uint16_t code) const;
+
+    /// How long the movie on `code` runs, in milliseconds, or 0 if it is not
+    /// open. RivenVideo::getDuration, for the top-stairs timer (jspit.cpp:589).
+    std::uint32_t movieDurationMs(std::uint16_t code) const;
+
+    // --- the card timer -----------------------------------------------------
+    //
+    // RivenStack's one-slot timer (riven_stack.cpp:381-410). A card that wants
+    // something to happen while the player stands still installs a proc on the
+    // way in; the proc RE-ARMS OR REMOVES ITSELF, exactly as the original's does
+    // (riven_stack.cpp:383), which is why checkTimer does not clear it.
+    //
+    // The clock is the vblank, because the DS has no other one -- Engine::delay
+    // already counts frames for the same reason. 2^32 frames is two years.
+
+    using TimerProc = void (*)(Engine &);
+
+    void installTimer(TimerProc proc, std::uint32_t ms);
+    void removeTimer();
+    /// Engine frames since boot. Both loops advance it: a clock that stopped for
+    /// the length of a cutscene would let a timer fire the instant one ended.
+    std::uint32_t clock() const { return frames_; }
+    static std::uint32_t msToFrames(std::uint32_t ms) { return (ms * 60 + 999) / 1000; }
 
     // --- script queue -------------------------------------------------------
 
@@ -415,10 +463,10 @@ private:
 
     void processInput();
     void pumpMovies();
-    /// One engine frame of the card's water effect, if it has one and the player
-    /// has not turned water off. RivenGraphics::updateEffects
-    /// (riven_graphics.cpp:772-780).
-    void pumpWater();
+    /// One engine frame of the card's ambient effects: its water, if it has one
+    /// and the player has not turned water off, and its insects.
+    /// RivenGraphics::updateEffects (riven_graphics.cpp:772-780).
+    void pumpEffects();
 
     /// A frame's screen work: publish what the scripts changed, flip, step a
     /// transition, write OAM. Called straight after NEA_WaitForVBL because that
@@ -438,6 +486,10 @@ private:
     /// The card's own scripts, then hotspots, reset for a new card.
     void resetCardState();
 
+    /// Fire the card's timer if it is due. RivenStack::checkTimer
+    /// (riven_stack.cpp:387-401).
+    void checkTimer();
+
     std::string picPath(std::uint16_t tbmpId) const;
     std::string soundPath(std::uint16_t twavId) const;
     std::string moviePath(std::uint16_t tmovId) const;
@@ -453,6 +505,21 @@ private:
     /// The card's water, if it activated any. One at a time, like the original:
     /// scheduleWaterEffect replaces whatever was running (riven_graphics.cpp:403).
     WaterEffect water_;
+    /// The card's insects, if xflies asked for any. Also one at a time, and also
+    /// replaced rather than added to (riven_graphics.cpp:754-757).
+    FliesEffect flies_;
+
+    /// The card's timer, if it installed one, and when it comes due -- both in
+    /// engine frames. One slot, like the original's (riven_stack.h:213-214).
+    TimerProc timerProc_ = nullptr;
+    std::uint32_t timerDeadline_ = 0;
+    /// Engine frames since boot, advanced by frame() and idleFrame() alike.
+    std::uint32_t frames_ = 0;
+    /// True while a timer proc is running. A proc may spin idleFrame() for the
+    /// length of a movie, and this is what makes it provable that nothing can
+    /// re-enter checkTimer while it does -- the same job as ScummVM running its
+    /// procs from inside the queued-script drain (riven_scripts.cpp:984).
+    bool inTimer_ = false;
 
     /// How many CursorHide guards are alive. Read once a frame in flushUploads.
     int cursorSuppress_ = 0;

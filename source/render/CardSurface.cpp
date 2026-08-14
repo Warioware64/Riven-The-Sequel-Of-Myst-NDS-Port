@@ -62,6 +62,7 @@ void CardSurface::clear()
     for (std::size_t i = 0; i < kPlaneTexels; ++i)
         texels_[i] = clean_[i] = black;
     overlayRows_ = 0;
+    ++generation_;
     markAll();
 }
 
@@ -170,6 +171,7 @@ bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
         }
     }
 
+    ++generation_;
     markRows(y0, dh);
     return true;
 }
@@ -207,6 +209,7 @@ void CardSurface::refreshFromClean()
 
     markRowMask(overlayRows_);
     overlayRows_ = 0;
+    ++generation_;
 }
 
 void CardSurface::bakeRect(int x, int y, int w, int h)
@@ -229,6 +232,7 @@ void CardSurface::bakeRect(int x, int y, int w, int h)
         const std::size_t at = static_cast<std::size_t>(row) * kViewW + x0;
         std::memcpy(clean_ + at, texels_ + at, bytes);
     }
+    ++generation_;
 }
 
 void CardSurface::publish(BgSurface &bg, int buf)
