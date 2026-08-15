@@ -2,15 +2,24 @@
 //
 // Riven's scripts call out to per-stack native code for anything the opcode table
 // cannot express: a book's page turn, a slider's drag maths, a dome's combination
-// check. ScummVM implements them per stack in engines/mohawk/riven_stacks/, and
-// the full set is milestone 6.
+// check. ScummVM implements them per stack in engines/mohawk/riven_stacks/.
 //
-// What is here is what the boot path and the intro reach -- aspit's menu and
-// books, and the two tspit commands the opening cutscene calls -- plus the
-// telescope's cover combination and its up stroke. Anything else is
-// reported by name and does nothing, which makes an unported command a control
-// that does not respond rather than a crash -- and the log line names exactly
-// which one to write next.
+// ALL 115 OF THEM ARE IMPLEMENTED. That is every name in every stack's NAME 3
+// resource in the shipped game, plus the handful ScummVM registers that this
+// release's data does not call (the demo's boundary dialogues, the DVD's two
+// school resets). The fallback below still exists and still names anything it
+// does not know, because a different release could carry a name this one does
+// not -- but nothing in the 5-CD game reaches it.
+//
+// THIS FILE IS THE DISPATCHER, plus two things that are not one island's:
+// aspit's commands, which are the menu and the books rather than a place, and
+// the shared vocabulary declared in Externals.hpp -- the port's answer to
+// ScummVM's RivenStack base class.
+//
+// The other seven islands have a file each -- ExternalsJspit, ExternalsTspit,
+// ExternalsBspit, ExternalsGspit, ExternalsOspit, ExternalsPspit,
+// ExternalsRspit -- and this hands over to them in turn. That is the same split
+// ScummVM has, one riven_stacks/<stack>.cpp per island.
 //
 // Dispatch is by NAME rather than by index, and it has to be: the index is into
 // the calling stack's own NAME 2 list, so the same number is a different command
@@ -25,6 +34,7 @@
 #include "DebugLog.hpp"
 #include "MainMenu.hpp"
 #include "engine/Engine.hpp"
+#include "engine/Externals.hpp"
 #include "engine/Script.hpp"
 
 using namespace rivendata;
@@ -67,18 +77,127 @@ namespace
         e.activatePlst(static_cast<std::uint16_t>(page));
     }
 
-    /// ASpit::xaatrusbookprevpage / xaatrusbooknextpage (aspit.cpp:176-218),
-    /// without the page-turn sound the original plays from the stack's own tWAV
-    /// ids -- those are effects, and opcode 4 is the only thing that names one.
+    /// ASpit::xaatrusbookprevpage / xaatrusbooknextpage (aspit.cpp:176-218).
+    /// Ten pages, no transition, and nothing extra to draw on any of them --
+    /// which is the whole of the difference between this book and bspit's.
     void atrusBookPage(Engine &e, int delta)
     {
-        std::uint32_t &page = e.vars().at(VarId::AAtrusBook);
-        if (delta < 0 && page <= 1)
-            return;
-        if (delta > 0 && page >= 10)
-            return; // Atrus's journal is ten pages
-        page = static_cast<std::uint32_t>(static_cast<int>(page) + delta);
+        turnBookPages(e, VarId::AAtrusBook, delta, 1, 10, Transition::None);
+    }
+
+    // --- Catherine's journal -------------------------------------------------
+    //
+    // Forty-nine pages, and unlike Atrus's it has two things to draw on top of
+    // the page picture: the white paper edges that show how far through the book
+    // you are, and -- on page 28 -- the telescope's combination, which is where
+    // the player is meant to read it.
+
+    /// ASpit::cathBookDrawTelescopeCombination (aspit.cpp:254-269). Five D'ni
+    /// numerals out of five separate tBMPs, 13 through 17.
+    ///
+    /// tcorrectorder is a five-digit decimal number whose digits are the buttons
+    /// in order, so each numeral is `digit - 1` strips along its own bitmap. The
+    /// shape is bspit's lab-journal combination with a different encoding: there
+    /// the position came out of a bitmask, here out of a decimal digit.
+    void cathBookDrawTelescopeCombination(Engine &e)
+    {
+        constexpr int kNumberW = 32;
+        constexpr int kNumberH = 25;
+        constexpr int kDstX = 156;
+        constexpr int kDstY = 247;
+        constexpr std::uint16_t kFirstBitmap = 13;
+
+        const std::uint32_t combo = e.vars().get(VarId::TCorrectOrder);
+
+        for (int i = 0; i < 5; ++i)
+        {
+            // The digits are 1..5 and a zero would index a strip to the LEFT of
+            // the bitmap. That is what a save written before the combination was
+            // rolled looks like, and ScummVM would read off the front of the
+            // image; here the numeral is simply left undrawn.
+            const std::uint32_t digit = comboDigit(combo, static_cast<std::uint32_t>(i));
+            if (digit < 1 || digit > 5)
+                continue;
+
+            const int offset = static_cast<int>(digit - 1) * kNumberW;
+            CardSurface::Section s;
+            s.src = Rect{static_cast<std::int16_t>(offset), 0,
+                         static_cast<std::int16_t>(offset + kNumberW), kNumberH};
+            s.dst = Rect{static_cast<std::int16_t>(kDstX + i * kNumberW), kDstY,
+                         static_cast<std::int16_t>(kDstX + (i + 1) * kNumberW),
+                         kDstY + kNumberH};
+            e.drawBitmapSections(static_cast<std::uint16_t>(kFirstBitmap + i), &s, 1);
+        }
+    }
+
+    /// ASpit::cathBookDrawPage (aspit.cpp:240-252), less the page picture --
+    /// turnBookPages has already drawn that by the time this runs.
+    void cathBookPageDrawn(Engine &e, std::uint32_t page)
+    {
+        // The white paper edges. Two records, and the gap at page 5 is the
+        // original's: neither is drawn on the first page or the fifth.
+        if (page > 1 && page < 5)
+            e.activatePlst(50);
+        else if (page > 5)
+            e.activatePlst(51);
+
+        if (page == 28)
+            cathBookDrawTelescopeCombination(e);
+    }
+
+    /// ASpit::xacathopenbook (aspit.cpp:218-238). The same shape as Atrus's,
+    /// with the extra drawing above.
+    void xacathopenbook(Engine &e)
+    {
+        const std::uint32_t page = e.vars().get(VarId::ACathBook);
+
+        const Hotspot *openBook = e.hotspotByName("openBook");
+        const Hotspot *nextPage = e.hotspotByName("nextpage");
+        const Hotspot *prevPage = e.hotspotByName("prevpage");
+
+        const bool first = page == 1;
+        if (prevPage != nullptr)
+            e.enableHotspotByIndex(e.hotspotIndexOf(prevPage), !first);
+        if (nextPage != nullptr)
+            e.enableHotspotByIndex(e.hotspotIndexOf(nextPage), !first);
+        if (openBook != nullptr)
+            e.enableHotspotByIndex(e.hotspotIndexOf(openBook), first);
+
+        // Bracketed, because the page and its overlays are one picture as far
+        // as the player is concerned -- and because drawBitmapSections needs a
+        // screen update around it to be published at all.
+        e.beginScreenUpdate();
         e.activatePlst(static_cast<std::uint16_t>(page));
+        cathBookPageDrawn(e, page);
+        e.applyScreenUpdate();
+    }
+
+    // --- the trap book -------------------------------------------------------
+
+    /// ASpit::xatrapbookopen / xatrapbookclose (aspit.cpp:323-345). The trap
+    /// book on the shelf, which opens and shuts where the journals turn pages.
+    ///
+    /// atrap is what the card's own script draws from, so both of these end by
+    /// re-entering the card rather than drawing anything themselves.
+    void trapBook(Engine &e, bool open)
+    {
+        e.vars().set(VarId::ATrap, open ? 1u : 0u);
+
+        // RivenStack::pageTurn: the sound and the transition, in that order
+        // (riven_stack.cpp:403-413). A book opening is a page turn as far as
+        // Riven is concerned, and it is the same pair of recordings.
+        playPageTurnSound(e);
+        e.scheduleTransition(open ? Transition::WipeLeft : Transition::WipeRight);
+
+        // Closing only: the flyby movie keeps drawing over the shut book
+        // otherwise, which ScummVM notes was a glitch in the original engine
+        // too (aspit.cpp:329-333). stopMovie and not enableMovie(false): the
+        // point is that the overlay stops being composited, and disable() would
+        // bake its last frame into the very picture it is in the way of.
+        if (!open)
+            e.stopMovie(1);
+
+        e.refreshCard();
     }
 
     /// RivenInventory::backFromItemScript (riven_inventory.cpp:156-167): out of
@@ -103,7 +222,7 @@ namespace
             e.changeToCard(1);
             return;
         }
-        e.changeToStackAndGlobalCard(static_cast<StackId>(stackId), cardId);
+        e.changeToStackAndCard(static_cast<StackId>(stackId), cardId);
     }
 
     /// ASpit::xaexittomain (aspit.cpp:463-469). Demo-only in the original, and
@@ -111,364 +230,142 @@ namespace
     /// menu so the name is not simply unhandled.
     void backToMenu(Engine &e) { e.changeToCard(1); }
 
-    /// RivenStack::getComboDigit (riven_stack.cpp:197-200). A combination is
-    /// stored as a decimal number whose digits are the buttons in order, so
-    /// digit 0 of 51234 is 5. Six powers for five digits: the divisor of digit n
-    /// is powers[n+1].
-    std::uint32_t comboDigit(std::uint32_t combo, std::uint32_t digit)
-    {
-        static const std::uint32_t powers[] = {100000, 10000, 1000, 100, 10, 1};
-        if (digit + 1 >= sizeof(powers) / sizeof(powers[0]))
-            return 0;
-        return (combo % powers[digit]) / powers[digit + 1];
-    }
-
-    /// TSpit::xtisland390_covercombo (tspit.cpp:165-178). The five buttons on the
-    /// telescope cover: press them in the order written on the island and the
-    /// hatch unlocks, get one wrong and the count goes back to nothing.
-    void xtisland390_covercombo(Engine &e, const std::uint16_t *args, std::size_t argCount)
-    {
-        if (argCount < 1 || args == nullptr)
-        {
-            DebugLog::warn("xtisland390_covercombo: no button number");
-            return;
-        }
-
-        std::uint32_t &correctDigits = e.vars().at(VarId::TCoverCombo);
-        if (correctDigits < 5
-            && args[0] == comboDigit(e.vars().get(VarId::TCorrectOrder), correctDigits))
-            ++correctDigits;
-        else
-            correctDigits = 0;
-
-        const Hotspot *openCover = e.hotspotByName("openCover");
-        if (openCover != nullptr)
-            e.enableHotspotByIndex(e.hotspotIndexOf(openCover), correctDigits == 5);
-    }
-
-    /// TSpit::xtexterior300_telescopeup (tspit.cpp:102-136). One press raises the
-    /// tube one of its five positions, and the animation is the matching slice of
-    /// one long movie -- which is what Engine::playMovieRange exists for.
-    ///
-    /// Without the sounds. The original names them ("tTeleMove", and "tTelDnMore"
-    /// when the tube will not move) and playCardSound resolves a name to a tWAV
-    /// through the archive's resource names (riven_sound.cpp:73-77), which the
-    /// converter does not keep -- Engine::playEffect takes an id. Same omission,
-    /// and the same reason, as the page turn in atrusBookPage above.
-    /// The half that can decide to do nothing. Split out so the caller can put
-    /// the card back exactly once, on every path -- see below.
-    void telescopeUpMove(Engine &e)
-    {
-        // No power, no telescope.
-        if (e.vars().get(VarId::TTeleValve) == 0)
-            return;
-
-        std::uint32_t &pos = e.vars().at(VarId::TTelescope);
-        if (pos >= 5)
-            return; // already at the top
-
-        // Where each position starts in the travel movie, in milliseconds
-        // (tspit.cpp:93). Six entries for five moves: a move runs from its own
-        // position to the next one.
-        static const std::uint32_t kStops[] = {0, 800, 1680, 2560, 3440, 4320};
-        const std::uint32_t from = pos >= 1 ? pos - 1 : 0;
-
-        // Two movies of the same travel, one with the cover on and one without.
-        e.playMovieRange(e.vars().get(VarId::TTeleCover) != 0 ? 4 : 5, kStops[from],
-                         kStops[from + 1]);
-
-        ++pos;
-    }
-
-    void xtexterior300_telescopeup(Engine &e)
-    {
-        // The button goes down whether or not anything comes of it.
-        e.playMovie(3, true);
-        telescopeUpMove(e);
-
-        // ALWAYS, and not only when the tube moved, which is where ScummVM
-        // stops -- it returns straight out of the two "nothing happens" paths.
-        //
-        // The button is a blocking play that runs to the movie's end, and both
-        // engines BAKE such a frame into the card: ScummVM's playBlocking()
-        // ends in disable() (riven_video.cpp:264-268), and this port matches it
-        // (Engine::kBakeBlockingMovies). tMOV 38 ends on a frame that is
-        // nothing like the still underneath it -- measured against all twenty
-        // of card 137's stills -- so once baked it is the card, and pressing
-        // the button with the valve shut leaves a 33x40 patch of it on screen
-        // until something redraws. ScummVM has the same hole here; the port
-        // does not want it, so it asks for the redraw.
-        //
-        // The card also draws the tube at its new position from the variable,
-        // so the moving case needed this anyway (ScummVM: enter(false)).
-        e.refreshCard();
-    }
-
-    // --- jspit: the sunners -------------------------------------------------
-    //
-    // Four cards down the lagoon steps (RMAP 0x77d6, 0x79bd, 0x7beb, 0xb6ca --
-    // jspit 621, 627, 629, 632) share one piece of state: jsunners, which is 0
-    // while the creatures are basking, 1 once they have been startled and 2 once
-    // they have left. Two halves make them alive:
-    //
-    //   * the ALERT, run from each card's CardEnter script, which plays the
-    //     reaction to the player arriving and lets a click cut it short; and
-    //   * the TIMER, armed on the way in, which plays a random idle movie every
-    //     few seconds for as long as the player stands there.
-    //
-    // The timers are why Engine has a timer at all. jsunnertime is their clock,
-    // and the cards zero it themselves on entry (every one of the four has
-    // `SetVar jsunnertime 0` in its CardEnter), so nothing here has to worry
-    // about a stamp from a previous session -- and the re-anchor below rewrites
-    // a stale one within a single poll anyway.
-
-    /// ScummVM's getRandomNumberRng: INCLUSIVE at both ends
-    /// (common/random.cpp:56 -- getRandomNumber(max - min) + min, and
-    /// getRandomNumber(n) itself returns 0..n).
-    int randomBetween(int lo, int hi)
-    {
-        return lo + std::rand() % (hi - lo + 1);
-    }
-
-    /// JSpit::sunnersPlayVideo (jspit.cpp:542-567). Play a sunner movie and
-    /// watch for a click; a click startles them, sends the player on to
-    /// `destGlobalId`, and -- this is what the return value is for -- means the
-    /// caller is now standing on a different card.
-    bool sunnersPlayVideo(Engine &e, std::uint16_t code, std::uint32_t destGlobalId,
-                          bool sunnersShouldFlee)
-    {
-        if (!e.playMovieUntilClick(code))
-            return false;
-
-        if (sunnersShouldFlee)
-            e.vars().set(VarId::JSunners, 1);
-
-        // ScummVM builds a one-command ChangeCard script here; the port can just
-        // ask, and does it the same way as the destination is named -- by RMAP
-        // global id, because a local card number means nothing across stacks.
-        const std::int32_t local = e.stack().localCardForGlobal(destGlobalId);
-        if (local < 0)
-        {
-            DebugLog::warn("sunners: no card for global id %lu",
-                           static_cast<unsigned long>(destGlobalId));
-            return false;
-        }
-        e.changeToCard(static_cast<std::uint16_t>(local));
-        return true;
-    }
-
-    /// The MLST "code" of a record addressed by its INDEX.
-    ///
-    /// Only the beach timer needs this, and it needs it because ScummVM's
-    /// version conflates the two: jspit.cpp:692-694 hands the same number to
-    /// RivenCard::playMovie, which takes an index, and to openSlot, which takes
-    /// a code. On card 632 they happen to agree (records 1..8 sit on codes 1..8)
-    /// and the bug is invisible; it is not a coincidence worth relying on.
-    std::uint16_t codeForMlstIndex(Engine &e, std::uint16_t index)
-    {
-        const Card *const card = e.card();
-        if (card != nullptr)
-            for (const MovieRec &m : card->mlst)
-                if (m.index == index)
-                    return m.slot;
-        return index;
-    }
-
-    void sunnersTopStairsTimer(Engine &e);
-    void sunnersMidStairsTimer(Engine &e);
-    void sunnersLowerStairsTimer(Engine &e);
-    void sunnersBeachTimer(Engine &e);
-
-    /// JSpit::sunnersTopStairsTimer (jspit.cpp:569-598).
-    ///
-    /// The shape all four share, and every part of it is load-bearing:
-    ///
-    ///   * gone means gone -- once jsunners is not 0 the timer removes itself
-    ///     rather than re-arming, because there is no movie left to play;
-    ///   * nothing is started on top of a movie that is still running, which is
-    ///     what the movieEnded() test is for -- the poll comes round every half
-    ///     second and the movies are seconds long;
-    ///   * the re-anchor of jsunnertime sits INSIDE that test but OUTSIDE the
-    ///     if/else, so it runs on the "not due yet" pass as well. Move it into
-    ///     either arm and the first wait either never expires or expires at once.
-    ///
-    /// The one deliberate divergence is the early return after a click. The
-    /// original falls through to installTimer (jspit.cpp:597) even though
-    /// sunnersPlayVideo has just changed the card -- which overwrites the timer
-    /// the destination installed on the way in, and leaves a proc addressing
-    /// movie codes that belong to the card the player has left.
-    void sunnersTopStairsTimer(Engine &e)
-    {
-        if (e.vars().get(VarId::JSunners) != 0)
-        {
-            e.removeTimer();
-            return;
-        }
-
-        std::uint32_t timerTime = 500;
-        if (e.movieEnded(1))
-        {
-            const std::uint32_t sunnerTime = e.vars().get(VarId::JSunnerTime);
-            if (sunnerTime == 0)
-            {
-                timerTime = static_cast<std::uint32_t>(randomBetween(2, 15)) * 1000;
-            }
-            else if (sunnerTime < e.clock())
-            {
-                const std::uint16_t code = static_cast<std::uint16_t>(randomBetween(1, 3));
-                if (sunnersPlayVideo(e, code, 0x79BD, false))
-                    return; // gone to another card; its own timer is armed
-                timerTime = e.movieDurationMs(code)
-                            + static_cast<std::uint32_t>(randomBetween(2, 15)) * 1000;
-            }
-            e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
-        }
-        e.installTimer(sunnersTopStairsTimer, timerTime);
-    }
-
-    /// JSpit::sunnersMidStairsTimer (jspit.cpp:600-637). Codes 2, 3 and 4 with
-    /// 4 four times as likely as the other two, and a click flees to the bottom
-    /// of the steps.
-    void sunnersMidStairsTimer(Engine &e)
-    {
-        if (e.vars().get(VarId::JSunners) != 0)
-        {
-            e.removeTimer();
-            return;
-        }
-
-        std::uint32_t timerTime = 500;
-        if (e.movieEnded(1))
-        {
-            const std::uint32_t sunnerTime = e.vars().get(VarId::JSunnerTime);
-            if (sunnerTime == 0)
-            {
-                timerTime = static_cast<std::uint32_t>(randomBetween(1, 10)) * 1000;
-            }
-            else if (sunnerTime < e.clock())
-            {
-                const int r = randomBetween(0, 5); // getRandomNumber(5)
-                const std::uint16_t code = r == 4 ? 2 : (r == 5 ? 3 : 4);
-                if (sunnersPlayVideo(e, code, 0x7BEB, true))
-                    return;
-                timerTime = static_cast<std::uint32_t>(randomBetween(1, 10)) * 1000;
-            }
-            e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
-        }
-        e.installTimer(sunnersMidStairsTimer, timerTime);
-    }
-
-    /// JSpit::sunnersLowerStairsTimer (jspit.cpp:639-668).
-    void sunnersLowerStairsTimer(Engine &e)
-    {
-        if (e.vars().get(VarId::JSunners) != 0)
-        {
-            e.removeTimer();
-            return;
-        }
-
-        std::uint32_t timerTime = 500;
-        if (e.movieEnded(1))
-        {
-            const std::uint32_t sunnerTime = e.vars().get(VarId::JSunnerTime);
-            if (sunnerTime == 0)
-            {
-                timerTime = static_cast<std::uint32_t>(randomBetween(1, 30)) * 1000;
-            }
-            else if (sunnerTime < e.clock())
-            {
-                const std::uint16_t code = static_cast<std::uint16_t>(randomBetween(3, 5));
-                if (sunnersPlayVideo(e, code, 0xB6CA, true))
-                    return;
-                timerTime = static_cast<std::uint32_t>(randomBetween(1, 30)) * 1000;
-            }
-            e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
-        }
-        e.installTimer(sunnersLowerStairsTimer, timerTime);
-    }
-
-    /// JSpit::sunnersBeachTimer (jspit.cpp:670-703). The odd one out: the beach
-    /// card's script does not activate these six records, so the timer has to do
-    /// it itself before it can play one -- and there is nothing to click through
-    /// here, because the player is already as close as they can get.
-    void sunnersBeachTimer(Engine &e)
-    {
-        if (e.vars().get(VarId::JSunners) != 0)
-        {
-            e.removeTimer();
-            return;
-        }
-
-        std::uint32_t timerTime = 500;
-        if (e.movieEnded(3))
-        {
-            const std::uint32_t sunnerTime = e.vars().get(VarId::JSunnerTime);
-            if (sunnerTime == 0)
-            {
-                timerTime = static_cast<std::uint32_t>(randomBetween(1, 30)) * 1000;
-            }
-            else if (sunnerTime < e.clock())
-            {
-                const std::uint16_t index = static_cast<std::uint16_t>(randomBetween(3, 8));
-                e.activateMlst(index, false);
-                e.playMovie(codeForMlstIndex(e, index), true);
-                timerTime = static_cast<std::uint32_t>(randomBetween(1, 30)) * 1000;
-            }
-            e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
-        }
-        e.installTimer(sunnersBeachTimer, timerTime);
-    }
-
-    /// JSpit::xjlagoon700_alert (jspit.cpp:487-500). Mid-staircase: the sunners
-    /// look up, and moving on startles them.
-    void xjlagoon700_alert(Engine &e)
-    {
-        if (e.vars().get(VarId::JSunners) != 0)
-            return; // gone; nothing to react
-        sunnersPlayVideo(e, 1, 0x7BEB, true);
-    }
-
-    /// JSpit::xjlagoon800_alert (jspit.cpp:502-522). Lower staircase, and the
-    /// first card that can show them actually leaving -- two movies back to back,
-    /// because the pair was shot as two.
-    void xjlagoon800_alert(Engine &e)
-    {
-        const std::uint32_t sunners = e.vars().get(VarId::JSunners);
-        if (sunners == 0)
-        {
-            sunnersPlayVideo(e, 1, 0xB6CA, true);
-            return;
-        }
-        if (sunners != 1)
-            return; // already 2: they left the last time the player came down
-
-        e.playMovie(2, true);
-        e.playMovie(6, true);
-        e.vars().set(VarId::JSunners, 2);
-        // enter(false): the card draws its own "they are gone" still from
-        // jsunners, which has just changed under it.
-        e.refreshCard();
-    }
-
-    /// JSpit::xjlagoon1500_alert (jspit.cpp:524-540). The beach.
-    void xjlagoon1500_alert(Engine &e)
-    {
-        const std::uint32_t sunners = e.vars().get(VarId::JSunners);
-        if (sunners == 0)
-        {
-            // No click to watch for and nowhere to be sent: there is no card
-            // beyond this one, so the original plays it blocking and so does this.
-            e.playMovie(3, true);
-            return;
-        }
-        if (sunners != 1)
-            return;
-
-        e.playMovie(2, true);
-        e.vars().set(VarId::JSunners, 2);
-        e.refreshCard();
-    }
 } // namespace
+
+// ---------------------------------------------------------------------------
+// The shared vocabulary (Externals.hpp)
+// ---------------------------------------------------------------------------
+
+std::uint32_t comboDigit(std::uint32_t combo, std::uint32_t digit)
+{
+    static const std::uint32_t powers[] = {100000, 10000, 1000, 100, 10, 1};
+    if (digit + 1 >= sizeof(powers) / sizeof(powers[0]))
+        return 0;
+    return (combo % powers[digit]) / powers[digit + 1];
+}
+
+int randomBetween(int lo, int hi)
+{
+    if (hi <= lo)
+        return lo;
+    return lo + std::rand() % (hi - lo + 1);
+}
+
+std::uint16_t codeForMlstIndex(Engine &e, std::uint16_t index)
+{
+    const Card *const card = e.card();
+    if (card != nullptr)
+        for (const MovieRec &m : card->mlst)
+            if (m.index == index)
+                return m.slot;
+    return index;
+}
+
+void playPageTurnSound(Engine &e)
+{
+    // 51 of 255, which is RivenStack::pageTurn's own volume
+    // (riven_stack.cpp:412) and not a taste decision: a page turn is a small
+    // paper noise a foot from your hands, and Riven mixes it that way. At the
+    // default 255 it comes out as the loudest thing in either journal, because
+    // the port has no gain headroom left to make anything else match it.
+    e.playCardSound((std::rand() & 1) != 0 ? "aPage1" : "aPage2", 51);
+}
+
+void runEndGame(Engine &e, std::uint16_t movieCode, bool alreadyPlaying)
+{
+    // The ambient stops before the movie starts: an ending is silent under its
+    // own soundtrack, and Riven's last five minutes have their own
+    // (riven_stack.cpp:208).
+    e.stopAllAmbient();
+    e.stopEffects();
+
+    if (alreadyPlaying)
+    {
+        // Watch it out rather than start it. This is the loop runCredits spins
+        // (riven_stack.cpp:239-257) with the credits taken out of it.
+        while (!e.movieEnded(movieCode) && !e.quitRequested())
+            e.pumpIdleFrame();
+    }
+    else
+    {
+        e.playMovie(movieCode, true);
+    }
+
+    // riven_stack.cpp:262-270: the game state is thrown away and the player is
+    // put back on the menu. startNewGame cannot clear the zip destinations --
+    // they are visited-card history rather than a variable -- so this has to,
+    // exactly as xanewgame does.
+    e.vars().startNewGame();
+    e.clearZipDests();
+
+    // Aspit card 1, by its LOCAL id, which is what ScummVM asks for
+    // (riven_stack.cpp:268-269 builds RivenStackChangeCommand with byStackCardId
+    // set). Not a global id, and there is no telling the two apart by value --
+    // see changeToStackAndCard.
+    //
+    // Deferred, because this is running inside a hotspot script and the
+    // interpreter is still holding the stack it would replace.
+    e.changeToStackAndCard(StackId::Aspit, 1, true);
+}
+
+void turnBookPages(Engine &e, VarId pageVar, int delta, std::uint32_t firstPage,
+                   std::uint32_t lastPage, Transition transition,
+                   void (*onPage)(Engine &, std::uint32_t))
+{
+    if (delta == 0)
+        return;
+
+    // ONE PAGE PER PRESS, and this is the port's one deliberate divergence from
+    // RivenStack's book loop.
+    //
+    // ScummVM turns pages `while (keepTurningPages())` -- while the mouse is
+    // still held (riven_stack.cpp:414-416, and the while in
+    // BSpit::xblabbooknextpage) -- so that holding the corner riffles through
+    // the book. On a mouse that is a deliberate press-and-hold. On a resistive
+    // touchscreen a press that outlasts a page turn AND its sound is simply how
+    // a tap feels, so the same loop would shut a twenty-two-page journal on one
+    // stylus poke. There is no threshold that separates the two, because there
+    // is no second button to hold.
+    std::uint32_t &page = e.vars().at(pageVar);
+    if (delta < 0 && page <= firstPage)
+        return;
+    if (delta > 0 && page >= lastPage)
+        return;
+    page = static_cast<std::uint32_t>(static_cast<int>(page) + delta);
+
+    playPageTurnSound(e);
+
+    // BRACKETED, and it has to be. scheduleTransition only records a request;
+    // the thing that runs it is a completed screen update, and there is no
+    // other one coming -- the lab journal's hotspots are a bare opcode 17 with
+    // no 20/21 around it, and nothing in the frame loop publishes on its own.
+    // Without the pair the wipe never plays, and worse, the request sits in the
+    // engine until the next card entry publishes it over a card it has nothing
+    // to do with. This is the shape the gallows carriage already uses
+    // (ExternalsJspit.cpp).
+    //
+    // The transition goes BEFORE the picture: Riven schedules the transition it
+    // wants and then draws what it applies to.
+    e.beginScreenUpdate();
+    if (transition != Transition::None)
+        e.scheduleTransition(transition);
+    e.activatePlst(static_cast<std::uint16_t>(page));
+    if (onPage != nullptr)
+        onPage(e, page);
+    e.applyScreenUpdate();
+
+    // Waiting for the sound out is what makes a page turn feel like one thing
+    // rather than a sound over a picture -- and letting go ends the wait, which
+    // is RivenStack::waitForPageTurnSound's `&& keepTurningPages()`
+    // (riven_stack.cpp:418-422). Without that test a second tap arriving during
+    // the first turn's sound is swallowed and the book stops a page short.
+    //
+    // pumpInteractiveFrame and not pumpIdleFrame: the idle one deliberately
+    // does not read the button, so mouseIsDown() would never change and the
+    // test would be decoration.
+    while (e.isEffectPlaying() && e.mouseIsDown() && !e.quitRequested())
+        e.pumpInteractiveFrame();
+}
 
 void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t *args,
                         std::size_t argCount)
@@ -512,6 +409,35 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
         atrusBookPage(e, +1);
         return;
     }
+    if (key == "xacathopenbook")
+    {
+        xacathopenbook(e);
+        return;
+    }
+    // Forty-nine pages, and the wipes run the other way round to Atrus's
+    // journal: Catherine's book is read top to bottom (aspit.cpp:288, :309).
+    if (key == "xacathbookprevpage")
+    {
+        turnBookPages(e, VarId::ACathBook, -1, 1, 49, Transition::WipeDown,
+                      cathBookPageDrawn);
+        return;
+    }
+    if (key == "xacathbooknextpage")
+    {
+        turnBookPages(e, VarId::ACathBook, +1, 1, 49, Transition::WipeUp,
+                      cathBookPageDrawn);
+        return;
+    }
+    if (key == "xatrapbookopen")
+    {
+        trapBook(e, true);
+        return;
+    }
+    if (key == "xatrapbookclose")
+    {
+        trapBook(e, false);
+        return;
+    }
     // The three book-back commands all link home (aspit.cpp:172-174, :271-273,
     // :317-321); only the trap book also puts itself away first.
     if (key == "xaatrusbookback" || key == "xacathbookback")
@@ -551,19 +477,6 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
     if (key == "xaenablemenuintro")
     {
         e.inventory().setForcedHidden(false);
-        return;
-    }
-    if (key == "xthideinventory")
-    {
-        // EMPTY, and matching ScummVM's, which is also empty (tspit.cpp:190).
-        //
-        // The name invites forceHidden(true) and this port had it, with no
-        // counterpart anywhere -- so from the opening cutscene onwards the strip
-        // was hidden for the rest of the game and Atrus's journal, which nothing
-        // else reaches, was unreachable. Nothing needs it: the strip is already
-        // hidden during the cutscene by fullscreenMoviePlaying() and on aspit by
-        // the stack test (Inventory::update), which is why ScummVM can afford to
-        // leave it empty too.
         return;
     }
     if (key == "xaoptions")
@@ -612,45 +525,30 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
     if (key == "xalaunchbrowser")
         return; // there is no browser to launch
 
-    // --- tspit: the telescope ------------------------------------------------
-    if (key == "xtisland390_covercombo")
-    {
-        xtisland390_covercombo(e, args, argCount);
+    // --- the islands ---------------------------------------------------------
+    // A file per island, and this is the whole of them here. ScummVM splits the
+    // same way, one riven_stacks/<stack>.cpp per island; the difference is only
+    // that its registration is a table built at construction and this is a name
+    // test, for the reason at the top of this file.
+    //
+    // Order does not matter -- every name in the game carries its island's
+    // prefix, and the handful that do not (xtakeit, xdrawmarbles, xflies,
+    // xicon, xbait, xbookclick, xgwatch) are still unique -- so they are in the
+    // order the islands were written.
+    if (runJspitExternal(e, key, args, argCount))
         return;
-    }
-    if (key == "xtexterior300_telescopeup")
-    {
-        xtexterior300_telescopeup(e);
+    if (runTspitExternal(e, key, args, argCount))
         return;
-    }
-
-    // --- tspit: the opening cutscene ----------------------------------------
-    // Both of these are EMPTY in ScummVM too -- tspit.cpp has them as a comment
-    // and nothing else. The inventory they describe is granted by the card's own
-    // variables; the commands exist so the original's script had somewhere to
-    // call. Listed rather than left to the fallback so the intro does not print
-    // two "not implemented" lines every time it plays.
-    if (key == "xtatrusgivesbooks")
-        return; // "Give the player Atrus' Journal and the Trap book"
-    if (key == "xtchotakesbook")
-        return; // "And now Cho takes the trap book"
-
-    // --- jspit: the sunners --------------------------------------------------
-    if (key == "xjlagoon700_alert")
-    {
-        xjlagoon700_alert(e);
+    if (runBspitExternal(e, key, args, argCount))
         return;
-    }
-    if (key == "xjlagoon800_alert")
-    {
-        xjlagoon800_alert(e);
+    if (runGspitExternal(e, key, args, argCount))
         return;
-    }
-    if (key == "xjlagoon1500_alert")
-    {
-        xjlagoon1500_alert(e);
+    if (runOspitExternal(e, key, args, argCount))
         return;
-    }
+    if (runPspitExternal(e, key, args, argCount))
+        return;
+    if (runRspitExternal(e, key, args, argCount))
+        return;
 
     // --- everywhere: the insects --------------------------------------------
     // RivenStack::xflies (riven_stack.cpp:193-195), registered on the base class
@@ -669,30 +567,14 @@ void runExternalCommand(Engine &e, std::uint16_t nameIndex, const std::uint16_t 
 
 void installCardTimer(Engine &e)
 {
-    // JSpit::installCardTimer (jspit.cpp:785-802) is the only override of an
-    // otherwise empty base (riven_stack.cpp:272), so every other stack falls
-    // through to nothing. No removeTimer in the default case: changeToCard has
-    // already cleared it before this is reached.
-    if (e.stack().id != StackId::Jspit)
-        return;
-
-    switch (e.globalCardId(e.cardId()))
-    {
-    case 0x77d6: // Sunners, top of stairs
-        e.installTimer(sunnersTopStairsTimer, 500);
-        break;
-    case 0x79bd: // Sunners, middle of stairs
-        e.installTimer(sunnersMidStairsTimer, 500);
-        break;
-    case 0x7beb: // Sunners, bottom of stairs
-        e.installTimer(sunnersLowerStairsTimer, 500);
-        break;
-    case 0xb6ca: // Sunners, shoreline
-        e.installTimer(sunnersBeachTimer, 500);
-        break;
-    default:
-        break;
-    }
+    // jspit's and pspit's are the only two overrides of an otherwise empty base
+    // (riven_stack.cpp:272), so every other stack falls through to nothing. No
+    // removeTimer in the default case: changeToCard has already cleared it
+    // before this is reached.
+    if (e.stack().id == StackId::Jspit)
+        installJspitCardTimer(e);
+    else if (e.stack().id == StackId::Pspit)
+        installPspitCardTimer(e);
 }
 
 } // namespace rivenrt

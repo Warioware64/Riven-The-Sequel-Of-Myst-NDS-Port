@@ -6,6 +6,9 @@
 #include <filesystem>
 #include <vector>
 
+// fsync/fileno. See emit(): fflush alone does not reach the card.
+#include <unistd.h>
+
 #include "Global.hpp"
 #include "RivenImage.hpp"
 #include "Settings.hpp"
@@ -29,6 +32,19 @@ namespace
     int g_notices = 0;
     /// Frames the status line still has to live.
     int g_statusFrames = 0;
+    /// The buttons that were down last time pollHotkeys() looked, so it can see
+    /// a press without borrowing libnds's scanKeys bookkeeping. See there.
+    std::uint32_t g_lastKeys = 0;
+    /// How many HotkeyHold guards are alive. Non-zero means a screen that needs
+    /// L and R for itself is up.
+    int g_hotkeyHold = 0;
+
+    /// The ten buttons REG_KEYINPUT carries, active LOW.
+    constexpr std::uint32_t kKeyMask = 0x3FF;
+    std::uint32_t keysNow()
+    {
+        return static_cast<std::uint32_t>(~REG_KEYINPUT) & kKeyMask;
+    }
 
     /// One line's worth. The console is 32 columns, so anything past this is
     /// already wrapping; the file gets the same text so both agree.
@@ -130,7 +146,7 @@ void begin()
     }
 
     log("== Riven DS debug log ==");
-    log("SELECT+L screenshot, SELECT+R vram dump");
+    log("L screenshot, R vram dump -- any time, cutscenes included");
 }
 
 void end()
@@ -169,7 +185,19 @@ namespace
             // Per line. A DS is switched off rather than shut down, so a buffer
             // that has not reached the card is a log that ends before the thing
             // being debugged -- which is the only part anyone wanted.
+            //
+            // AND fsync, which is the whole reason this used to produce an
+            // empty file. fflush only pushes stdio's buffer into the filesystem
+            // layer; BlocksDS says so in as many words -- "fflush() doesn't
+            // currently guarantee a flush to the disk, so fsync(fileno(fp)) can
+            // be used instead" (BlocksDS changelog). Neither the data nor, more
+            // to the point, the directory entry that carries the file's LENGTH
+            // reaches the card until this. So every run that ended the way a DS
+            // run ends -- the power switch -- left a debug.log of zero bytes,
+            // and the one run that did not (quitting through the menu, where
+            // end() calls fclose) was the only one that ever worked.
             std::fflush(g_file);
+            fsync(fileno(g_file));
         }
     }
 
@@ -339,6 +367,53 @@ void screenshot()
     if (f != nullptr)
         std::fclose(f);
     log("SHOT %s %s", name.c_str(), ok ? "ok" : "FAILED");
+}
+
+HotkeyHold::HotkeyHold() { ++g_hotkeyHold; }
+
+HotkeyHold::~HotkeyHold()
+{
+    if (--g_hotkeyHold < 0)
+        g_hotkeyHold = 0;
+}
+
+void pollHotkeys()
+{
+    // keysNow() AND OUR OWN EDGE, not scanKeys()/keysDown().
+    //
+    // This is called from every loop the engine has -- the card loop, the idle
+    // loop a blocking movie spins, the interactive loop a drag spins -- and
+    // those disagree about who calls scanKeys(). Some call it (frame,
+    // playMovieBlocking), some never do (the effect waits). scanKeys() twice in
+    // one frame is not harmless: the second call computes the edge against the
+    // held mask the FIRST one stored, so it reports nothing pressed and eats
+    // the caller's own B/START. Reading the register and keeping a private
+    // `last` costs two instructions and cannot interfere with anything.
+    const std::uint32_t now = keysNow();
+    const std::uint32_t pressed = now & ~g_lastKeys;
+    // ALWAYS, even on the paths that do nothing below. The state has to keep
+    // following the buttons while the hotkeys are off, or a press made inside
+    // the notebook would be waiting as a fresh edge the moment it closes.
+    g_lastKeys = now;
+
+    if (!g_on || g_hotkeyHold > 0)
+        return;
+
+    // BARE L AND R, and only in debug mode. They are the notebook's buttons the
+    // rest of the time, and taking them is the point: the chords they replace
+    // (SELECT+L, SELECT+R) needed three fingers on a machine being held in two
+    // hands, which is exactly the wrong thing to ask for at the moment worth
+    // photographing. Debug mode is where that trade is the right way round.
+    //
+    // Both of these stall for as long as an SD write takes -- a fifth of a
+    // second for the shot, a second or more for the dump -- so a movie's
+    // soundtrack will skip when one is taken during a cutscene. That is the
+    // price of being able to take one AT ALL during a cutscene, which is where
+    // the interesting frames are.
+    if ((pressed & KEY_L) != 0)
+        screenshot();
+    if ((pressed & KEY_R) != 0)
+        vramDump();
 }
 
 void vramDump()

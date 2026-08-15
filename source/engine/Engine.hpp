@@ -82,8 +82,15 @@ public:
     bool changeToStack(rivendata::StackId id);
     bool changeToCard(std::uint16_t cardId);
 
-    /// Follow a ChangeStack command: resolve the destination's RMAP global id
-    /// against the target stack's table (riven_stack.cpp:138-150).
+    /// Follow a ChangeStack command.
+    ///
+    /// `cardIsLocal` is RivenStackChangeCommand's `_byStackCardId`
+    /// (riven_scripts.cpp:920-926, :934-957) and the distinction is real: the
+    /// opcode names its destination by RMAP GLOBAL id, which has to be resolved
+    /// against the target stack's own table (riven_stack.cpp:138-150), but a
+    /// couple of places in the C++ name a card in the destination stack
+    /// directly -- the ending's return to aspit card 1 is one. Guessing which a
+    /// number is would silently land on the wrong card.
     ///
     /// DEFERRED while a script is running, and it has to be. A command list is a
     /// std::vector living inside the loaded Stack, and loading the next stack
@@ -91,7 +98,8 @@ public:
     /// pull the commands out from under the interpreter. ScummVM survives the same
     /// situation because its scripts are reference-counted objects; here the
     /// change is held until the outermost script returns.
-    bool changeToStackAndGlobalCard(rivendata::StackId id, std::uint32_t globalCardId);
+    bool changeToStackAndCard(rivendata::StackId id, std::uint32_t cardId,
+                              bool cardIsLocal = false);
     /// Re-enter the current card. Opcode 19.
     void refreshCard();
 
@@ -125,6 +133,27 @@ public:
     /// The hotspot whose script is running, for opcode 45 (zip mode).
     const rivendata::Hotspot *currentHotspot() const { return currentHotspot_; }
 
+    /// Where a hotspot IS, which is not always where the card data says.
+    ///
+    /// RivenHotspot::setRect (riven_stack.h). One puzzle in Riven moves a
+    /// hotspot: the marble grid, whose six marbles are hotspots that follow the
+    /// marble around the board (TSpit::setMarbleHotspots, tspit.cpp:298-309).
+    ///
+    /// A parallel array beside hotspotEnabled_ rather than a mutable card,
+    /// because `card_` points into the stack file's own data -- shared by every
+    /// card, const, and reloaded from the SD card -- and because the override
+    /// has to die with the card anyway. resetCardState refills it from the data.
+    ///
+    /// EVERY reader of a hotspot's rectangle goes through this. A hit test that
+    /// still read `h.rect` would leave a marble drawn in one place and clicked
+    /// in another.
+    const rivendata::Rect &hotspotRect(std::size_t index) const;
+    const rivendata::Rect &hotspotRect(const rivendata::Hotspot *h) const
+    {
+        return hotspotRect(hotspotIndexOf(h));
+    }
+    void setHotspotRect(std::size_t index, const rivendata::Rect &r);
+
     // --- zip mode -----------------------------------------------------------
     //
     // Riven's fast travel: a card that names a "zip destination" is remembered
@@ -146,8 +175,19 @@ public:
         std::string name;
     };
 
-    /// Forget every zip destination. New game (riven.cpp:679).
-    void clearZipDests() { zipDests_.clear(); }
+    /// Forget every zip destination AND restart the clock. New game
+    /// (riven.cpp:679, and MohawkEngine::setTotalPlayTime(0) behind it).
+    ///
+    /// The two go together because they are the state a new game has to drop
+    /// that Vars::startNewGame cannot reach: zip destinations are visited-card
+    /// history rather than a variable, and the clock is the engine's own. Every
+    /// caller wants both -- the New Game button and the ending -- so they are
+    /// one call rather than two that can be written apart.
+    void clearZipDests()
+    {
+        zipDests_.clear();
+        frames_ = 0;
+    }
 
     /// The card a zip hotspot called `name` leads to in the current stack, or
     /// -1. Public because opcode 45 is the other half of this.
@@ -193,6 +233,20 @@ public:
     /// names one.
     void activatePlst(std::uint16_t index);
     void drawBitmap(std::uint16_t tbmpId, const rivendata::Rect &rect);
+    /// Several pieces of one tBMP, decoded once. See
+    /// CardSurface::drawPictureSections -- the dome's slider strip is why it
+    /// is a batch and not twenty-five calls.
+    void drawBitmapSections(std::uint16_t tbmpId, const CardSurface::Section *sections,
+                            std::size_t count);
+    /// The same, for a picture out of `extras/` -- which belongs to the game
+    /// rather than to a stack and so has no tBMP id here. `name` is the file's
+    /// stem: "marbles" reads extras/marbles.rpic.
+    ///
+    /// RivenGraphics::drawExtrasImage (riven_graphics.cpp:657-669). Riven keeps
+    /// three things outside the stacks: the inventory art, the marbles and the
+    /// credits, and the marble grid is the only one a script reaches.
+    void drawExtrasSections(const char *name, const CardSurface::Section *sections,
+                            std::size_t count);
     /// True once a script has drawn a picture this card entry, so the default
     /// load script knows not to (riven_card.cpp:690-694).
     bool activatedPlst() const { return activatedPlst_; }
@@ -281,19 +335,105 @@ public:
     void setFliesEffect(int count, bool fireflies);
 
     void activateSlst(std::uint16_t index);
+    /// RivenCard::overrideSound (riven_card.cpp:802-804). Give the SLST record
+    /// at `slot` the sounds of the one at `withSlot`, for as long as this card
+    /// is up.
+    ///
+    /// POSITIONS in the card's list, zero-based -- NOT the `index` a record
+    /// carries and not what activateSlst takes, which are one-based. The body
+    /// says why that distinction is the whole of this function.
+    ///
+    /// bspit's sound plug is the only caller in the game: which of three
+    /// ambients the crater's first record names depends on two variables, and
+    /// the card's script has no way to say so other than this.
+    void overrideCardSound(std::uint16_t slot, std::uint16_t withSlot);
     void playSlst(const rivendata::SoundRec &rec);
     void stopAllAmbient();
     /// Start layer `i` of `rec` on a free slot. Shared by the two paths through
     /// playSlst so the mix and the reporting cannot drift apart.
     void startAmbientLayer(const rivendata::SoundRec &rec, std::size_t i);
     void playEffect(std::uint16_t twavId, int volume);
+
+    /// Play the effect Riven names rather than numbers.
+    /// RivenSoundManager::playCardSound (riven_sound.cpp:73-77): the resource is
+    /// "<this card's id>_<name>_1" among the stack's tWAVs. This is how the
+    /// journals get their page turn, the telescope its clunk and the dome its
+    /// tick -- none of which any script names by id.
+    void playCardSound(const std::string &name, int volume = 255);
+
+    /// The tBMP this card names `name`, or -1. DomeSpit::buildCardResourceName
+    /// (domespit.cpp:231-233); the dome's slider strip is the only user.
+    std::int32_t bitmapIdForName(const std::string &name) const;
+
     void stopEffects();
+    /// True while the one effect slot is still sounding. RivenSoundManager's
+    /// isEffectPlaying (riven_sound.h:86), for the externals that have to wait
+    /// out a sound -- the rebel tunnel's stones are the case that needs it.
+    bool isEffectPlaying() const;
+
+    /// One turn of the inner loop, for an external that has to wait: audio,
+    /// movies and effects keep running, the screen keeps publishing, and nothing
+    /// else happens. ScummVM's externals spin `_vm->doFrame()` for this.
+    ///
+    /// The pointer does NOT move here -- see pumpInteractiveFrame() for the
+    /// loops that need it to.
+    void pumpIdleFrame();
+
+    // --- what a drag command needs ------------------------------------------
+    //
+    // Riven has controls you pull rather than press: the whark elevator's lever,
+    // the dome's five sliders. Each is one external command that does not return
+    // until the button comes up, and that spins a loop of its own in the
+    // meantime. ScummVM can do that because its scripts are queued and
+    // RivenStack::onFrame/onMouseUp skip every dispatch while a queued script is
+    // running (riven_scripts.cpp:137-147, riven_stack.cpp:277-331) -- the pointer
+    // and the button keep moving, and nothing else happens at all.
+    //
+    // pumpInteractiveFrame() is that, exactly: idleFrame() plus the pointer and
+    // the button, and no hit test, no hotspot script, no timer, no queue drain.
+    // It must not dispatch, because the loop is running INSIDE the very hotspot
+    // script that started it.
+
+    void pumpInteractiveFrame();
+
+    /// riven_stack.cpp:316. False after mouseForceUp() until the player lets go
+    /// and presses again.
+    bool mouseIsDown() const { return mouseDown_ && !forcedUp_; }
+
+    /// riven_stack.cpp:318-321. "This press is spent" -- the click that started
+    /// the command is still held, and the loop about to run would otherwise
+    /// count it as the player's answer.
+    void mouseForceUp();
+
+    /// The pointer in Riven's 608x392 coordinates, which is the space every
+    /// hotspot rect and every threshold in the original is written in.
+    int pointerCardX() const;
+    int pointerCardY() const;
+
+    /// Where the button went down, in DS screen pixels
+    /// (riven_stack.cpp:377). DS pixels rather than card ones on purpose: the
+    /// thresholds that read it are compared against a stylus, and a card pixel
+    /// is only 0.42 of one.
+    int dragStartX() const { return dragStartX_; }
+    int dragStartY() const { return dragStartY_; }
+
+    /// The same point in Riven's 608x392 space, for the drags whose thresholds
+    /// the original wrote in card pixels rather than as a feel -- bspit's water
+    /// valve turns on ten of them (bspit.cpp:432-443), and ten card pixels is
+    /// four DS ones. Compare pointerCardX/Y against these and the numbers mean
+    /// what they meant when they were written.
+    int dragStartCardX() const;
+    int dragStartCardY() const;
 
     // Opcodes 28/31/32/33/34 all name a movie by its MLST "code", never by a
     // slot index, so that is what these take.
     void activateMlst(std::uint16_t index, bool andPlay);
     void enableMovie(std::uint16_t code, bool enabled);
     void disableAllMovies();
+    /// RivenVideoManager::closeVideos (riven_video.cpp:151-155). Stop every open
+    /// movie WITHOUT baking its last frame -- which is what separates it from
+    /// disableAllMovies, opcode 29, however alike the names read. See the body.
+    void closeAllMovies();
     void playMovie(std::uint16_t code, bool blocking);
     /// Play the slice of a movie between two times, blocking until it is done.
     ///
@@ -330,6 +470,20 @@ public:
     /// open. RivenVideo::getDuration, for the top-stairs timer (jspit.cpp:589).
     std::uint32_t movieDurationMs(std::uint16_t code) const;
 
+    /// How far into the movie on `code` playback has got, in milliseconds, or 0
+    /// if it is not open. RivenVideo::getTime (riven_video.cpp:106-113).
+    ///
+    /// ospit's cage is the only caller: xbookclick waits out two spans of one
+    /// long movie -- named to it in QuickTime's 1/600 second units -- and the
+    /// player's window to use the trap book is the gap between them.
+    std::uint32_t movieTimeMs(std::uint16_t code) const;
+
+    /// Where the movie on `code` has got to, and how long it is, in frames --
+    /// both -1/0 when nothing is open on that code. The dome's check needs the
+    /// pair together (domespit.cpp:50-64).
+    std::int32_t movieCurrentFrame(std::uint16_t code) const;
+    std::uint32_t movieFrameCount(std::uint16_t code) const;
+
     // --- the card timer -----------------------------------------------------
     //
     // RivenStack's one-slot timer (riven_stack.cpp:381-410). A card that wants
@@ -357,9 +511,30 @@ public:
                      rivendata::ScriptEvent event, bool queue);
     bool runningQueued() const { return runningQueued_; }
 
+    /// RivenScriptManager::stopAllScripts (riven_scripts.cpp:158-162). Abandon
+    /// the rest of every command list currently being walked.
+    ///
+    /// One caller, and it is the reason this exists: ospit's trap-book ending
+    /// runs from a hotspot on the cage card, and by the time xbookclick returns
+    /// the player is somewhere else entirely. The commands after it on that
+    /// hotspot would put them back in the cage.
+    ///
+    /// A flag rather than an exception: the interpreter is plain recursion over
+    /// vectors that live inside the loaded Stack, and unwinding through it is
+    /// exactly what the deferred-navigation machinery exists to avoid. Cleared
+    /// when the outermost list returns, so it cannot leak into the next script.
+    void stopScripts() { stopScripts_ = true; }
+    bool scriptsStopped() const { return stopScripts_; }
+
     /// Screen-update batching. Opcodes 20 and 21.
     void beginScreenUpdate() { ++updateDepth_; }
     void applyScreenUpdate(bool force = false);
+
+    /// RivenGraphics::enableCardUpdateScript (riven_graphics.cpp:789-791). Turn
+    /// off to publish a picture the card's own CardUpdate script would paint
+    /// straight over -- the gallows carriage is the one command that needs it,
+    /// and it turns it back on two lines later.
+    void enableCardUpdateScript(bool enable) { cardUpdateEnabled_ = enable; }
 
     /// Opcode 18. Ask for the next completed screen update to arrive as a slide
     /// or a dissolve rather than instantly. Riven schedules the transition BEFORE
@@ -418,6 +593,23 @@ private:
     bool ensureSlotOpen(std::int32_t slot);
     void closeSlot(std::int32_t slot);
 
+    /// Give every playback slot back, because the card that filled them is gone.
+    ///
+    /// RivenCard::~RivenCard (riven_card.cpp:52-60), whose last three lines are
+    /// clearWaterEffect, clearFliesEffect and closeVideos. resetCardState() has
+    /// always done the first two; this is the third, and leaving it out is what
+    /// let an overlay from one card go on being drawn on the next -- the same
+    /// nineteen-by-twenty-five pixels of a jungle tree turning up on three
+    /// unrelated cards, because nothing between them ever closed the slot.
+    ///
+    /// NOT closeAllMovies(), however alike they read: that one leaves the
+    /// records ASSIGNED so that bspit's boiler can stop its loop and then play
+    /// code 11 without re-activating it (xbchangeboiler). This unassigns, which
+    /// is what makes a code the new card never activated behave the way
+    /// ScummVM's openSlot on a closed video does -- empty, ended, duration
+    /// zero.
+    void releaseCardMovies();
+
     /// Stop a fullscreen movie and put the card back on screen. Both the blocking
     /// and the non-blocking path end here; the non-blocking one used not to,
     /// which left the bottom screen black for good.
@@ -437,8 +629,14 @@ private:
     void playMovieBlocking(std::int32_t slot, bool whole);
 
     /// Draw every LITE overlay that is still playing back onto the card picture,
-    /// after CardSurface::refreshFromClean has taken them all off.
-    void recompositeOverlays();
+    /// after something has written over the rows it sits in --
+    /// CardSurface::refreshFromClean, which takes them all off, or a water
+    /// effect, which erases whatever share of one it happens to cover.
+    ///
+    /// `rows` is the band mask that was overwritten; an overlay outside it is
+    /// left alone, because putting one back costs a blit and the effects ask
+    /// for this four times a second.
+    void recompositeOverlays(std::uint32_t rows = CardSurface::kAllDirty);
     /// Make one overlay's last frame part of the card -- ScummVM's disable().
     void bakeOverlay(MovieSlot &m);
 
@@ -462,6 +660,10 @@ private:
     bool runConsoleCommand(const std::string &line);
 
     void processInput();
+    /// The two halves of processInput() that a drag loop also needs, and the
+    /// only ones -- see pumpInteractiveFrame().
+    void updatePointer(const touchPosition &touch);
+    void updateMouseLatch();
     void pumpMovies();
     /// One engine frame of the card's ambient effects: its water, if it has one
     /// and the player has not turned water off, and its insects.
@@ -533,6 +735,28 @@ private:
     /// Frames the D-pad has been held, for the slow-then-fast nudge.
     int padHeld_ = 0;
 
+    /// Whether anything else has been pressed during the current SELECT hold.
+    ///
+    /// SELECT is the developer chord AND, in debug mode, the command prompt on
+    /// its own -- so the two have to be told apart, and the only thing that
+    /// separates them is whether a second button ever joined in. Latched while
+    /// SELECT is down and read when it comes up, because by then whatever was
+    /// pressed with it has usually been let go of as well. See processInput.
+    bool selectChorded_ = false;
+
+    /// The button, and where it went down. RivenStack's _mouseIsDown and
+    /// _mouseDragStartPosition (riven_stack.h:216-218): kept as members rather
+    /// than as locals in processInput() because an external's wait loop reads
+    /// them while no dispatch is running.
+    bool mouseDown_ = false;
+    bool forcedUp_ = false;
+    int dragStartX_ = 0;
+    int dragStartY_ = 0;
+
+    /// Whether a completed screen update runs the card's CardUpdate script.
+    /// See enableCardUpdateScript(); true everywhere except inside one command.
+    bool cardUpdateEnabled_ = true;
+
     /// The transition opcode 18 asked for, and the guard that keeps
     /// runScheduledTransition out of itself -- it spins idleFrame(), which can
     /// reach applyScreenUpdate again through a LITE movie.
@@ -543,6 +767,14 @@ private:
     /// beside the data rather than in it, because the card graph is const --
     /// it is the converter's output, shared by every visit to the card.
     std::vector<bool> hotspotEnabled_;
+    /// Parallel to card_->hotspots as well: where each one is. Starts as a copy
+    /// of the data's own rects and is only ever different on the marble grid.
+    /// See hotspotRect().
+    std::vector<rivendata::Rect> hotspotRect_;
+    /// SLST records this card has had its sounds replaced on, as zero-based
+    /// {slot, take the sounds of this slot}. Empty on every card but bspit's
+    /// crater. See overrideCardSound().
+    std::vector<std::pair<std::uint16_t, std::uint16_t>> soundOverride_;
     const rivendata::Hotspot *currentHotspot_ = nullptr;
     Mode mode_ = Mode::Card;
     /// The tBMP of the last PLST record that covered the whole card view. Only
@@ -582,12 +814,18 @@ private:
 
     std::vector<rivendata::Command> queued_;
     bool runningQueued_ = false;
+    /// Set by stopScripts(), cleared when the outermost command list returns.
+    bool stopScripts_ = false;
     /// How deep the interpreter is. Non-zero means a command list is being walked
     /// out of the loaded stack's memory, so the stack must not be replaced.
     int scriptDepth_ = 0;
     bool haveStackChange_ = false;
     rivendata::StackId pendingStack_ = rivendata::StackId::None;
-    std::uint32_t pendingGlobalCard_ = 0;
+    std::uint32_t pendingCard_ = 0;
+    /// Whether pendingCard_ is a local card id or an RMAP global one. See
+    /// changeToStackAndCard -- the two are different numbering and there is no
+    /// telling them apart by value.
+    bool pendingCardIsLocal_ = false;
     /// A load asked for from inside a script, held until the interpreter is out
     /// of the stack it is about to replace. See restoreFrom.
     bool haveRestore_ = false;

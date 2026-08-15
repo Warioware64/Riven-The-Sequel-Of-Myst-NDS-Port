@@ -20,18 +20,40 @@
 //   * 163 distinct case-folded names across the eight stacks' NAME 4 resources
 //     (222 entries in total: aspit 2, bspit 48, gspit 29, jspit 52, ospit 17,
 //     pspit 24, rspit 7, tspit 43).
-//   * 18 names that appear in NO stack's NAME 4 list and are referenced only
+//   * 28 names that appear in NO stack's NAME 4 list and are referenced only
 //     from C++ -- ScummVM's initVars defaults (riven_vars.cpp:300-366), the two
 //     "where am I" variables Engine::enterCard writes, this port's own
-//     inventory plumbing, and "azip", which is not a game variable at all: it
-//     is the player's Zip Mode setting, which ScummVM likewise keeps in the
-//     variable map because the card scripts read it (riven.cpp:803). The
-//     converter cannot discover these, which is why this file is hand-
-//     maintained rather than generated.
+//     inventory plumbing, "azip", which is not a game variable at all (it is the
+//     player's Zip Mode setting, which ScummVM likewise keeps in the variable map
+//     because the card scripts read it, riven.cpp:803), and the thirteen at the
+//     end of the list below. The converter cannot discover these, which is why
+//     this file is hand-maintained rather than generated.
+//
+//     The last three of those thirteen are the same case as the marble grid's,
+//     from the other four islands: "gupmoov" (which movie the garden's pins are
+//     rising out of), "gscribetime" (when the player last looked at the
+//     scribe) and "rrichard" (whether Tay's bridge rebel has been seen) are
+//     read by ScummVM's C++ and by nothing in the data, so no NAME 4 list
+//     carries them.
+//
+//     The marble grid's seven are the clearest case of what that half is for.
+//     "tred" through "tviolet" ARE tspit strings -- but they are HOTSPOT names,
+//     NAME 1, and the puzzle reads them as variables as well because ScummVM's
+//     variable map is a std::map that invents an entry for any name asked of it
+//     (tspit.cpp:199 uses the one array of strings for both). "themarble" is not
+//     in the data at all. A closed enum has to be told about all seven, and the
+//     converter will never warn that they are missing, because as far as NAME 4
+//     is concerned they were never there.
 //
 // ORDER IS STABLE and the strings are the contract. Append new names at the end;
 // never renumber, and never edit a string without bumping kSchemaVersion, because
 // Stack::variableIds is serialized as raw integers.
+//
+// An APPEND alone therefore needs no bump, and the static_assert below is a
+// tripwire rather than the rule: nothing already written down changes meaning
+// when the list only grows at the far end. Both halves of the contract rely on
+// that -- a converted stack's variableIds and a save file's variable keys are the
+// same integers they were.
 //
 // Depends only on the standard library -- no <nds.h>, no yas -- for the same
 // reason RivenData.hpp does: the converter and the ROM compile it identically.
@@ -225,7 +247,20 @@ namespace rivendata
     X(TWabrValve,        "twabrvalve")     \
     X(TWaffle,           "twaffle")        \
     X(WaterEnabled,      "waterenabled") \
-    X(AZip,              "azip")
+    X(AZip,              "azip")         \
+    X(JIcons,            "jicons")       \
+    X(JIconOrder,        "jiconorder")   \
+    X(DomeSliders,       "domesliders")  \
+    X(TRed,              "tred")         \
+    X(TOrange,           "torange")      \
+    X(TYellow,           "tyellow")      \
+    X(TGreen,            "tgreen")       \
+    X(TBlue,             "tblue")        \
+    X(TViolet,           "tviolet")      \
+    X(TheMarble,         "themarble")    \
+    X(GUpMoov,           "gupmoov")      \
+    X(GScribeTime,       "gscribetime")  \
+    X(RRichard,          "rrichard")
 
 /// A variable's identity, stable across stacks and across builds of the data.
 ///
@@ -245,7 +280,10 @@ enum class VarId : std::uint16_t
 /// Including Unknown at index 0.
 inline constexpr int kVarCount = static_cast<int>(VarId::kCount);
 
-static_assert(kVarCount == 182, "the variable list changed -- bump kSchemaVersion");
+static_assert(kVarCount == 195,
+              "the variable list changed -- an APPEND is safe and only needs this "
+              "number moved; anything else (a renumber, an edited string) needs "
+              "kSchemaVersion bumped with it");
 
 /// The case-folded on-disc name, or "" for Unknown. The inverse of parseVarName.
 inline const char *varName(VarId v)

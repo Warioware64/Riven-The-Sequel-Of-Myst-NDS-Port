@@ -13,8 +13,11 @@ own copy of Riven into files the DS can read.
 > screen, boots into Riven's own main menu, draws cards, runs the scripts, plays
 > the fullscreen movies with sound, follows hotspots between cards and stacks,
 > zooms into any card at its original resolution, saves to five slots, and keeps
-> a notebook you can draw in. The water effects and most of the per-stack puzzle
-> commands are not there yet. See [Milestones](#milestones).
+> a notebook you can draw in. **Every one of Riven's 115 external commands is
+> implemented** — all eight stacks, which is the telescope and all four endings,
+> the marble grid, the boiler and the Ytram trap, the rebel tunnel, the pin map,
+> the imagers, the trap book, and all five domes. The water effects are what is
+> left. See [Milestones](#milestones).
 
 ## How it relates to the Myst port
 
@@ -150,7 +153,8 @@ That band is the only route to Atrus's journal, in this port as in the original.
 
 **The top screen is the log, over Riven's own splash.** Every diagnostic the
 engine produces goes there: a movie that is not on the card, a card a script
-asked for that does not exist, an external command nobody has written yet. On
+asked for that does not exist, an external command this release carries and the
+port has never heard of. On
 hardware those used to go nowhere, which made every failure look like the game
 simply not doing something. Behind them is `Autorun/AUTORUN.BMP`, the picture the
 CD's autorun shell put behind its buttons — extracted from your copy like
@@ -175,6 +179,14 @@ were. Five slots in `_nds/riven_nds/data/saves/`, listed by island and time. A
 slot that will not read is reported as **damaged** rather than shown as empty,
 because an empty-looking slot gets saved over and the file might be the only copy
 of a game you still want.
+
+The save format is at version 2 and **slots written by an earlier build list as
+damaged**. There is no migration and deliberately so: the archive is not
+self-describing, so the version number is the only thing standing between a new
+build and an old file, and reading one into the wrong fields is worse than
+refusing it. Version 2 adds the frame clock, which Riven's three timed things —
+the sunners, the wharks and the Ytram trap — store their deadline as a reading
+of. Without it, a trap baited before a save was never going to go off again.
 
 **L takes a note, Y opens the notebook.** Riven is a game of written-down things
 — D'ni numerals, which animal goes with which dome sound, a grid of fire marbles
@@ -208,12 +220,26 @@ the setting that unlocks everything above: the stack and card being entered with
 its PLST/HSPT/SLST/MLST counts, a line for every picture, sound, movie and zoom
 twin as it is loaded with the ids and rectangles the scripts asked for, and every
 warning that is otherwise held back. It goes to the console, to `nocashMessage`
-(so an emulator gets it for free) and to `_nds/riven_nds/data/debug.log`.
-**SELECT+L** writes the bottom screen to `shotNNN.bmp`, **SELECT+R** dumps every
-mapped VRAM bank to `vramNNN/`. It is read once at startup, so it takes effect on
-the next boot.
+(so an emulator gets it for free) and to `_nds/riven_nds/data/debug.log` — synced
+to the card line by line, so the log survives the power switch, which is how a DS
+run actually ends.
 
-**SELECT+START is a command prompt**, with the DS keyboard on the touch screen
+With it on, **L** writes the bottom screen to `shotNNN.bmp` and **R** dumps every
+mapped VRAM bank to `vramNNN/`, **at any moment** — during a cutscene, mid
+transition, in the middle of a slider drag. Those are the moments a rendering bug
+lives in, and they are exactly the moments the old `SELECT+L`/`SELECT+R` chords
+could not reach, because only the card loop read them. Taking the bare buttons
+costs the notebook its **L**; **Y** still opens it, and with debug mode off both
+the notebook and the chords behave as they always did. Debug mode is read once at
+startup, so it takes effect on the next boot.
+
+**SELECT is a command prompt** — tap it and let go, in debug mode. Holding it and
+pressing something else is still a chord (a direction replays the card with that
+transition, **A** dissolves it), so the two do not collide: the prompt opens on
+the *release* of a SELECT that nothing joined. **SELECT+START** opens it too, and
+is the spelling that works with debug mode off.
+
+The prompt has the DS keyboard on the touch screen
 and the card still live above it, so what a command did is visible while the next
 one is typed. `card 300` and `stack jspit 155` go somewhere, `var blabopen 1`
 sets a variable **by name** and reads it back, `hotspots` lists every hotspot on
@@ -303,12 +329,18 @@ partial the converter salvages what it can and says how much it lost.
 4. ✅ Converter: card art (`.rpic`) and zoom art (`.rpiz`), water effects, Qt GUI
 5. ✅ DS engine: stills and navigation — boots into aspit card 1, draws the card,
    hit-tests hotspots in original coordinates, changes card and stack
-6. 🔨 Scripts — the whole simple-opcode table is implemented, zip mode (45)
-   included; the per-stack external commands are aspit's menu, books and options,
-   the two tspit opening-cutscene calls and the telescope, the insects (`xflies`,
-   on 112 jungle and garden cards) and the jspit sunners — the three lagoon
-   alerts plus the four idle timers behind them, which is what put a card timer
-   in the engine. The rest report their name and do nothing
+6. ✅ Scripts — the whole simple-opcode table is implemented, zip mode (45)
+   included, and **all 115 external commands across all eight stacks**: every
+   name in every stack's NAME 3 resource, plus the few ScummVM registers that
+   this release's data never calls. That is aspit's menu, both journals and the
+   trap book; Jungle's sunners, rebel tunnel, whark elevator, number game and
+   gallows carriage; Temple's telescope, marble grid and the ending it opens
+   onto; Boiler's lab journal, boiler, Ytram trap and water valve; Garden's pin
+   map, two viewers, whark and scribe; Gehn's office, the cage and the watch;
+   Prison's elevator combination and Catherine; Tay's window and its ending —
+   and all five domes, which are one shared implementation and five lines each.
+   Between them they put a card timer, drag loops, resource-name lookup, movable
+   hotspots, a saved frame clock and a script-abort into the engine
 7. ✅ Audio — `sound/<stack>/<id>.rsnd`, lossless PCM16 where it fits and
    bit-exact ADPCM passthrough where it does not, played on the DS's hardware
    channels with SLST volume and balance

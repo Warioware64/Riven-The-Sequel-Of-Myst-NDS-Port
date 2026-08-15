@@ -67,6 +67,34 @@ std::size_t Archive::resourceCount(const char *type) const
     return resourceIds(type).size();
 }
 
+std::vector<std::pair<std::string, std::uint16_t>> Archive::names(const char *type) const
+{
+    std::vector<std::pair<std::string, std::uint16_t>> out;
+    if (handle_ == nullptr)
+        return out;
+
+    vaht_resource **rs = vaht_resources_open(handle_, type);
+    if (rs == nullptr)
+        return out;
+    for (int i = 0; rs[i] != nullptr; ++i)
+    {
+        const char *const name = vaht_resource_name(rs[i]);
+        if (name == nullptr || name[0] == '\0')
+            continue; // a resource may have no name; most do
+
+        // Folded here, once, because every consumer wants it folded: this
+        // release spells them "339_abigtic_1" and ScummVM asks for "aBigTic".
+        std::string lower(name);
+        for (char &c : lower)
+            if (c >= 'A' && c <= 'Z')
+                c = static_cast<char>(c - 'A' + 'a');
+
+        out.emplace_back(std::move(lower), vaht_resource_id(rs[i]));
+    }
+    vaht_resources_close(rs);
+    return out;
+}
+
 bool Archive::has(const char *type, std::uint16_t id) const
 {
     if (handle_ == nullptr)
@@ -199,6 +227,27 @@ const Archive *ArchiveSet::find(const char *type, std::uint16_t id) const
         if (a.has(type, id))
             return &a;
     return nullptr;
+}
+
+std::vector<std::pair<std::string, std::uint16_t>>
+ArchiveSet::names(const char *type) const
+{
+    std::vector<std::pair<std::string, std::uint16_t>> out;
+    std::vector<std::string> seen;
+
+    // Same priority rule as find(): the first archive to name something owns
+    // that name, so a patch archive's copy wins over the base game's.
+    for (const auto &a : archives_)
+    {
+        for (auto &nv : a.names(type))
+        {
+            if (std::find(seen.begin(), seen.end(), nv.first) != seen.end())
+                continue;
+            seen.push_back(nv.first);
+            out.push_back(std::move(nv));
+        }
+    }
+    return out;
 }
 
 std::vector<std::uint8_t> ArchiveSet::read(const char *type, std::uint16_t id) const

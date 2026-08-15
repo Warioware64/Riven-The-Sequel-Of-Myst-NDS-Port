@@ -277,6 +277,11 @@ bool Engine::runConsoleCommand(const std::string &line)
             mode_ == Mode::Zoom ? "zoom" : "card");
         out("ambient %ld  vars %zu  zips %zu", static_cast<long>(mainAmbientId_),
             vars_.size(), zipDests_.size());
+        // The clock, because it is now saved and because every timed thing in
+        // the game -- the sunners, the wharks, the Ytram trap -- keeps its
+        // deadline as a reading of it. Comparing the two is how you tell a trap
+        // that is waiting from one that will never fire.
+        out("clock %lu frames", static_cast<unsigned long>(frames_));
         return false;
     }
 
@@ -419,9 +424,14 @@ bool Engine::runConsoleCommand(const std::string &line)
             const bool on = i < hotspotEnabled_.size() && hotspotEnabled_[i];
             // Card coordinates, because that is what the data holds; the hit
             // test converts the POINT rather than pre-scaling the rect.
+            //
+            // hotspotRect(i) and not h.rect: on the marble grid they differ,
+            // and the listing is only useful if it says where the hit test
+            // will actually find the thing.
+            const Rect &r = hotspotRect(i);
             out("#%zu %s id%u (%d,%d %dx%d)%s", i, on ? "on " : "off", h.blstId,
-                h.rect.left, h.rect.top, h.rect.right - h.rect.left,
-                h.rect.bottom - h.rect.top, (h.flags & kHotspotZip) != 0 ? " zip" : "");
+                r.left, r.top, r.right - r.left, r.bottom - r.top,
+                (h.flags & kHotspotZip) != 0 ? " zip" : "");
             const std::string name = nameFromList(kHotspotNames, h.nameRes);
             if (!name.empty())
                 out("   %s cur%u", name.c_str(), h.cursor);
@@ -562,6 +572,13 @@ void Engine::runDebugConsole()
     // The pointer is a main-engine sprite, and the main engine is about to be on
     // the other screen. Scope-bound, so every path out of here unwinds it.
     CursorHide cursorGuard{*this};
+
+    // This screen spins idleFrame(), which is where the debug hotkeys are
+    // polled -- so without this, a stray L while typing would photograph the
+    // card and a stray R would write 600 KB to the card mid-keystroke. Nothing
+    // is lost by holding them: `shot` and `vram` are commands here, typed at
+    // the prompt, which is the spelling this screen already offers.
+    DebugLog::HotkeyHold holdHotkeys;
 
     // The keyboard DMAs its palette over these (keyboard.c), and entry 15 is the
     // console's text colour -- so without putting them back, closing the console

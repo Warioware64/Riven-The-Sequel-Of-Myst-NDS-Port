@@ -69,10 +69,27 @@
 //     backgrounds -- so every mapped bank is already in a CPU-readable window
 //     and the dump is a straight copy with no window where the screen is blank.
 //
-// The screenshot and the dump are on SELECT+L and SELECT+R. Myst moved its to
-// console commands because its buttons were taken; SELECT is already this
-// port's developer chord (Engine::processInput) and its shoulder buttons are
-// free.
+// THE SCREENSHOT AND THE DUMP ARE ON BARE L AND BARE R, in debug mode, and on
+// SELECT+L and SELECT+R otherwise.
+//
+// They began on the chords alone, on the argument that SELECT is already this
+// port's developer chord (Engine::processInput) and the shoulder buttons are
+// otherwise the notebook's. Both halves of that turned out to be wrong for the
+// case they exist to serve:
+//
+//   * a chord is two hands on a machine already being held in two hands, and
+//     the frame worth capturing has usually gone by the time the second finger
+//     arrives; and
+//   * the chord was read by Engine::processInput, which only the CARD loop
+//     runs -- so a cutscene, a screen transition and a slider drag were each a
+//     stretch of the game that could not be captured at all. Those are exactly
+//     the stretches a rendering bug lives in.
+//
+// So in debug mode they move to a single button each, polled from every loop
+// the engine has (pollHotkeys). This takes L away from the notebook, which is
+// deliberate: debug mode already replaces the top screen with a trace, and a
+// mode that exists to look at the game closely can afford to spend the button
+// that exists to write in it.
 
 #include <string>
 
@@ -167,15 +184,48 @@ void status(const char *text);
 /// or during a blocking movie still goes away on its own.
 void pumpStatus();
 
-/// SELECT+L: write what is on the bottom screen to <data>/shotNNN.bmp.
+/// Write what is on the bottom screen to <data>/shotNNN.bmp.
 ///
 /// The BgSurface buffer rather than the card's RAM picture, so it captures
 /// whatever actually owns the screen -- a movie frame, the zoom viewer, a menu
 /// -- and not just the card the engine believes is up.
 void screenshot();
 
-/// SELECT+R: write every mapped VRAM bank to <data>/vramNNN/bank<X>.bin.
+/// Write every mapped VRAM bank to <data>/vramNNN/bank<X>.bin.
 void vramDump();
+
+/// Take a screenshot (L) or a VRAM dump (R) if one has just been asked for.
+/// Does nothing at all when debug mode is off.
+///
+/// CALL IT FROM EVERY LOOP. That is the point of it: the engine has three --
+/// the card loop, the idle loop a blocking movie spins, and the interactive
+/// loop a drag spins -- and only the first of them ever ran the input handler,
+/// so a cutscene, a transition and a slider drag were each a stretch of the
+/// game that could not be photographed. Those are the stretches worth
+/// photographing.
+///
+/// Reads the key register directly and keeps its own edge state, so it neither
+/// needs nor disturbs a caller's scanKeys(). The body says why that matters.
+void pollHotkeys();
+
+/// Hold the hotkeys off for as long as a screen that needs L and R ITSELF is up.
+///
+/// The notebook is the one such screen: L and R are its page buttons, and it
+/// spins Engine::idleFrame -- which is exactly where pollHotkeys was put so that
+/// cutscenes could be captured. Without this, paging through notes in debug mode
+/// would take a screenshot per page back and a 600 KB VRAM dump per page
+/// forward.
+///
+/// Counted and scope-bound, the same shape and for the same reason as
+/// Engine::CursorHide: a hand-written on/off pair leaks the held state on an
+/// early return, and these loops have several.
+struct HotkeyHold
+{
+    HotkeyHold();
+    ~HotkeyHold();
+    HotkeyHold(const HotkeyHold &) = delete;
+    HotkeyHold &operator=(const HotkeyHold &) = delete;
+};
 
 } // namespace DebugLog
 } // namespace rivenrt

@@ -122,7 +122,7 @@ namespace
                         static_cast<unsigned>(nameId));
             return;
         }
-        e.changeToStackAndGlobalCard(target, globalCard);
+        e.changeToStackAndCard(target, globalCard);
     }
 
     void runOne(Engine &e, const Command &c)
@@ -374,8 +374,9 @@ void runCommandList(Engine &e, const std::vector<Command> &commands)
         // A command that changed the card has invalidated everything after it:
         // ScummVM's script objects are reference-counted and the rest of the list
         // is simply dropped. Bailing here is the same thing without the
-        // bookkeeping.
-        if (e.quitRequested())
+        // bookkeeping -- and stopScripts() is a command asking for it by name
+        // (Engine::stopScripts; ospit's trap-book ending is the one caller).
+        if (e.quitRequested() || e.scriptsStopped())
             return;
     }
 }

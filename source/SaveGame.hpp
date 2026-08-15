@@ -100,7 +100,8 @@ inline constexpr int kSlotCount = 5;
 ///
 /// Changelog, one line per bump:
 ///   1: first version -- vars, zip destinations, stack and card.
-inline constexpr std::uint16_t kVersion = 1;
+///   2: the frame clock, for the timers that store a deadline in it.
+inline constexpr std::uint16_t kVersion = 2;
 
 /// Everything a running game cannot be put back together without.
 struct SaveState
@@ -130,7 +131,23 @@ struct SaveState
     };
     std::vector<ZipDest> zipDests;
 
-    template <class Ar> void serialize(Ar &ar) { ar &stackId &cardId &vars &zipDests; }
+    /// Engine::clock(), the free-running frame counter.
+    ///
+    /// Not a variable either, and not optional. Riven has three timed things --
+    /// jspit's sunners, gspit's wharks and bspit's Ytram trap -- and every one
+    /// of them stores its deadline as a READING of this clock: `bytramtime` is
+    /// `clock() + N`, not `N`. A save that dropped the clock would restore a
+    /// deadline in the millions against a counter starting at zero, and the trap
+    /// the player set before saving would never go off again. The bug was
+    /// already here, latent, before Boiler Island made it reachable.
+    std::uint32_t clock = 0;
+
+    template <class Ar> void serialize(Ar &ar)
+    {
+        // APPEND ONLY, and stackId/cardId stay first: readSlot's last guard
+        // compares the decoded pair against the raw header.
+        ar &stackId &cardId &vars &zipDests &clock;
+    }
 };
 
 /// What the menu needs to draw a row, read from the seventeen-byte header

@@ -120,10 +120,24 @@ public:
     /// may have nothing new to say for another four published frames.
     void refreshPicture() { liteDirty_ = havePicture_; }
 
+    /// The 8-row blocks this overlay's picture occupies, in
+    /// CardSurface::noteOverlayRows' form. Zero for a FULL movie, or before the
+    /// first frame has arrived.
+    ///
+    /// Unlike compositeInto's return value this does not depend on there being
+    /// anything new to draw: it says where the overlay IS, which is what a
+    /// caller that has just written over part of the card needs in order to ask
+    /// whether it wrote over this one (Engine::pumpEffects).
+    std::uint32_t rowMask() const;
+
     rivendata::VideoProfile profile() const { return file_.profile(); }
     int width() const { return file_.header().width; }
     int height() const { return file_.header().height; }
     std::uint32_t frameCount() const { return file_.frameCount(); }
+    /// The frame currently on screen, or -1 before the first one.
+    /// RivenVideo::getCurFrame (riven_video.cpp:101-104), for the dome's
+    /// "did you click on the golden frame?" test (domespit.cpp:50-64).
+    std::int32_t currentFrame() const { return shown_; }
     /// The movie's frame rate as the converter found it, for a caller that has a
     /// time and needs a frame (Engine::playMovieRange).
     std::uint32_t fpsNum() const { return file_.header().fpsNum; }

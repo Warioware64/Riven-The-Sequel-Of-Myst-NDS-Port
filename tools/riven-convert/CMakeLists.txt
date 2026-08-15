@@ -102,6 +102,7 @@ add_library(riven_convert_core STATIC
     core/src/image/Bmp.cpp
     core/src/image/ImagePipeline.cpp
     core/src/image/Lz77.cpp
+    core/src/image/Marbles.cpp
     core/src/image/TopBg.cpp
     core/src/audio/Ima.cpp
     core/src/audio/Mp2.cpp

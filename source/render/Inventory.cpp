@@ -157,7 +157,7 @@ void Inventory::update(Engine &e)
     // `mouse.y >= 392` (riven_inventory.cpp:194-195) -- the band under the
     // picture -- and kBandTop is that line in DS rows. Without it Atrus's
     // journal sat on the screen for the whole game.
-    const bool hide = blocked || e.pointerY() < kBandTop;
+    const bool hide = blocked || (!forcedVisible_ && e.pointerY() < kBandTop);
 
     if (want != shown_ || hide != hidden_ || blocked != blocked_)
     {
@@ -214,6 +214,16 @@ void Inventory::setForcedHidden(bool on)
         return;
     forcedHidden_ = on;
     dirty_ = true;
+}
+
+void Inventory::setForcedVisible(bool on)
+{
+    if (on == forcedVisible_)
+        return;
+    forcedVisible_ = on;
+    dirty_ = true;
+    // Nothing else to do either way: update() runs every frame and re-derives
+    // hidden_ from this, which is the only thing it changes.
 }
 
 void Inventory::setSuppressed(bool on)

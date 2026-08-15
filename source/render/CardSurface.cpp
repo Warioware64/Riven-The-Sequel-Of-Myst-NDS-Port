@@ -176,6 +176,86 @@ bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
     return true;
 }
 
+bool CardSurface::drawPictureSections(const std::string &path, const Section *sections,
+                                      std::size_t count, std::string &error)
+{
+    if (texels_ == nullptr)
+    {
+        error = "no card surface to draw on";
+        return false;
+    }
+    if (sections == nullptr || count == 0)
+        return true;
+
+    // ONCE, for the whole batch -- the reason this function exists.
+    RpicImage img;
+    if (!loadRpicImage(path, img, error))
+        return false;
+    if (!img.valid())
+    {
+        error = "picture decoded to nothing";
+        return false;
+    }
+
+    bool drewAnything = false;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        const Rect &src = sections[i].src;
+        const Rect &dstCard = sections[i].dst;
+
+        // The source is in the file's own pixels and is clamped to it; the
+        // destination is in card coordinates and is scaled, exactly as
+        // drawPicture does.
+        int sx0 = src.left < 0 ? 0 : src.left;
+        int sy0 = src.top < 0 ? 0 : src.top;
+        int sx1 = src.right > img.width ? img.width : src.right;
+        int sy1 = src.bottom > img.height ? img.height : src.bottom;
+        if (sx1 <= sx0 || sy1 <= sy0)
+            continue;
+
+        int x0 = toDsX(dstCard.left);
+        int y0 = toDsY(dstCard.top);
+        int x1 = toDsX(dstCard.right);
+        int y1 = toDsY(dstCard.bottom);
+        if (x0 < 0)
+            x0 = 0;
+        if (y0 < 0)
+            y0 = 0;
+        if (x1 > kViewW)
+            x1 = kViewW;
+        if (y1 > kViewH)
+            y1 = kViewH;
+        if (x1 <= x0 || y1 <= y0)
+            continue; // a slot that scaled away to nothing
+
+        const int dw = x1 - x0;
+        const int dh = y1 - y0;
+        const int sw = sx1 - sx0;
+        const int sh = sy1 - sy0;
+
+        // Nearest neighbour, and both planes, for the same reasons as
+        // drawPicture: this is card drawing, not an overlay.
+        for (int y = 0; y < dh; ++y)
+        {
+            const int sy = sy0 + (sh == dh ? y : y * sh / dh);
+            const rivendata::Texel *srcRow =
+                img.texels.data() + static_cast<std::size_t>(sy) * img.width;
+            const std::size_t at = static_cast<std::size_t>(y0 + y) * kViewW + x0;
+            Texel *dst = texels_ + at;
+            Texel *keep = clean_ + at;
+            for (int x = 0; x < dw; ++x)
+                dst[x] = keep[x] = srcRow[sx0 + (sw == dw ? x : x * sw / dw)];
+        }
+
+        markRows(y0, dh);
+        drewAnything = true;
+    }
+
+    if (drewAnything)
+        ++generation_;
+    return true;
+}
+
 void CardSurface::noteOverlayRows(std::uint32_t mask)
 {
     overlayRows_ |= mask;

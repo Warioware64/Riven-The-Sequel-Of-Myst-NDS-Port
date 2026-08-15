@@ -113,11 +113,30 @@ void Engine::pumpEffects()
     // (riven_graphics.cpp:772-780); hoisting it to the top of this function
     // would make a setting about ripples silently switch off every firefly in
     // the jungle.
+    std::uint32_t drawn = 0;
     if (water_.active() && vars_.get(VarId::WaterEnabled) != 0)
-        surface_.noteOverlayRows(water_.update(surface_));
+        drawn |= water_.update(surface_);
 
     if (flies_.active())
-        surface_.noteOverlayRows(flies_.update(surface_));
+        drawn |= flies_.update(surface_);
+
+    if (drawn == 0)
+        return;
+    surface_.noteOverlayRows(drawn);
+
+    // AND PUT THE MOVIES BACK ON TOP. An effect copies out of `clean_`, the card
+    // WITHOUT its overlays, so every run that crosses a playing overlay erases
+    // that part of it -- and this runs after pumpMovies() in both loops, so on a
+    // frame where both tick the effect always wins. Nothing else would repair it
+    // either: an overlay redraws itself only when a new frame arrives, at the
+    // same 15 fps the water runs at, so a movie over water (jspit's villagers,
+    // the boats on tspit) would spend its life being wiped the moment it landed.
+    //
+    // The original has the same two writers and resolves them the same way round
+    // -- updateEffects blits _effectScreen and the video manager blits its frames
+    // over the top of it (riven_video.cpp:210-215) -- so the movie is in front of
+    // the ripple there too.
+    recompositeOverlays(drawn);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +225,21 @@ void Engine::enableHotspot(std::uint16_t blstId, bool enabled)
     enableHotspotByIndex(hotspotIndexOf(hotspotByBlstId(blstId)), enabled);
 }
 
+const Rect &Engine::hotspotRect(std::size_t index) const
+{
+    // A rect that is nowhere, for an index that is not a hotspot. Returned by
+    // reference like the real ones, and inverted so that rectUsable() rejects it
+    // -- an out-of-range lookup must not become a hotspot covering the card.
+    static const Rect kNowhere{0, 0, 0, 0};
+    return index < hotspotRect_.size() ? hotspotRect_[index] : kNowhere;
+}
+
+void Engine::setHotspotRect(std::size_t index, const Rect &r)
+{
+    if (index < hotspotRect_.size())
+        hotspotRect_[index] = r;
+}
+
 // ---------------------------------------------------------------------------
 // Pictures
 // ---------------------------------------------------------------------------
@@ -226,6 +260,73 @@ void Engine::drawBitmap(std::uint16_t tbmpId, const Rect &rect)
     // somewhere unexpected looks exactly like one that did not load.
     DebugLog::log("  pic %u -> %d,%d %dx%d", tbmpId, rect.left, rect.top,
                   rect.right - rect.left, rect.bottom - rect.top);
+}
+
+void Engine::drawBitmapSections(std::uint16_t tbmpId, const CardSurface::Section *sections,
+                                std::size_t count)
+{
+    if (!surface_.exists())
+        return;
+
+    std::string err;
+    if (!surface_.drawPictureSections(picPath(tbmpId), sections, count, err))
+        DebugLog::warn("card %u: picture %u: %s", cardId_, tbmpId, err.c_str());
+}
+
+void Engine::drawExtrasSections(const char *name, const CardSurface::Section *sections,
+                                std::size_t count)
+{
+    if (!surface_.exists())
+        return;
+
+    std::string err;
+    if (!surface_.drawPictureSections(global.extrasDir() + name + ".rpic", sections,
+                                      count, err))
+    {
+        // Louder than a stack picture's warning names the id, because there is
+        // no id to name and because a missing extras file is a conversion that
+        // predates it rather than a card asking for something odd.
+        DebugLog::warn("extras/%s.rpic: %s", name, err.c_str());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resources by name
+// ---------------------------------------------------------------------------
+//
+// Riven names a handful of resources instead of numbering them, and the two
+// forms are both "<the current card's id>, an underscore, the name" -- see
+// RivenData.hpp for where the names come from and why they are stored the way
+// they are.
+
+std::int32_t Engine::bitmapIdForName(const std::string &name) const
+{
+    if (card_ == nullptr)
+        return -1;
+    // DomeSpit::buildCardResourceName (domespit.cpp:231-233).
+    const std::string want =
+        std::to_string(cardId_) + "_" + Vars::normalise(name);
+    return stack_.bitmapIdForName(want);
+}
+
+void Engine::playCardSound(const std::string &name, int volume)
+{
+    if (card_ == nullptr)
+        return;
+
+    // RivenSoundManager::playCardSound (riven_sound.cpp:73-77). The trailing
+    // "_1" is Riven's own convention and is part of every name in the archive.
+    const std::string want =
+        std::to_string(cardId_) + "_" + Vars::normalise(name) + "_1";
+    const std::int32_t id = stack_.soundIdForName(want);
+    if (id < 0)
+    {
+        // Worth a line: a name that is not there is either a typo here or a
+        // release that spells it differently, and both are ours to fix.
+        DebugLog::warn("card %u: no sound named \"%s\"", cardId_, name.c_str());
+        return;
+    }
+    playEffect(static_cast<std::uint16_t>(id), volume);
 }
 
 void Engine::activatePlst(std::uint16_t index)
@@ -351,17 +452,72 @@ void Engine::playSlst(const SoundRec &rec)
     }
 }
 
+void Engine::overrideCardSound(std::uint16_t slot, std::uint16_t withSlot)
+{
+    // RivenCard::overrideSound (riven_card.cpp:802-804):
+    //     _soundList[index].soundIds = _soundList[withIndex].soundIds;
+    //
+    // TWO THINGS in that line are easy to get wrong, and both are the reason
+    // this does not simply remap one index onto another.
+    //
+    // The arguments are POSITIONS in the list, zero-based -- not the `index`
+    // field a record carries and not what activateSlst is given. The two are
+    // off by one: getSound() searches for `index`, and Riven numbers records
+    // from 1. So xsoundplug's overrideSound(0, 2) means "the first record takes
+    // the third record's sounds", and an implementation that matched on the
+    // index field would look for record 0, find nothing, and silently do
+    // nothing at all.
+    //
+    // And only the SOUND IDS move. The overridden record keeps its own fade
+    // flags, loop, volume and balances -- so this changes what is heard on the
+    // crater, not how loudly or whether it loops.
+    if (card_ == nullptr || slot >= card_->slst.size()
+        || withSlot >= card_->slst.size())
+    {
+        // ScummVM indexes unchecked here and would corrupt memory; the shipped
+        // data never asks for a slot that is not there, so this only fires on a
+        // card that is not the one the command belongs to.
+        DebugLog::warn("card %u: cannot override SLST slot %u with %u", cardId_, slot,
+                       withSlot);
+        return;
+    }
+
+    for (auto &o : soundOverride_)
+        if (o.first == slot)
+        {
+            o.second = withSlot;
+            return;
+        }
+    soundOverride_.emplace_back(slot, withSlot);
+}
+
 void Engine::activateSlst(std::uint16_t index)
 {
     activatedSlst_ = true;
     if (card_ == nullptr)
         return;
-    for (const SoundRec &s : card_->slst)
-        if (s.index == index)
-        {
-            playSlst(s);
-            return;
-        }
+
+    for (std::size_t i = 0; i < card_->slst.size(); ++i)
+    {
+        const SoundRec &s = card_->slst[i];
+        if (s.index != index)
+            continue;
+
+        // Has this record had its sounds replaced? bspit's crater is the only
+        // place in the game that does it, and it is how the card says "which
+        // ambient this is depends on the grating and the water".
+        for (const auto &o : soundOverride_)
+            if (o.first == i && o.second < card_->slst.size())
+            {
+                SoundRec swapped = s;
+                swapped.soundIds = card_->slst[o.second].soundIds;
+                playSlst(swapped);
+                return;
+            }
+
+        playSlst(s);
+        return;
+    }
     // The same gap activatePlst reports for a picture, and it was silent here.
     // ScummVM treats it as fatal (RivenCard::getSound errors out,
     // riven_card.cpp:792-800); a line is enough, since the only consequence is a
@@ -390,6 +546,116 @@ void Engine::stopEffects()
         effectSlot_ = -1;
     }
 }
+
+bool Engine::isEffectPlaying() const
+{
+    return effectSlot_ >= 0 && RivenAudio::soundPlaying(effectSlot_);
+}
+
+void Engine::pumpIdleFrame() { idleFrame(); }
+
+// ---------------------------------------------------------------------------
+// The pointer, and the loop a drag external spins
+// ---------------------------------------------------------------------------
+
+/// Where the pointer goes this frame. Factored out of processInput() because
+/// pumpInteractiveFrame needs exactly this and nothing else around it.
+void Engine::updatePointer(const touchPosition &touch)
+{
+    const bool touchHeld = (keysHeld() & KEY_TOUCH) != 0;
+    if (touchHeld)
+    {
+        pointerX_ = touch.px;
+        pointerY_ = touch.py;
+    }
+    else
+    {
+        const int pad = keysHeld() & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN);
+        if (pad == 0)
+            padHeld_ = 0;
+        else
+        {
+            // One pixel a frame to start with, four once it is clear the player
+            // means to travel: a 256-pixel screen crossed at one pixel a frame
+            // takes four seconds, and Riven's hotspots are small enough that the
+            // fine speed has to be the default.
+            ++padHeld_;
+            const int step = padHeld_ > 15 ? 4 : 1;
+            if ((pad & KEY_LEFT) != 0)
+                pointerX_ -= step;
+            if ((pad & KEY_RIGHT) != 0)
+                pointerX_ += step;
+            if ((pad & KEY_UP) != 0)
+                pointerY_ -= step;
+            if ((pad & KEY_DOWN) != 0)
+                pointerY_ += step;
+        }
+    }
+    pointerX_ = pointerX_ < 0 ? 0 : (pointerX_ >= kScreenW ? kScreenW - 1 : pointerX_);
+    pointerY_ = pointerY_ < 0 ? 0 : (pointerY_ >= kScreenH ? kScreenH - 1 : pointerY_);
+    cursor_.moveTo(pointerX_, pointerY_);
+}
+
+/// The button, and where it went down. RivenStack::onMouseDown/Move/Up
+/// (riven_stack.cpp:277-312) keep exactly this much state OUTSIDE the
+/// hasQueuedScripts() guard -- the position and the down-latch always update,
+/// and only the script dispatch is skipped -- which is why an external's own
+/// wait loop can read them while every dispatch is suspended.
+void Engine::updateMouseLatch()
+{
+    const bool down = (keysHeld() & (KEY_TOUCH | KEY_A)) != 0;
+
+    if (down && !mouseDown_)
+    {
+        // riven_stack.cpp:281 latches the drag origin in onMouseDown, before the
+        // script runs, and whether or not a hotspot was hit.
+        dragStartX_ = pointerX_;
+        dragStartY_ = pointerY_;
+    }
+    if (!down)
+    {
+        // The other half of onMouseUp (riven_stack.cpp:305-307), and the reason
+        // a drag loop can clear up after itself: it consumes the release frame
+        // with its own scanKeys(), so processInput() never sees `released` and
+        // never gets to reset this.
+        pressedHotspot_ = -1;
+        forcedUp_ = false;
+    }
+    mouseDown_ = down;
+}
+
+void Engine::pumpInteractiveFrame()
+{
+    idleFrame();
+
+    // scanKeys() EXACTLY ONCE per frame: libnds derives keysDown/keysUp from the
+    // difference against the previous scan, so a second call in the same frame
+    // reports no edges at all. This owns the scan; callers read keysDown() and
+    // do not scan again.
+    scanKeys();
+    touchPosition touch;
+    touchRead(&touch);
+    updatePointer(touch);
+    updateMouseLatch();
+}
+
+void Engine::mouseForceUp()
+{
+    // RivenStack::mouseForceUp (riven_stack.cpp:318-321). Not "pretend the
+    // button came up" but "this press is spent": the click that started the
+    // sequence is very likely still held, and every loop below asks
+    // mouseIsDown() as though it were a fresh one.
+    forcedUp_ = true;
+    mouseDown_ = false;
+}
+
+int Engine::pointerCardX() const { return toCardX(pointerX_); }
+
+int Engine::pointerCardY() const { return toCardY(pointerY_ - kViewOffsetY); }
+
+int Engine::dragStartCardX() const { return toCardX(dragStartX_); }
+
+int Engine::dragStartCardY() const { return toCardY(dragStartY_ - kViewOffsetY); }
 
 // ---------------------------------------------------------------------------
 // Movies
@@ -517,6 +783,31 @@ void Engine::closeSlot(std::int32_t slot)
     ms.open = false;
 }
 
+void Engine::releaseCardMovies()
+{
+    for (std::int32_t i = 0; i < kMovieSlots; ++i)
+    {
+        MovieSlot &m = movies_[i];
+
+        // A fullscreen movie owns two of the three background buffers, and the
+        // card was parked in the third. Closing the slot from under that would
+        // leave the movie's last frame on screen with nothing left that knows
+        // how to put the card back, so the takeover is ended properly first --
+        // exactly as the non-blocking path does when a movie runs out
+        // (pumpMovies). Safe when there is no takeover: endMovieTakeover is a
+        // no-op unless a buffer was parked.
+        if (m.open && m.player.isPlaying()
+            && m.player.profile() == VideoProfile::Full)
+            endFullscreenMovie(m);
+
+        closeSlot(i);
+        m.assigned = false;
+        m.enabled = false;
+        m.code = 0;
+        m.movieId = 0;
+    }
+}
+
 void Engine::enableMovie(std::uint16_t code, bool enabled)
 {
     const std::int32_t slot = enabled ? claimSlotForCode(code) : slotForCode(code);
@@ -543,6 +834,26 @@ void Engine::disableAllMovies()
             bakeOverlay(movies_[i]); // opcode 29, same disable() as above
             movies_[i].player.stop();
         }
+    }
+}
+
+void Engine::closeAllMovies()
+{
+    // RivenVideoManager::closeVideos (riven_video.cpp:151-155), which is NOT
+    // disableAllMovies however much the names suggest it. ScummVM has both and
+    // they differ in the one way that matters here: disable() draws the pending
+    // frame and copies it to the screen -- the port's bake -- while close() is
+    // stop() and throw the decoder away, leaving nothing behind.
+    //
+    // So this is "the loop that was running is over", not "freeze it where it
+    // stood". bspit's boiler is the only caller: it stops the boiling water
+    // before playing the transition that replaces it, and a baked frame of the
+    // old state under the new movie is exactly what it does not want.
+    for (std::int32_t i = 0; i < kMovieSlots; ++i)
+    {
+        movies_[i].enabled = false;
+        if (movies_[i].open)
+            movies_[i].player.stop();
     }
 }
 
@@ -642,14 +953,34 @@ void Engine::playMovieSlot(std::int32_t slot, bool blocking, std::uint32_t start
 /// playing and restores card-wide bands. An overlay that has no new frame is
 /// asked for the one it is holding (RvidPlayer::refreshPicture), because at 15
 /// fps "no new frame" lasts four published frames and the hole would be seen.
-void Engine::recompositeOverlays()
+void Engine::recompositeOverlays(std::uint32_t rows)
 {
-    if (!surface_.exists())
+    if (rows == 0 || !surface_.exists())
         return;
     for (MovieSlot &m : movies_)
     {
-        if (!m.open || !m.enabled || !m.player.isPlaying()
+        // FINISHED IS NOT PLAYING, whatever isPlaying() says. A player keeps
+        // playing_ set until something stops it -- the flag means "was started
+        // and not stopped", and finished_ is the one that means "has run out"
+        // -- so without the second test an overlay that reached its last frame
+        // would be pasted back here at every screen update, for ever. It is
+        // ScummVM's `if (video->endOfVideo()) continue;` at the top of
+        // RivenVideoManager::updateMovies (riven_video.cpp:169-176), and it is
+        // what makes a finished overlay VANISH in the original instead of
+        // staying where it stopped.
+        //
+        // An overlay that is meant to outlive its movie says so by being baked
+        // (CardSurface::bakeRect), which puts it in `clean_` where refreshing
+        // cannot take it off -- so nothing that wanted to stay loses anything
+        // here. A looping movie never finishes and so keeps compositing.
+        if (!m.open || !m.enabled || !m.player.isPlaying() || m.player.finished()
             || m.player.profile() != VideoProfile::Lite)
+            continue;
+        // rowMask() and not compositeInto's return value: the question is where
+        // the overlay IS, and an overlay with no new frame to show returns zero
+        // from the latter -- which is exactly the one that needs putting back,
+        // because it has nothing else that would redraw it.
+        if ((m.player.rowMask() & rows) == 0)
             continue;
         m.player.refreshPicture();
         surface_.noteOverlayRows(m.player.compositeInto(surface_.texels()));
@@ -696,6 +1027,11 @@ void Engine::idleFrame()
     // during a blocking movie still expires -- both spin this loop and never
     // reach the other one.
     DebugLog::pumpStatus();
+    // And the same argument for the debug hotkeys, only more so: THIS is the
+    // loop a cutscene, a transition and a blocking movie all spin, and until it
+    // polled them there was no way to photograph any of it. Off unless debug
+    // mode is on.
+    DebugLog::pollHotkeys();
 }
 
 namespace
@@ -786,6 +1122,40 @@ std::uint32_t Engine::movieDurationMs(std::uint16_t code) const
                                       * den / num);
 }
 
+std::uint32_t Engine::movieTimeMs(std::uint16_t code) const
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0 || !movies_[slot].open)
+        return 0;
+    const RvidPlayer &p = movies_[slot].player;
+    const std::int32_t frame = p.currentFrame();
+    const std::uint32_t num = p.fpsNum();
+    if (frame <= 0 || num == 0)
+        return 0;
+    // From the frame on screen rather than from a sample counter: the player
+    // clocks itself on its soundtrack when it has one, so the shown frame IS
+    // where the movie has got to, and deriving the time from it cannot drift
+    // away from what the picture is doing.
+    return static_cast<std::uint32_t>(static_cast<std::uint64_t>(frame) * 1000ull
+                                      * p.fpsDen() / num);
+}
+
+std::int32_t Engine::movieCurrentFrame(std::uint16_t code) const
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0 || !movies_[slot].open)
+        return -1;
+    return movies_[slot].player.currentFrame();
+}
+
+std::uint32_t Engine::movieFrameCount(std::uint16_t code) const
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0 || !movies_[slot].open)
+        return 0;
+    return movies_[slot].player.frameCount();
+}
+
 bool Engine::playMovieUntilClick(std::uint16_t code)
 {
     const std::int32_t slot = slotForCode(code);
@@ -811,16 +1181,14 @@ bool Engine::playMovieUntilClick(std::uint16_t code)
     // here: the click that walked the player onto this card is very likely still
     // held when its CardEnter script reaches this, and without the latch the
     // alert would be cut short by the press that caused it.
-    bool armed = false;
+    mouseForceUp();
+
     bool clicked = false;
     while (ms.player.isPlaying() && !ms.player.finished() && !quit_)
     {
-        idleFrame();
+        pumpInteractiveFrame();
 
-        scanKeys();
-        if (!armed)
-            armed = (keysHeld() & (KEY_TOUCH | KEY_A)) == 0;
-        else if ((keysDown() & (KEY_TOUCH | KEY_A)) != 0)
+        if (mouseIsDown())
         {
             clicked = true;
             break;
@@ -911,7 +1279,14 @@ void Engine::runCommands(const std::vector<Command> &commands, bool queue)
     runCommandList(*this, commands);
     --scriptDepth_;
     if (scriptDepth_ == 0)
+    {
+        // The abandon flag dies with the outermost list, in the same place the
+        // held navigation is applied and for the same reason: this is the one
+        // point at which no interpreter is walking a command vector, so it is
+        // the only point at which "stop" has finished meaning anything.
+        stopScripts_ = false;
         applyDeferredNavigation();
+    }
 }
 
 void Engine::runHandlers(const std::vector<Handler> &handlers, ScriptEvent event, bool queue)
@@ -953,7 +1328,12 @@ void Engine::applyScreenUpdate(bool force)
         return;
 
     runningUpdate_ = true;
-    if (card_ != nullptr)
+    // cardUpdateEnabled_ is NOT runningUpdate_: that one is the re-entrancy
+    // guard, this one is the switch RivenGraphics::enableCardUpdateScript
+    // (riven_graphics.cpp:743, :789-791) gives an external so it can draw one
+    // frame the card's own update script would immediately paint over. Exactly
+    // one command in the game uses it -- the gallows carriage, jspit.cpp:247-249.
+    if (card_ != nullptr && cardUpdateEnabled_)
         runHandlers(card_->scripts, ScriptEvent::CardUpdate, false);
     updateDepth_ = 0;
     runningUpdate_ = false;
@@ -1072,6 +1452,7 @@ bool Engine::changeToStack(StackId id)
 
     card_ = nullptr;
     hotspotEnabled_.clear();
+    hotspotRect_.clear();
 
     const std::string path = global.stacksDir() + stackFileName(id);
     Stack loaded;
@@ -1123,7 +1504,7 @@ bool Engine::changeToCard(std::uint16_t cardId)
     return true;
 }
 
-bool Engine::changeToStackAndGlobalCard(StackId id, std::uint32_t globalCardId)
+bool Engine::changeToStackAndCard(StackId id, std::uint32_t cardId, bool cardIsLocal)
 {
     if (scriptDepth_ > 0)
     {
@@ -1132,17 +1513,22 @@ bool Engine::changeToStackAndGlobalCard(StackId id, std::uint32_t globalCardId)
         // in the vector loading the next stack would destroy.
         haveStackChange_ = true;
         pendingStack_ = id;
-        pendingGlobalCard_ = globalCardId;
+        pendingCard_ = cardId;
+        pendingCardIsLocal_ = cardIsLocal;
         return true;
     }
 
     if (!changeToStack(id))
         return false;
-    const std::int32_t local = stack_.localCardForGlobal(globalCardId);
+
+    if (cardIsLocal)
+        return changeToCard(static_cast<std::uint16_t>(cardId));
+
+    const std::int32_t local = stack_.localCardForGlobal(cardId);
     if (local < 0)
     {
         DebugLog::warn("%s: no card for global id %lu", stackName(id),
-                    static_cast<unsigned long>(globalCardId));
+                    static_cast<unsigned long>(cardId));
         return false;
     }
     return changeToCard(static_cast<std::uint16_t>(local));
@@ -1167,18 +1553,30 @@ void Engine::applyDeferredNavigation()
         return;
     haveStackChange_ = false;
     const StackId id = pendingStack_;
-    const std::uint32_t globalCard = pendingGlobalCard_;
+    const std::uint32_t card = pendingCard_;
+    const bool local = pendingCardIsLocal_;
     // Anything left queued belonged to the stack that is going away.
     queued_.clear();
-    changeToStackAndGlobalCard(id, globalCard);
+    changeToStackAndCard(id, card, local);
 }
 
 void Engine::resetCardState()
 {
-    hotspotEnabled_.assign(card_ != nullptr ? card_->hotspots.size() : 0, false);
-    if (card_ != nullptr)
-        for (std::size_t i = 0; i < card_->hotspots.size(); ++i)
-            hotspotEnabled_[i] = (card_->hotspots[i].flags & kHotspotEnabled) != 0;
+    const std::size_t spots = card_ != nullptr ? card_->hotspots.size() : 0;
+    hotspotEnabled_.assign(spots, false);
+    hotspotRect_.assign(spots, Rect{0, 0, 0, 0});
+    for (std::size_t i = 0; i < spots; ++i)
+    {
+        hotspotEnabled_[i] = (card_->hotspots[i].flags & kHotspotEnabled) != 0;
+        // Back to where the data puts it. A marble the player moved is a
+        // position in a variable; the hotspot that follows it is rebuilt from
+        // that on the way in (TSpit::xt7800_setup), not remembered here.
+        hotspotRect_[i] = card_->hotspots[i].rect;
+    }
+    // A sound override belongs to the card that asked for it, the same way the
+    // hotspot rects do: xsoundplug runs from the crater's load script and says
+    // nothing about the room next door.
+    soundOverride_.clear();
 
     insideHotspot_ = -1;
     pressedHotspot_ = -1;
@@ -1194,6 +1592,11 @@ void Engine::resetCardState()
     // the jungle's fireflies would follow the player indoors.
     water_.clear();
     flies_.clear();
+    // And the third line of the same destructor (riven_card.cpp:59), which was
+    // missing: a movie belongs to the card that activated it just as much as an
+    // effect does. See releaseCardMovies -- without it a lagoon's fish went on
+    // swimming in a nineteen-pixel window on every card after it.
+    releaseCardMovies();
     currentHotspot_ = nullptr;
     queued_.clear();
     updateDepth_ = 0;
@@ -1462,7 +1865,7 @@ void Engine::logCardSummary() const
 bool Engine::boot(const SaveGame::SaveState *restore)
 {
     vars_.startNewGame();
-    zipDests_.clear();
+    clearZipDests();
 
     if (!bgs.create())
     {
@@ -1495,7 +1898,7 @@ bool Engine::boot(const SaveGame::SaveState *restore)
         // -- aspit card 1 reading a half-finished playthrough's state would be
         // a stranger bug than the failed load that caused it.
         vars_.startNewGame();
-        zipDests_.clear();
+        clearZipDests();
     }
 
     if (!changeToStack(kBootStack))
@@ -1549,7 +1952,12 @@ void Engine::processInput()
         // Guarded on SELECT because the developer-chord block is also below this
         // branch and so never runs during zoom -- without the guard, SELECT+L
         // meant as a screenshot would take a note instead.
-        if ((down & KEY_L) != 0 && (held & KEY_SELECT) == 0)
+        //
+        // And guarded on debug mode, which takes L outright: the viewer is one
+        // of the places worth photographing, DebugLog::pollHotkeys has already
+        // done it by the time this runs, and a note taken as well would be a
+        // second answer to one press.
+        if ((down & KEY_L) != 0 && (held & KEY_SELECT) == 0 && !DebugLog::enabled())
         {
             captureNote();
             return;
@@ -1601,27 +2009,47 @@ void Engine::processInput()
     {
         const std::uint32_t down = keysDown();
 
-        // The shoulder buttons, which nothing else in the port uses. Both write
-        // to the card and take long enough to be felt, so they are on the same
-        // chord as the transition replay rather than on a bare press.
-        if ((down & KEY_L) != 0)
+        // Was anything else pressed while SELECT was down? That is the whole of
+        // the difference between a chord and a tap, and it has to be latched
+        // rather than asked at the end: by the time SELECT comes up, whatever
+        // was pressed with it has usually been released too.
+        if ((down & ~static_cast<std::uint32_t>(KEY_SELECT)) != 0)
+            selectChorded_ = true;
+
+        // The shoulder buttons, which nothing else in the port uses bare while
+        // SELECT is held. Both write to the card and take long enough to be
+        // felt, so with debug mode OFF they stay on the same chord as the
+        // transition replay rather than on a bare press.
+        //
+        // With debug mode ON they are not read here at all: pollHotkeys has
+        // them on bare L and R and has already run this frame, from every loop
+        // rather than only from this one. Falling through would take a second
+        // shot from the same press.
+        if (!DebugLog::enabled())
         {
-            DebugLog::screenshot();
-            return;
-        }
-        if ((down & KEY_R) != 0)
-        {
-            DebugLog::vramDump();
-            return;
+            if ((down & KEY_L) != 0)
+            {
+                DebugLog::screenshot();
+                return;
+            }
+            if ((down & KEY_R) != 0)
+            {
+                DebugLog::vramDump();
+                return;
+            }
         }
 
-        // The command prompt. On START because the two shoulder buttons are
-        // taken above and START is otherwise only a cutscene skip -- and it is
-        // the one chord that opens something rather than doing something, which
-        // is what the longest reach on the machine ought to be spent on.
+        // The command prompt, on SELECT+START. Kept even though debug mode now
+        // opens it on SELECT alone (below): this is the spelling that works
+        // with debug mode off, and it is the one already in anyone's fingers.
         if ((down & KEY_START) != 0)
         {
             runDebugConsole();
+            // Same re-derivation as the tap path below, for the same reason:
+            // SELECT is usually let go of INSIDE the prompt, so the release
+            // that would have cleared this latch is never seen here and the
+            // next tap would be swallowed.
+            selectChorded_ = (keysHeld() & KEY_SELECT) != 0;
             return;
         }
 
@@ -1647,12 +2075,60 @@ void Engine::processInput()
         return;
     }
 
+    // SELECT has come up. A TAP -- one that was never part of a chord -- opens
+    // the command prompt, in debug mode only.
+    //
+    // On the RELEASE and not the press, which is what lets one button mean two
+    // things without either getting in the other's way. Opening the prompt the
+    // instant SELECT went down would make every chord above unreachable: the
+    // keyboard would already own the screen before the second finger arrived,
+    // and those chords are themselves debug tools, so debug mode is the last
+    // mode that can afford to lose them. Hold SELECT and press something, and
+    // the chord happens and this does not; tap it and let go, and the prompt
+    // opens.
+    //
+    // The latch is cleared here on every release rather than only on the tap
+    // path, so a chord cannot leave it set and swallow the next tap.
+    if ((keysUp() & KEY_SELECT) != 0)
+    {
+        const bool tapped = !selectChorded_;
+        selectChorded_ = false;
+        if (tapped)
+        {
+            // Self-gating: runDebugConsole returns immediately with debug mode
+            // off, so there is no second test of it here to fall out of step
+            // with the one that matters.
+            runDebugConsole();
+            // THE PROMPT CLOSES ON SELECT AS WELL AS ON B (DebugConsole.cpp),
+            // and the two have to leave this in opposite states:
+            //
+            //   * closed with SELECT -- that press is still held, and its
+            //     release would arrive here as another clean tap and open the
+            //     prompt again, for ever. The hold has to count as spent.
+            //   * closed with B, or by folding the keyboard -- SELECT is long
+            //     since up, and its release was consumed by the prompt's own
+            //     scanKeys rather than seen here. Marking it spent would swallow
+            //     the NEXT tap instead.
+            //
+            // So it is re-derived from the button rather than assumed, using the
+            // state the prompt's own loop just read.
+            selectChorded_ = (keysHeld() & KEY_SELECT) != 0;
+            return;
+        }
+    }
+
     // The notebook, on the two buttons nothing else uses bare.
     //
-    // Below the SELECT block on purpose: SELECT+L is the screenshot and SELECT+R
-    // the VRAM dump, and the block above returns before this, so the chords keep
-    // their meaning and the bare presses get the shoulder buttons and Y.
-    if ((keysDown() & KEY_L) != 0)
+    // Below the SELECT block on purpose: with debug mode off SELECT+L is the
+    // screenshot and SELECT+R the VRAM dump, and the block above returns before
+    // this, so the chords keep their meaning and the bare presses get the
+    // shoulder buttons and Y.
+    //
+    // DEBUG MODE TAKES L. Taking a note is the thing L does for a player, and a
+    // screenshot is the thing it does for whoever is debugging; only one of them
+    // can have the button and debug mode is the mode that says which. Y still
+    // opens the notebook, so nothing already written is out of reach.
+    if ((keysDown() & KEY_L) != 0 && !DebugLog::enabled())
     {
         captureNote();
         return;
@@ -1681,41 +2157,11 @@ void Engine::processInput()
     // A clicks. That is what gives the port hover -- and hover is the only thing
     // Riven's cursor shapes are for, so without it there is no point reading
     // Hotspot::cursor at all.
-    const bool touchHeld = (keysHeld() & KEY_TOUCH) != 0;
-    if (touchHeld)
-    {
-        pointerX_ = touch.px;
-        pointerY_ = touch.py;
-    }
-    else
-    {
-        const int pad = keysHeld() & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN);
-        if (pad == 0)
-            padHeld_ = 0;
-        else
-        {
-            // One pixel a frame to start with, four once it is clear the player
-            // means to travel: a 256-pixel screen crossed at one pixel a frame
-            // takes four seconds, and Riven's hotspots are small enough that the
-            // fine speed has to be the default.
-            ++padHeld_;
-            const int step = padHeld_ > 15 ? 4 : 1;
-            if ((pad & KEY_LEFT) != 0)
-                pointerX_ -= step;
-            if ((pad & KEY_RIGHT) != 0)
-                pointerX_ += step;
-            if ((pad & KEY_UP) != 0)
-                pointerY_ -= step;
-            if ((pad & KEY_DOWN) != 0)
-                pointerY_ += step;
-        }
-    }
-    pointerX_ = pointerX_ < 0 ? 0 : (pointerX_ >= kScreenW ? kScreenW - 1 : pointerX_);
-    pointerY_ = pointerY_ < 0 ? 0 : (pointerY_ >= kScreenH ? kScreenH - 1 : pointerY_);
-    cursor_.moveTo(pointerX_, pointerY_);
+    updatePointer(touch);
+    updateMouseLatch();
 
     // Touch and A are the same click.
-    const bool held = touchHeld || (keysHeld() & KEY_A) != 0;
+    const bool held = mouseDown_;
     const bool pressed = (keysDown() & (KEY_TOUCH | KEY_A)) != 0;
     const bool released = (keysUp() & (KEY_TOUCH | KEY_A)) != 0;
 
@@ -1752,10 +2198,12 @@ void Engine::processInput()
         // bigger one unreachable -- which is most of the menu and both journals.
         for (std::size_t i = 0; i < card_->hotspots.size(); ++i)
         {
-            const Hotspot &h = card_->hotspots[i];
-            if (!hotspotEnabled_[i] || !rectUsable(h.rect))
+            // hotspotRect_ and not the card's own rect: the marble grid moves
+            // its six hotspots as the player plays it (Engine::hotspotRect).
+            const Rect &r = hotspotRect(i);
+            if (!hotspotEnabled_[i] || !rectUsable(r))
                 continue;
-            if (rectContains(h.rect, cardX, cardY))
+            if (rectContains(r, cardX, cardY))
                 hit = static_cast<std::int32_t>(i);
         }
     }
@@ -1951,6 +2399,11 @@ void Engine::frame()
     // Before processInput, so a status raised by a button this frame gets its
     // full hold rather than being ticked once on the frame it appeared.
     DebugLog::pumpStatus();
+    // Before processInput as well, and for a sharper reason: with debug mode on
+    // the hotkeys OWN L and R, and processInput would otherwise take a notebook
+    // page with the same press. idleFrame polls them too, which is what covers
+    // the loops this one never reaches.
+    DebugLog::pollHotkeys();
 
     processInput();
 

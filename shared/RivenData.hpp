@@ -54,7 +54,14 @@ using i32 = std::int32_t;
 /// Bump on ANY change to a struct below, including field order. yas binary
 /// archives are not self-describing: without this a converter/ROM mismatch
 /// deserializes garbage silently instead of failing.
-inline constexpr u16 kSchemaVersion = 3;
+///
+/// AND on a change to RivenVars.hpp that alters what an EXISTING NAME 4 entry
+/// resolves to, because Stack::variableIds is resolved at conversion time: a
+/// name the list did not know is baked in as VarId::Unknown and stays Unknown
+/// however new the ROM is. Appending a name that no stack's NAME 4 carries --
+/// the marble grid's seven are all of that kind -- changes nothing already
+/// written and needs no bump.
+inline constexpr u16 kSchemaVersion = 4;
 
 /// Fixed-size header written raw ahead of the yas payload in stacks/<stack>.bin.
 /// Read it with a plain fread before handing the rest to yas.
@@ -482,6 +489,60 @@ enum NameListKind
     kNameListCount = 5,
 };
 
+// ---------------------------------------------------------------------------
+// Resource names
+// ---------------------------------------------------------------------------
+//
+// A Mohawk archive gives most resources a NAME as well as an id, and Riven's
+// own code looks a few of them up that way: RivenSoundManager::playCardSound
+// asks for "<cardId>_<name>_1" among the tWAVs (riven_sound.cpp:73-77) and
+// DomeSpit::drawDomeSliders for "<cardId>_<name>" among the tBMPs
+// (domespit.cpp:209-210, :231-233). Those are the only two forms in the game,
+// and without them the dome cannot be drawn and no sound the scripts do not
+// name by id can be played.
+//
+// The two halves are stored differently, because they are used differently:
+//
+//   * SOUNDS keep their strings. There are only ~100 per stack, and a lookup
+//     that misses should be able to say what it wanted.
+//   * BITMAPS keep a hash. There are ~1400 per stack -- every piece of card art
+//     is named -- and the runtime only ever asks for two of them, so paying
+//     ~28 KB of resident RAM per stack to store strings nobody reads would be
+//     the wrong trade. Collisions are checked at conversion time, where they
+//     are a build error rather than a wrong picture.
+
+/// A resource whose name the runtime may ask for by string.
+struct NamedRes
+{
+    std::string name; ///< case-folded to lower
+    u16 id = 0;
+
+    template <class Ar> void serialize(Ar &ar) { ar & name & id; }
+};
+
+/// The same, with the name reduced to a hash. Sorted by hash so a lookup is a
+/// binary search and a duplicate is adjacent.
+struct HashedRes
+{
+    u32 hash = 0;
+    u16 id = 0;
+
+    template <class Ar> void serialize(Ar &ar) { ar & hash & id; }
+};
+
+/// FNV-1a, 32 bit, over an ALREADY case-folded name. A free function so the
+/// converter and the ROM cannot disagree about it.
+inline u32 hashResourceName(const std::string &lower)
+{
+    u32 h = 2166136261u;
+    for (const char c : lower)
+    {
+        h ^= static_cast<unsigned char>(c);
+        h *= 16777619u;
+    }
+    return h;
+}
+
 /// One stack: every card, the RMAP global-id table, and the NAME lists.
 /// Stacks are loaded and freed one at a time -- jspit is the worst case at ~814
 /// cards across j_Data1 and j_Data2.
@@ -498,9 +559,50 @@ struct Stack
     /// Entries the enum does not know are VarId::Unknown (RivenVars.hpp).
     std::vector<VarId> variableIds;
 
+    /// The archive's own resource names, for the handful of lookups Riven does
+    /// by name rather than by id. See NamedRes/HashedRes above. Both are sorted:
+    /// `soundNames` by name, `bitmapNames` by hash.
+    std::vector<NamedRes> soundNames;   ///< tWAV
+    std::vector<HashedRes> bitmapNames; ///< tBMP
+
     template <class Ar> void serialize(Ar &ar)
     {
-        ar & id & cards & rmap & names & variableIds;
+        ar & id & cards & rmap & names & variableIds & soundNames & bitmapNames;
+    }
+
+    /// The tWAV id named `lower` (already case-folded), or -1.
+    i32 soundIdForName(const std::string &lower) const
+    {
+        std::size_t lo = 0, hi = soundNames.size();
+        while (lo < hi)
+        {
+            const std::size_t mid = lo + (hi - lo) / 2;
+            if (soundNames[mid].name < lower)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        if (lo < soundNames.size() && soundNames[lo].name == lower)
+            return soundNames[lo].id;
+        return -1;
+    }
+
+    /// The tBMP id named `lower` (already case-folded), or -1.
+    i32 bitmapIdForName(const std::string &lower) const
+    {
+        const u32 want = hashResourceName(lower);
+        std::size_t lo = 0, hi = bitmapNames.size();
+        while (lo < hi)
+        {
+            const std::size_t mid = lo + (hi - lo) / 2;
+            if (bitmapNames[mid].hash < want)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        if (lo < bitmapNames.size() && bitmapNames[lo].hash == want)
+            return bitmapNames[lo].id;
+        return -1;
     }
 
     /// Cards are sorted by id, so this is a binary search. Returns nullptr when

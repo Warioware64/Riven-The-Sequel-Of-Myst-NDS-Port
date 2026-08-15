@@ -58,12 +58,17 @@ namespace
                               "tem_dome"});
         s.zipDests.push_back({static_cast<std::uint8_t>(rivendata::StackId::Bspit), 42,
                               "boiler"});
+        // Big enough that a truncation to 16 bits would show: this is a frame
+        // counter and a long session reaches six figures.
+        s.clock = 0x00BADA55u;
         return s;
     }
 
     bool sameState(const SaveGame::SaveState &a, const SaveGame::SaveState &b)
     {
         if (a.stackId != b.stackId || a.cardId != b.cardId)
+            return false;
+        if (a.clock != b.clock)
             return false;
         if (a.vars != b.vars)
             return false;

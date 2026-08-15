@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct vaht_archive_s;
@@ -45,6 +46,15 @@ public:
 
     /// Whole resource as bytes. Empty on any failure.
     std::vector<std::uint8_t> read(const char *type, std::uint16_t id) const;
+
+    /// Every named resource of `type`, as {lower-cased name, id}, in archive
+    /// order. Resources with no name are skipped -- most have one, but the
+    /// format does not require it (vaht_resource.c:101-141).
+    ///
+    /// Riven looks a few resources up by name rather than by id, and this is
+    /// where those names come from: "339_jsliders.190" is the dome's slider
+    /// strip and "339_abigtic_1" is the tick it makes.
+    std::vector<std::pair<std::string, std::uint16_t>> names(const char *type) const;
 
     vaht_archive_s *raw() const { return handle_; }
 
@@ -111,6 +121,12 @@ public:
 
     /// First archive that has the resource, or nullptr.
     const Archive *find(const char *type, std::uint16_t id) const;
+
+    /// Every named resource of `type` across the set, {lower-cased name, id},
+    /// FIRST ARCHIVE WINS on a repeated name -- the same priority rule as every
+    /// other lookup here, and the same one MohawkEngine::findResourceID applies
+    /// (mohawk.cpp:92-96).
+    std::vector<std::pair<std::string, std::uint16_t>> names(const char *type) const;
 
     std::vector<std::uint8_t> read(const char *type, std::uint16_t id) const;
 

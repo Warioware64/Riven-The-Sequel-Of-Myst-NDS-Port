@@ -18,6 +18,7 @@
 #include "riven/CursorPipeline.hpp"
 #include "riven/Installer.hpp"
 #include "riven/ImagePipeline.hpp"
+#include "riven/Marbles.hpp"
 #include "riven/MovieList.hpp"
 #include "riven/SoundPipeline.hpp"
 #include "riven/TopBg.hpp"
@@ -368,6 +369,30 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                         result.bytesWritten += r.bytes;
                         out.logf(Severity::Info, stage, "%d inventory images", r.cels);
                     }
+
+                    // --- the marbles -------------------------------------
+                    //
+                    // Same archive, same stage, and deliberately not fatal: a
+                    // conversion without them is a Temple Island whose marble
+                    // grid draws nothing, which is worth a line rather than a
+                    // failed run.
+                    stage = "marbles";
+                    std::vector<std::string> marbleWarnings;
+                    const auto m = convertMarbles(extras, root / "extras" / "marbles.rpic",
+                                                  marbleWarnings);
+                    for (const std::string &w : marbleWarnings)
+                        out.warn(stage, w);
+                    if (!m.ok)
+                    {
+                        out.warn(stage, m.error + "; the marble puzzle will draw nothing");
+                    }
+                    else
+                    {
+                        result.extrasWritten += kMarbleCount;
+                        result.bytesWritten += m.bytes;
+                        out.logf(Severity::Info, stage, "%d marbles, %dx%d each",
+                                 kMarbleCount, m.cellW, m.cellH);
+                    }
                 }
 
                 // --- the top-screen background ---------------------------
@@ -483,6 +508,56 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                                          n.c_str());
                             stack.variableIds.push_back(v);
                         }
+                    }
+
+                    // The archive's own resource names, for the few lookups
+                    // Riven does by name -- the dome's slider strip and the
+                    // sounds the scripts do not name by id. See RivenData.hpp
+                    // for why one half keeps strings and the other a hash.
+                    {
+                        for (auto &nv : set.names("tWAV"))
+                            stack.soundNames.push_back(
+                                rivendata::NamedRes{std::move(nv.first), nv.second});
+                        std::sort(stack.soundNames.begin(), stack.soundNames.end(),
+                                  [](const rivendata::NamedRes &a,
+                                     const rivendata::NamedRes &b) { return a.name < b.name; });
+
+                        std::vector<std::string> bitmapNamesForReport;
+                        for (auto &nv : set.names("tBMP"))
+                        {
+                            stack.bitmapNames.push_back(rivendata::HashedRes{
+                                rivendata::hashResourceName(nv.first), nv.second});
+                            bitmapNamesForReport.push_back(std::move(nv.first));
+                        }
+                        // Sort the two together so a duplicate hash can name
+                        // both strings it came from.
+                        std::vector<std::size_t> order(stack.bitmapNames.size());
+                        for (std::size_t i = 0; i < order.size(); ++i)
+                            order[i] = i;
+                        std::sort(order.begin(), order.end(),
+                                  [&](std::size_t a, std::size_t b) {
+                                      return stack.bitmapNames[a].hash
+                                             < stack.bitmapNames[b].hash;
+                                  });
+                        std::vector<rivendata::HashedRes> sorted;
+                        sorted.reserve(order.size());
+                        for (const std::size_t i : order)
+                            sorted.push_back(stack.bitmapNames[i]);
+                        stack.bitmapNames = std::move(sorted);
+
+                        // A 32-bit hash over ~1400 names collides with
+                        // probability ~0.02%, which is small but not zero, and a
+                        // collision would silently draw the wrong picture on the
+                        // device. Here it is a build error naming both culprits.
+                        for (std::size_t i = 1; i < order.size(); ++i)
+                            if (stack.bitmapNames[i].hash == stack.bitmapNames[i - 1].hash)
+                                out.logf(Severity::Error, stage,
+                                         "tBMP name hash collision: \"%s\" and \"%s\"",
+                                         bitmapNamesForReport[order[i - 1]].c_str(),
+                                         bitmapNamesForReport[order[i]].c_str());
+
+                        out.logf(Severity::Info, stage, "%zu sound names, %zu bitmap names",
+                                 stack.soundNames.size(), stack.bitmapNames.size());
                     }
 
                     int damaged = 0;

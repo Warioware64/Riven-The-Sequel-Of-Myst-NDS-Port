@@ -42,6 +42,10 @@ SaveGame::SaveState Engine::buildSaveState() const
     for (const ZipDest &z : zipDests_)
         s.zipDests.push_back({static_cast<std::uint8_t>(z.stack), z.cardId, z.name});
 
+    // The frame counter, because three of Riven's timers keep their deadline as
+    // a reading of it rather than as a duration. See SaveState::clock.
+    s.clock = frames_;
+
     return s;
 }
 
@@ -59,7 +63,7 @@ bool Engine::restoreFrom(const SaveGame::SaveState &s)
     //
     // Held rather than refused, because a refusal would make that button do
     // nothing. applyDeferredNavigation runs it the moment the outermost script
-    // returns, which is the same mechanism changeToStackAndGlobalCard uses and
+    // returns, which is the same mechanism changeToStackAndCard uses and
     // for exactly the same reason (Engine.hpp:76-85).
     if (scriptDepth_ > 0)
     {
@@ -106,6 +110,15 @@ bool Engine::restoreFrom(const SaveGame::SaveState &s)
     queued_.clear();
     haveStackChange_ = false;
 
+    // The inventory strip's forced-hidden flag is script-owned state that is not
+    // a Riven variable, so step 4 cannot restore it and nothing else clears it.
+    // Only xadisablemenuintro sets it, only on aspit, and only for the length of
+    // the opening cutscene -- so loading while that is on screen would otherwise
+    // carry a hidden strip into a game that has no way to put it back.
+    // Reset rather than saved: false is right on every card the player can save
+    // from, and the intro is not one of them.
+    inventory_.setForcedHidden(false);
+
     // The outgoing card is dropped HERE, before the variables are replaced, and
     // that ordering is the whole point of this line.
     //
@@ -137,6 +150,11 @@ bool Engine::restoreFrom(const SaveGame::SaveState &s)
     for (const auto &z : s.zipDests)
         zipDests_.push_back({static_cast<StackId>(z.stackId), z.cardId, z.name});
 
+    // The clock, BEFORE step 6 -- the incoming card's own scripts can arm a
+    // timer on the way in, and a timer armed against the outgoing session's
+    // frame count would fire immediately or never (SaveState::clock).
+    frames_ = s.clock;
+
     // 5. The player's settings win over the save's copy of them.
     //
     // AZip and WaterEnabled are in the variable map because Riven's scripts read
@@ -165,8 +183,9 @@ bool Engine::restoreFrom(const SaveGame::SaveState &s)
             return false;
     }
 
-    DebugLog::log("LOAD stack=%s card=%u vars=%zu zips=%zu", stackName(target),
-                  static_cast<unsigned>(s.cardId), s.vars.size(), s.zipDests.size());
+    DebugLog::log("LOAD stack=%s card=%u vars=%zu zips=%zu clock=%lu", stackName(target),
+                  static_cast<unsigned>(s.cardId), s.vars.size(), s.zipDests.size(),
+                  static_cast<unsigned long>(s.clock));
     return true;
 }
 

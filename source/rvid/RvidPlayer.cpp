@@ -419,6 +419,30 @@ bool RvidPlayer::takeFlip()
     return true;
 }
 
+std::uint32_t RvidPlayer::rowMask() const
+{
+    if (file_.profile() != VideoProfile::Lite || !havePicture_)
+        return 0;
+
+    // The band range, not a row-by-row walk: the picture is a rectangle, so the
+    // blocks it lands in are contiguous and the ends are all that has to be
+    // clipped. Same clip as compositeInto's, which is what makes the two agree
+    // about which bands the overlay owns.
+    int y0 = viewY_;
+    int y1 = viewY_ + height() - 1;
+    if (y0 < 0)
+        y0 = 0;
+    if (y1 >= kViewH)
+        y1 = kViewH - 1;
+    if (y1 < y0)
+        return 0;
+
+    std::uint32_t mask = 0;
+    for (int b = y0 / kRowBand; b <= y1 / kRowBand; ++b)
+        mask |= 1u << b;
+    return mask;
+}
+
 std::uint32_t RvidPlayer::compositeInto(Texel *dst)
 {
     if (dst == nullptr || file_.profile() != VideoProfile::Lite || !havePicture_

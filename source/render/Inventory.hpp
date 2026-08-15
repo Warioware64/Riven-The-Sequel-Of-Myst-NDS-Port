@@ -79,6 +79,20 @@ public:
     /// FOR RIVEN'S SCRIPTS ONLY. See setSuppressed.
     void setForcedHidden(bool on);
 
+    /// The other direction: show the strip even though nothing is pointing at
+    /// it (RivenInventory::forceVisible, riven_inventory.cpp:197-200).
+    ///
+    /// ospit's cage sequence is the only caller in the game and needs exactly
+    /// this: the player has just linked out with the trap book, and the two
+    /// seconds it is held up are how they are told they got it back. There is
+    /// no pointer anywhere near the strip at that moment, and on a DS there
+    /// need not be one at all.
+    ///
+    /// Does NOT beat the reasons the strip is blocked outright -- a cutscene,
+    /// aspit, a port screen. Those are about whether the strip may exist at
+    /// all; this is only about the hover.
+    void setForcedVisible(bool on);
+
     /// Hide it because one of the PORT's own screens is up -- the zoom viewer,
     /// the settings screen -- and put it back afterwards.
     ///
@@ -120,7 +134,8 @@ private:
     NEA_Hw2DOBJAsset *assets_[kMaxItems] = {};
     Item items_[kMaxItems];
     int shown_ = 0;
-    bool forcedHidden_ = false; ///< set by Riven's scripts
+    bool forcedHidden_ = false;  ///< set by Riven's scripts
+    bool forcedVisible_ = false; ///< set by Riven's scripts; beats the hover only
     bool suppressed_ = false;   ///< set by the port's own screens
     /// The strip may not be shown at all: a script, a port screen, aspit or a
     /// cutscene. Separate from hidden_, which adds "and is being pointed at" --

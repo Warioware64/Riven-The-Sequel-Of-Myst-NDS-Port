@@ -76,6 +76,24 @@ public:
     bool drawPicture(const std::string &path, const rivendata::Rect &cardRect,
                      std::string &error);
 
+    /// One piece of a picture: a rectangle of the FILE's own pixels, and where
+    /// on the card (608x392) it goes.
+    struct Section
+    {
+        rivendata::Rect src; ///< in the .rpic's pixels
+        rivendata::Rect dst; ///< in Riven's card coordinates
+    };
+
+    /// Draw several sections of ONE picture, loading and decoding it once.
+    ///
+    /// The batch is the point. The dome's slider strip is drawn twenty-five
+    /// pieces at a time, once per slot, and resetting the sliders redraws it
+    /// about twenty times in a row -- five hundred opens and five hundred
+    /// decodes of the same file if each piece went through drawPicture(). The
+    /// file is on an SD card.
+    bool drawPictureSections(const std::string &path, const Section *sections,
+                             std::size_t count, std::string &error);
+
     /// Fill the picture with black. Marks everything dirty.
     void clear();
 

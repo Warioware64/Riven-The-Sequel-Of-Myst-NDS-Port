@@ -259,6 +259,13 @@ void Engine::runNotebook()
         return;
     }
 
+    // L and R are this screen's page buttons, and in debug mode they are also
+    // the screenshot and the VRAM dump -- which are polled from idleFrame, the
+    // very thing the loop below spins. Held off for as long as the notebook is
+    // up, or paging back would photograph the screen and paging forward would
+    // write 600 KB to the card. See DebugLog::HotkeyHold.
+    DebugLog::HotkeyHold holdHotkeys;
+
     // --- take the screen ---------------------------------------------------
     //
     // The same protocol every port screen follows (MainMenu's ScreenTakeover),
