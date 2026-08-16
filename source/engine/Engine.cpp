@@ -803,11 +803,29 @@ void Engine::releaseCardMovies()
             && m.player.profile() == VideoProfile::Full)
             endFullscreenMovie(m, false);
 
+        // The DECODER goes; the BINDING stays. RivenCard's destructor calls
+        // RivenVideoManager::closeVideos, which is close() on each RivenVideo --
+        // and close() frees the decoder while leaving the object in the manager's
+        // list with its _slot and its _id (riven_video.cpp:324-329). The slot is
+        // still findable afterwards, and RivenVideo::play() reads that as
+        // permission to come back: `if (!_video) load(_id)`.
+        //
+        // Riven DEPENDS on that, and the Moiety icons are where it shows. jspit
+        // 217's stone hotspot runs
+        //
+        //     xcheckicons; Transition; SwitchCard 215; xtoggleicon;
+        //     PlayMovieBlocking 1; RefreshCard
+        //
+        // -- the card change is in the MIDDLE of the list, and the movie played
+        // after it is card 217's, because card 215 activates no MLST at all.
+        // Clearing `code` here made slotForCode fail, so the stone's animation
+        // and the sound that is part of it were both simply dropped: press a
+        // stone and nothing happens.
+        //
+        // What the fish needed (see above) was the movie to STOP, which closeSlot
+        // does. Nothing needed the binding thrown away as well.
         closeSlot(i);
-        m.assigned = false;
         m.enabled = false;
-        m.code = 0;
-        m.movieId = 0;
     }
 }
 
@@ -931,6 +949,18 @@ void Engine::playMovieSlot(std::int32_t slot, bool blocking, std::uint32_t start
     if (!ensureSlotOpen(slot))
         return;
     MovieSlot &ms = movies_[slot];
+
+    // ENABLE, because playing is enabling: opcodes 32 and 33 both call
+    // video->enable() before they play (riven_scripts.cpp), and nothing else
+    // here did. It matters more in this port than in the original, because
+    // `enabled` is what pumpMovies tests before it advances the decoder at all
+    // -- a disabled slot would not just stay invisible, it would never reach its
+    // last frame, and the blocking loop below waits for exactly that.
+    //
+    // The case that needs it is a slot whose binding outlived its card
+    // (releaseCardMovies): the Moiety stones play a movie belonging to the card
+    // the script has just left, and nothing on the way through re-activates it.
+    ms.enabled = true;
 
     // A blocking movie never loops -- it would never return (opcode 32 sets
     // looping off explicitly, riven_scripts.cpp:669-675).
@@ -1557,8 +1587,20 @@ bool Engine::changeToStack(StackId id)
         m.assigned = false;
         m.enabled = false;
     }
+    // The AMBIENT only, which is what riven.cpp:648 stops here and nothing more.
+    //
+    // The effect is deliberately left running, and it has to be: a linking book
+    // plays its sound and changes stack in the same breath. jspit 227's
+    // `linktorebel` hotspot is PlaySound 20, StopSound 2 (the ambient, by the
+    // script's own hand), then the switch that carries the player to Tay -- so
+    // stopping effects here silenced the one sound the whole sequence exists to
+    // make, a frame or two after it started. Every one of the thirteen linking
+    // books is shaped that way.
+    //
+    // Nothing forces the stop, either: an effect streams from a file under
+    // sound/<stack>/, and loading a different stack replaces the CARD GRAPH, not
+    // the sounds on the card. The handle stays valid.
     stopAllAmbient();
-    stopEffects();
 
     card_ = nullptr;
     hotspotEnabled_.clear();
