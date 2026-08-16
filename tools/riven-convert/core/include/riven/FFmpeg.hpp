@@ -113,4 +113,11 @@ private:
 bool runCapture(const std::filesystem::path &exe, const std::vector<std::string> &argv,
                 std::string &out, std::string &error);
 
+/// Look for an executable called `name` on PATH; empty if it is not there.
+///
+/// Exposed because ffmpeg stopped being the only external tool the converter
+/// drives -- CardImage.hpp drives mtools the same way -- and two copies of the
+/// PATH walk, with its per-platform separator and .exe suffix, is one too many.
+std::filesystem::path findOnPath(const std::string &name);
+
 } // namespace riven

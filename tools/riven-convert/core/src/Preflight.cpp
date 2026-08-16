@@ -7,6 +7,7 @@
 
 #include "RivenImage.hpp"
 #include "riven/Archive.hpp"
+#include "riven/CardImage.hpp"
 #include "riven/FFmpeg.hpp"
 
 namespace fs = std::filesystem;
@@ -174,6 +175,26 @@ std::uint64_t estimateOutput(const SourceInfo &info, const Options &opts)
         if (opts.video)
             total += static_cast<std::uint64_t>(s.movies) * kMovieBytes;
     }
+
+    // The ROM is a rounding error against a multi-gigabyte conversion, but it
+    // is the one item here whose size is known exactly rather than estimated,
+    // and leaving it out would make the free-space check disagree with what the
+    // run actually writes.
+    if (opts.copyRom && !opts.romPath.empty())
+    {
+        std::error_code ec;
+        const auto size = fs::file_size(opts.romPath, ec);
+        if (!ec)
+            total += size;
+    }
+
+    // The emulator image is a SECOND copy of everything above, and it exists at
+    // the same time as the folder it was packed from -- so a run that makes one
+    // needs roughly twice the room. Saying so here is the difference between
+    // the free-space check being right and being off by a factor of two.
+    if (opts.makeImage)
+        total += imageSizeFor(total);
+
     return total;
 }
 
@@ -219,6 +240,63 @@ Check checkFFmpeg(const Options &opts)
     return result;
 }
 
+Check checkRom(const Options &opts)
+{
+    if (!opts.copyRom)
+        return {Check::Level::Ok, "Game", "not being copied: only the data is being written"};
+
+    if (opts.romPath.empty())
+    {
+        return {Check::Level::Fail, "Game",
+                "No .nds was named. Point this at the port's ROM, or turn the copy off "
+                "and put it on the card yourself."};
+    }
+
+    std::error_code ec;
+    if (!fs::is_regular_file(opts.romPath, ec))
+    {
+        return {Check::Level::Fail, "Game",
+                "'" + opts.romPath.string() + "' is not a file."};
+    }
+
+    // Extension only, on purpose. A .nds has no magic worth checking -- the
+    // header starts with the game title as plain text -- so anything stricter
+    // would be theatre, and would reject a renamed but perfectly good build.
+    const auto size = fs::file_size(opts.romPath, ec);
+    return {Check::Level::Ok, "Game",
+            opts.romPath.filename().string() + "  (" + humanBytes(ec ? 0 : size)
+                + ") will be copied to the card root"};
+}
+
+Check checkImage(const Options &opts)
+{
+    if (!opts.makeImage)
+        return {Check::Level::Ok, "Emulator image", "not being made"};
+
+    const ImageTools tools = findImageTools();
+    if (!tools.usable())
+    {
+        return {Check::Level::Fail, "Emulator image",
+                "mtools is not installed (" + tools.missing()
+                    + " not found). Install dosfstools and mtools, or turn the image "
+                      "off -- the card folder itself is unaffected either way."};
+    }
+
+    if (opts.imagePath.empty())
+        return {Check::Level::Fail, "Emulator image", "Choose where to write the image."};
+
+    // The image is packed FROM the card folder, so an image inside it would be
+    // asked to copy itself -- and would grow until it filled the disk trying.
+    if (isInside(opts.imagePath, opts.dest))
+    {
+        return {Check::Level::Fail, "Emulator image",
+                "The image is inside the card folder it would be built from. Put it "
+                "somewhere else."};
+    }
+
+    return {Check::Level::Ok, "Emulator image", opts.imagePath.string()};
+}
+
 std::vector<Check> runChecks(const SourceInfo &info, const Options &opts)
 {
     std::vector<Check> checks;
@@ -255,6 +333,10 @@ std::vector<Check> runChecks(const SourceInfo &info, const Options &opts)
 
     // --- the tools ----------------------------------------------------------
     checks.push_back(checkFFmpeg(opts));
+    if (opts.copyRom)
+        checks.push_back(checkRom(opts));
+    if (opts.makeImage)
+        checks.push_back(checkImage(opts));
 
     // --- what to do ---------------------------------------------------------
     if (opts.empty())

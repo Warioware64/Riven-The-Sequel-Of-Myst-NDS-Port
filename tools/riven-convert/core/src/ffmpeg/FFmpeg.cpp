@@ -166,6 +166,11 @@ namespace
 // Locating the binaries
 // ---------------------------------------------------------------------------
 
+fs::path findOnPath(const std::string &name)
+{
+    return onPath(name);
+}
+
 FFmpegPaths findFFmpeg(const fs::path &override)
 {
     FFmpegPaths out;

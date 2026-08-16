@@ -1,6 +1,6 @@
 #include <QApplication>
 
-#include "MainWindow.hpp"
+#include "InstallWizard.hpp"
 
 int main(int argc, char **argv)
 {
@@ -13,7 +13,7 @@ int main(int argc, char **argv)
     QCoreApplication::setApplicationName(QStringLiteral("riven-convert"));
     QCoreApplication::setApplicationVersion(QStringLiteral("0.1"));
 
-    MainWindow window;
-    window.show();
+    InstallWizard wizard;
+    wizard.show();
     return app.exec();
 }

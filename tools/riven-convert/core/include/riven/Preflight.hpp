@@ -99,6 +99,20 @@ std::vector<Check> runChecks(const SourceInfo &info, const Options &opts);
 /// off -- a run with --no-video needs no ffmpeg at all.
 Check checkFFmpeg(const Options &opts);
 
+/// Is the .nds the run is asked to copy actually there?
+///
+/// Its own check for the same reason ffmpeg has one: it is a condition of the
+/// run that has nothing to do with the source archives, so it can be answered
+/// before a scan has ever happened. An Ok note when the copy is off.
+Check checkRom(const Options &opts);
+
+/// Can the emulator image be built, and is it going somewhere sane?
+///
+/// Three ways this fails and all three are cheap to know now: mtools is not
+/// installed, no path was given, or the image was aimed inside the card folder
+/// it is packed from -- which would have it copying itself.
+Check checkImage(const Options &opts);
+
 /// True when no check failed.
 bool checksPass(const std::vector<Check> &checks);
 

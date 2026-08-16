@@ -6,7 +6,9 @@ set(CMAKE_AUTOMOC ON)
 
 qt_add_executable(riven-convert-gui
     main.cpp
-    MainWindow.cpp
+    InstallWizard.cpp
+    WizardPages.cpp
+    Banner.cpp
     ConversionWorker.cpp
 )
 
@@ -34,8 +36,10 @@ install(TARGETS riven-convert-gui
     BUNDLE DESTINATION .
     RUNTIME DESTINATION bin)
 
-# The window is mostly layout; the worker is where the threading contract
-# lives, so that is what gets a test. Needs Qt6::Test for QSignalSpy.
+# The pages are mostly layout, and their one real rule -- when Next lights up --
+# is a call into riven_convert_core, which has its own tests. The worker is where
+# the threading contract lives, so that is what gets a test here. Needs Qt6::Test
+# for QSignalSpy.
 if(BUILD_TESTING)
     find_package(Qt6 6.5 COMPONENTS Test QUIET)
     if(Qt6Test_FOUND)

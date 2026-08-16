@@ -55,6 +55,13 @@ namespace
             "                      movie stage decodes through ffmpeg; without this\n"
             "                      it is looked for on PATH. Not needed with\n"
             "                      --no-video\n"
+            "  --rom <path>        also copy this .nds to the card root, so the card\n"
+            "                      boots. Written last, after every stage, so a card\n"
+            "                      is never left carrying the game without its data\n"
+            "  --image <path>      also pack the finished card into one FAT image an\n"
+            "                      emulator can mount as its SD card. Needs mtools and\n"
+            "                      mkfs.vfat, and room for the image as well as the\n"
+            "                      folder it is packed from\n"
             "  --cards-only        only the card graph -- fast, enough to test navigation\n"
             "  --force             redo assets that are already up to date\n"
             "  --movie-report      list what is inside the movies and exit. Probes\n"
@@ -335,6 +342,29 @@ int main(int argc, char **argv)
             }
             opts.ffmpegPath = argv[i];
         }
+        else if (a == "--rom")
+        {
+            if (++i >= argc)
+            {
+                std::fprintf(stderr, "--rom needs a path\n");
+                return 2;
+            }
+            // Naming the ROM is what asks for it to be copied. There is no
+            // separate --copy-rom: a path with no effect until a second flag
+            // turns it on is a way to think you installed the game and not have.
+            opts.romPath = argv[i];
+            opts.copyRom = true;
+        }
+        else if (a == "--image")
+        {
+            if (++i >= argc)
+            {
+                std::fprintf(stderr, "--image needs a path\n");
+                return 2;
+            }
+            opts.imagePath = argv[i];
+            opts.makeImage = true;
+        }
         else if (a == "--cards-only")
         {
             opts.cards = true;
@@ -435,8 +465,16 @@ int main(int argc, char **argv)
     sink.clearLine();
 
     std::printf("\n%s\n%s\n", result.message.c_str(), result.summary().c_str());
-    std::printf("Wrote %s to %s\n", riven::humanBytes(result.bytesWritten).c_str(),
-                riven::Converter::dataDir(opts.dest).string().c_str());
+    // "to <data dir>" was true when the data directory was everything the run
+    // wrote. It is not any more: bytesWritten now also counts the .nds at the
+    // card root and the emulator image, which is somewhere else entirely.
+    std::printf("Wrote %s\n", riven::humanBytes(result.bytesWritten).c_str());
+    std::printf("  data:  %s\n", riven::Converter::dataDir(opts.dest).string().c_str());
+    if (result.romCopied)
+        std::printf("  game:  %s\n",
+                    (opts.dest / opts.romPath.filename()).string().c_str());
+    if (result.imageMade)
+        std::printf("  image: %s\n", opts.imagePath.string().c_str());
 
     return result.usable() ? 0 : 1;
 }

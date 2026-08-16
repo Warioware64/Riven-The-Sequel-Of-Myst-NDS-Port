@@ -14,6 +14,7 @@
 #include "RivenVideo.hpp"
 #include "riven/Archive.hpp"
 #include "riven/AtomicWrite.hpp"
+#include "riven/CardImage.hpp"
 #include "riven/CardParse.hpp"
 #include "riven/Credits.hpp"
 #include "riven/CursorPipeline.hpp"
@@ -140,15 +141,20 @@ namespace
 
 std::string ConversionResult::summary() const
 {
-    char buf[448];
+    char buf[512];
     std::snprintf(buf, sizeof(buf),
                   "%d stacks, %d cards, %d images, %d zoom twins, %d water effects, "
                   "%d sounds, %d movies (%llu frames), %d cursors, %d inventory images; "
-                  "%d skipped, %d warnings, %d errors",
+                  "%d skipped, %d warnings, %d errors%s",
                   stacksConverted, cardsWritten, imagesWritten, hiresWritten,
                   effectsWritten, soundsWritten, moviesWritten,
                   static_cast<unsigned long long>(videoFrames), cursorsWritten,
-                  extrasWritten, skipped, warnings, errors);
+                  extrasWritten, skipped, warnings, errors,
+                  romCopied && imageMade ? "; the game was copied to the card and an "
+                                           "emulator image was made"
+                  : romCopied ? "; the game was copied to the card"
+                  : imageMade ? "; an emulator image was made"
+                              : "");
     return buf;
 }
 
@@ -1004,6 +1010,71 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
             }
 
             ++result.stacksConverted;
+        }
+
+        // --- the game itself ------------------------------------------------
+        //
+        // Last, and deliberately so. A card that carries the ROM but only half
+        // its data boots into a game that is missing ages; a card that carries
+        // the data but no ROM boots nothing at all and is obviously unfinished.
+        // The second failure is the honest one, so the .nds only lands once
+        // every stage the run was asked for has been through.
+        //
+        // Atomically, like every other output: a copy interrupted at 4 MB of 16
+        // would leave a file the card's loader would try to boot.
+        if (opts.copyRom && !opts.romPath.empty())
+        {
+            stage = "game";
+            cancel.throwIfCancelled();
+
+            std::vector<std::uint8_t> rom;
+            if (!readFileInto(opts.romPath, rom) || rom.empty())
+            {
+                out.error(stage, "could not read " + opts.romPath.string()
+                                     + "; the data is on the card but the game is not");
+            }
+            else
+            {
+                // Into the card ROOT, beside _nds/ rather than inside it: that
+                // is where every DS loader looks for something to boot, and it
+                // is the folder the user chose.
+                const fs::path target = opts.dest / opts.romPath.filename();
+                if (std::string e; !writeFileAtomic(target, rom, e))
+                {
+                    out.error(stage, e);
+                }
+                else
+                {
+                    result.romCopied = true;
+                    result.bytesWritten += rom.size();
+                    out.info(stage, "copied " + opts.romPath.filename().string() + " to "
+                                        + opts.dest.string());
+                }
+            }
+        }
+
+        // --- the emulator image ---------------------------------------------
+        //
+        // After the ROM, so what gets packed is a complete card and not one
+        // missing the thing that boots it.
+        if (opts.makeImage && !opts.imagePath.empty())
+        {
+            stage = "image";
+            cancel.throwIfCancelled();
+
+            const CardImageResult ir = buildCardImage(opts.dest, opts.imagePath,
+                                                      findImageTools(), out, cancel);
+            if (!ir.ok)
+            {
+                out.error(stage, "the emulator image was not made: " + ir.error);
+            }
+            else
+            {
+                result.imageMade = true;
+                result.bytesWritten += ir.bytes;
+                out.info(stage, "packed " + opts.imagePath.string() + " ("
+                                    + humanBytes(ir.bytes) + ")");
+            }
         }
 
         result.outcome = ConversionResult::Outcome::Ok;

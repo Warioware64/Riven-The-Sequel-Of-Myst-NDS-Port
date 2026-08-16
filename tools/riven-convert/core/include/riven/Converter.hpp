@@ -60,6 +60,10 @@ struct ConversionResult
     int warnings = 0;
     int errors = 0;
     std::uint64_t bytesWritten = 0;
+    /// Was the .nds put on the card? Only ever true when Options::copyRom was.
+    bool romCopied = false;
+    /// Was the emulator image packed? Likewise for Options::makeImage.
+    bool imageMade = false;
 
     bool usable() const { return outcome != Outcome::Failed; }
     std::string summary() const;

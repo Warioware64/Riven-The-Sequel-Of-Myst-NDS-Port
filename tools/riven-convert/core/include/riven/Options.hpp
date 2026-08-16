@@ -73,6 +73,32 @@ struct Options
     /// re-run fast.
     bool force = false;
 
+    /// Also put the game itself on the card, not only its data.
+    ///
+    /// The converter's whole job is the contents of _nds/riven_nds/data/, and
+    /// the .nds carrying no game data is exactly what docs/licensing.md
+    /// requires -- but a card with the data and no ROM boots nothing, and
+    /// "now copy the .nds yourself" is the last step a first-time user is left
+    /// to guess. Off by default so nothing is copied that was not asked for;
+    /// the wizard turns it on when it can actually find the ROM.
+    bool copyRom = false;
+
+    /// The .nds to copy when `copyRom`. Never searched for by the core: the
+    /// caller knows where its own build lives and this one does not.
+    std::filesystem::path romPath;
+
+    /// Pack the finished card into one FAT image an emulator can mount.
+    ///
+    /// A DS emulator has no card slot and will not read a directory tree, so
+    /// without this the port is hardware-only. The image is built FROM `dest`
+    /// after every other stage (CardImage.hpp), which means a run that makes one
+    /// needs room for the folder and the image at the same time.
+    bool makeImage = false;
+
+    /// Where that image goes. Must not be inside `dest`, or it would end up
+    /// copying itself.
+    std::filesystem::path imagePath;
+
     /// Restrict the run to these stacks. Empty means every stack found.
     std::set<rivendata::StackId> stacks;
 
@@ -85,10 +111,17 @@ struct Options
     void normalise();
 
     /// True when nothing at all would be produced.
+    ///
+    /// The ROM and the image count, because both are output. Dropping every
+    /// stage but leaving one of them on is what updating an already-converted
+    /// card looks like -- a new build of the port, or an image made from a
+    /// folder that was converted last week -- and rejecting that as "nothing
+    /// selected" would be wrong. Either still needs a readable source: the run
+    /// scans one before anything else.
     bool empty() const
     {
         return !cards && !images && !hires && !water && !audio && !video && !cursors
-            && !extras;
+            && !extras && !copyRom && !makeImage;
     }
 };
 

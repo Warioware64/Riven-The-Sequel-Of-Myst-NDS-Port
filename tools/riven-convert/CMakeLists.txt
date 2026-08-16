@@ -84,6 +84,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(riven_convert_core STATIC
     core/src/AtomicWrite.cpp
+    core/src/CardImage.cpp
     core/src/Converter.cpp
     core/src/Layout.cpp
     core/src/Options.cpp
@@ -173,7 +174,7 @@ endif()
 
 if(BUILD_TESTING)
     foreach(t schema_roundtrip archive atomic_write cards image sound video installer
-              transition topbg resume credits)
+              transition topbg resume credits packaging)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE riven_convert_core)
         add_test(NAME ${t} COMMAND test_${t})
