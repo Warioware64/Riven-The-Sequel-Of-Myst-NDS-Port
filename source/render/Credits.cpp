@@ -159,7 +159,12 @@ void runCredits(Engine &e, std::uint32_t delayMs)
     std::string error;
     if (!loadRpicImage(creditsPath(kFirstId), first, error) || !first.valid())
     {
-        DebugLog::warn("no credits art: %s", error.c_str());
+        // notice(), not warn(): warn is held back with debug mode off, and this
+        // is the one asset whose absence the player meets at the END of a
+        // playthrough with no other explanation for it. Global::ReportOptionalData
+        // says the same thing at boot, which is where it is actually useful.
+        DebugLog::notice("no credits art -- convert again");
+        DebugLog::warn("credits: %s", error.c_str());
         return;
     }
 

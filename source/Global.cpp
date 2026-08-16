@@ -198,6 +198,16 @@ void Global::ReportOptionalData() const
     }
     if (!std::filesystem::exists(cursorsDir(), ec))
         rivenrt::DebugLog::notice("no cursors/ on the card: plain pointer");
+
+    // The credits, and this one is worth a notice for a reason the other two are
+    // not: nothing asks for them until the game has been FINISHED. A card
+    // converted before the credits stage existed rolls nothing after the ending
+    // video and goes straight back to the menu, which is indistinguishable from
+    // the ending being broken -- and the player finds that out once, twenty
+    // minutes into the last sequence in the game. Said at boot instead, where
+    // re-running the converter is still cheap.
+    if (!std::filesystem::exists(extrasDir() + "credits", ec))
+        rivenrt::DebugLog::notice("no credits art: convert again for the ending");
 }
 
 const char *Global::DataStatusTitle(DataStatus s)
