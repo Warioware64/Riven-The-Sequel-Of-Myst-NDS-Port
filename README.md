@@ -13,8 +13,9 @@ own copy of Riven into files the DS can read.
 > screen, boots into Riven's own main menu, draws cards, runs the scripts, plays
 > the fullscreen movies with sound, follows hotspots between cards and stacks,
 > zooms into any card at its original resolution, saves to five slots, and keeps
-> a notebook you can draw in. **Every one of Riven's 115 external commands is
-> implemented** — all eight stacks, which is the telescope and all four endings,
+> a notebook you can draw in. **Every one of Riven's 131 external commands is
+> implemented** — all eight stacks, which is the telescope, every ending and the
+> credits roll behind them,
 > the marble grid, the boiler and the Ytram trap, the rebel tunnel, the pin map,
 > the imagers, the trap book, and all five domes. The water effects are what is
 > left. See [Milestones](#milestones).
@@ -196,7 +197,17 @@ colours, with an eraser that removes whole strokes rather than painting over
 them. **L works inside the zoom viewer too**, which is where you usually want it
 — you opened the full-resolution view to read something — and there it captures
 all 192 rows rather than the card view's 165, so the page is exactly what was on
-screen. Notes live in `_nds/riven_nds/data/notes/` and are **global, not part of a
+screen.
+
+**L works at any moment**, in fact — during a cutscene, mid transition, in the
+middle of a slider drag. It used to be read only by the card loop, so the whole
+of Gehn's speech and every second of a marble being dragged onto a square were
+stretches of the game no note could be taken of, which are exactly the stretches
+the game is asking you to remember something. Taking one costs a fifth of a
+second of SD write, so a cutscene's soundtrack will skip; that is the price of
+being able to take one there at all.
+
+Notes live in `_nds/riven_nds/data/notes/` and are **global, not part of a
 save slot**: what you wrote down is knowledge you keep whichever game you load.
 Twenty-four pages, and the notebook says when it is full rather than quietly
 dropping the oldest one.
@@ -225,13 +236,14 @@ to the card line by line, so the log survives the power switch, which is how a D
 run actually ends.
 
 With it on, **L** writes the bottom screen to `shotNNN.bmp` and **R** dumps every
-mapped VRAM bank to `vramNNN/`, **at any moment** — during a cutscene, mid
-transition, in the middle of a slider drag. Those are the moments a rendering bug
-lives in, and they are exactly the moments the old `SELECT+L`/`SELECT+R` chords
-could not reach, because only the card loop read them. Taking the bare buttons
-costs the notebook its **L**; **Y** still opens it, and with debug mode off both
-the notebook and the chords behave as they always did. Debug mode is read once at
-startup, so it takes effect on the next boot.
+mapped VRAM bank to `vramNNN/`, at the same any-moment reach the note has, and
+for the same reason: those are the moments a rendering bug lives in, and the old
+`SELECT+L`/`SELECT+R` chords could not reach them because only the card loop read
+them. So debug mode does not change *when* **L** works — it changes *what* **L**
+does, swapping the note for the screenshot. **Y** still opens the notebook either
+way, so nothing already written is out of reach, and with debug mode off the
+chords still mean what they always did. Debug mode is read once at startup, so it
+takes effect on the next boot.
 
 **SELECT is a command prompt** — tap it and let go, in debug mode. Holding it and
 pressing something else is still a chord (a direction replays the card with that
@@ -243,8 +255,10 @@ The prompt has the DS keyboard on the touch screen
 and the card still live above it, so what a command did is visible while the next
 one is typed. `card 300` and `stack jspit 155` go somewhere, `var blabopen 1`
 sets a variable **by name** and reads it back, `hotspots` lists every hotspot on
-the card with its rectangle and whether it is enabled, and `vars`, `zips`,
-`sound`, `movie`, `save`, `load`, `notes`, `shot` and `vram` do what they say.
+the card with its rectangle and whether it is enabled, `timer` names the card
+timer that is armed and counts down the frames until it fires, and `vars`,
+`zips`, `sound`, `movie`, `save`, `load`, `notes`, `shot` and `vram` do what they
+say.
 TAB completes, the D-pad's up and down walk the history, **B** closes. Debug mode
 only — the keyboard writes over palette entries the top-screen picture uses.
 
@@ -330,7 +344,7 @@ partial the converter salvages what it can and says how much it lost.
 5. ✅ DS engine: stills and navigation — boots into aspit card 1, draws the card,
    hit-tests hotspots in original coordinates, changes card and stack
 6. ✅ Scripts — the whole simple-opcode table is implemented, zip mode (45)
-   included, and **all 115 external commands across all eight stacks**: every
+   included, and **all 131 external commands across all eight stacks**: every
    name in every stack's NAME 3 resource, plus the few ScummVM registers that
    this release's data never calls. That is aspit's menu, both journals and the
    trap book; Jungle's sunners, rebel tunnel, whark elevator, number game and
@@ -339,6 +353,10 @@ partial the converter salvages what it can and says how much it lost.
    map, two viewers, whark and scribe; Gehn's office, the cage and the watch;
    Prison's elevator combination and Catherine; Tay's window and its ending —
    and all five domes, which are one shared implementation and five lines each.
+   Every ending now rolls the credits behind it (extras.MHK's tBMP 302-320,
+   scrolled by the background hardware rather than by copying the screen), and
+   the debug console's `endings` command fires each ending's branch in turn and
+   reports which one it chose.
    Between them they put a card timer, drag loops, resource-name lookup, movable
    hotspots, a saved frame clock and a script-abort into the engine
 7. ✅ Audio — `sound/<stack>/<id>.rsnd`, lossless PCM16 where it fits and

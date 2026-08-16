@@ -9,24 +9,33 @@
 // opens a journal -- which is why xaatrusopenbook and atrusBookPage in
 // Externals.cpp have been written and unreachable.
 //
-// WHERE IT GOES, and this is a real departure from the original. The card view
-// is 256x165 centred in a 256x192 screen, so there are two 13-row letterbox
-// bands, and the lower one is where the strip lives. That band is 14 rows where
-// the original's strip is 44, and 44 scaled by 256/608 would be 18 -- but the
-// items themselves scale to about 8x10 pixels at that ratio, which no stylus can
-// hit. So the mapping is deliberately not literal: the icons are drawn at a size
-// a person can touch, spaced across the band, and each takes the whole width of
-// its share of it. Their horizontal ORDER and rough position still come from the
-// original's rects, so the trap book is still on the right.
+// WHERE IT GOES. The card view is 256x165 centred in a 256x192 screen, so there
+// are two 13-row letterbox bands, and the lower one is where the strip lives.
+// That band is 14 rows where the original's strip is 44.
 //
 // The top screen was the other candidate and cannot work: it is not a touch
 // screen. Shrinking the card view to make room for a true 44-row strip would
 // throw away a tenth of every picture in the game for three icons.
+//
+// THE ART AND THE TOUCH TARGET ARE TWO DIFFERENT RECTS, and separating them is
+// what lets the books be drawn at Riven's own sizes and positions
+// (RivenInventory.hpp). An earlier version of this file conflated them: the
+// icons were blown up to a size a stylus could hit and each was given its whole
+// share of the band to be hit in, which with one book held meant the ENTIRE
+// bottom 14 rows of the touchscreen opened Atrus's journal -- so a tap aimed at
+// a step-down hotspot at the base of the picture, or a stylus drag that happened
+// to end low, linked you out of the card. Now the art is 8x11 where Riven's is
+// 18x24 in a 608-wide screen, and the touch rect is kInvTouchW wide around it.
+//
+// Engine::processInput adds the other half of that guard: a book opens only if
+// the press AND the release land on the same one, so nothing that starts on the
+// card can end in the strip.
 
 #include <cstdint>
 
 #include "RivenCursor.hpp"
-#include "RivenData.hpp" // the view geometry the band is measured against
+#include "RivenData.hpp"      // the view geometry the band is measured against
+#include "RivenInventory.hpp" // Riven's own strip rects, scaled
 #include "global_header.hpp"
 #include "render/RcurFile.hpp"
 
@@ -123,7 +132,13 @@ private:
     {
         std::uint16_t id = 0;
         NEA_Hw2DOBJ *obj = nullptr;
-        int x = 0;      ///< sprite left edge
+        /// Where the art is inside the cel, from the .rcur. The books do not
+        /// fill their cels and the touch rect is centred on the art, not on the
+        /// sprite.
+        int artLeft = 0;
+        int artW = 0;
+        bool inLayout = false; ///< drawn at all in the layout now held
+        int x = 0;             ///< sprite left edge
         int hitLeft = 0;
         int hitRight = 0;
     };
@@ -133,7 +148,11 @@ private:
     RcurFile file_;
     NEA_Hw2DOBJAsset *assets_[kMaxItems] = {};
     Item items_[kMaxItems];
-    int shown_ = 0;
+    /// Which of Riven's three arrangements is up: 1, 2 or 3 books. Not a bitmask
+    /// of what is held, because the original does not place a book independently
+    /// of the others -- the books MOVE when one is added (RivenInventory.hpp).
+    /// 0 until update() has run once.
+    int layout_ = 0;
     bool forcedHidden_ = false;  ///< set by Riven's scripts
     bool forcedVisible_ = false; ///< set by Riven's scripts; beats the hover only
     bool suppressed_ = false;   ///< set by the port's own screens

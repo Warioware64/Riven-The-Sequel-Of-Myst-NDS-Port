@@ -57,7 +57,14 @@ struct RcurCel
     /// (100/101/102). Self-describing either way, so one reader serves both and
     /// the runtime asks for what the card data already names.
     std::uint16_t id;
-    std::uint8_t hotX; ///< hot point inside the cel, already scaled
+    /// A cursor's hot point inside the cel, already scaled.
+    ///
+    /// An INVENTORY cel has no hot point and uses these for the art's top-left
+    /// corner inside the cel instead. The books do not fill their cel and are
+    /// not centred in it -- each sits where Riven's own rect puts it in the
+    /// 44-row strip (RivenInventory.hpp) -- so the runtime cannot re-derive the
+    /// offset from drawW/drawH and is told it.
+    std::uint8_t hotX;
     std::uint8_t hotY;
     /// The opaque extent inside the cel. The inventory needs it to centre a
     /// touch rect on art that does not fill its cel; a cursor ignores it.
@@ -67,7 +74,13 @@ struct RcurCel
 };
 static_assert(sizeof(RcurCel) == 8, "RcurCel must be 8 bytes");
 
-inline constexpr std::uint16_t kCursorVersion = 1;
+/// Bumped to 2 when hotX/hotY took on their inventory meaning. A version-1 set
+/// carries 0 there, which reads as "the art is in the cel's top-left corner"
+/// and is not -- so the touch rects would sit ten columns left of the books.
+/// Refusing the old file instead costs a stale card its cursors and its strip
+/// until the converter is re-run, which both sides already survive and log, and
+/// both stages take seconds.
+inline constexpr std::uint16_t kCursorVersion = 2;
 
 /// The palette split. Riven's 19 cursors share one palette in riven.exe and use
 /// 85 entries of it; the three inventory books use fewer still. Both stay near
@@ -86,8 +99,11 @@ inline constexpr int kExtrasPaletteMax = 127;
 /// and the smallest that keeps the hand readable.
 inline constexpr int kCursorCel = 16;
 
-/// The inventory books are wider than they are tall (24x36, 18x24, 22x12 in
-/// extras.MHK) and live in a 14-row letterbox band, so they get their own shape.
+/// The inventory books live in a 14-row letterbox band, so they get their own
+/// cel shape: wide enough for the widest book at the widest layout, and exactly
+/// as tall as the tallest. What goes INSIDE the cel -- the size each book is
+/// drawn at and where it sits -- is RivenInventory.hpp's business, because it
+/// comes from Riven's own strip rects and not from the tBMPs' own dimensions.
 inline constexpr int kInvCelW = 32;
 inline constexpr int kInvCelH = 16;
 

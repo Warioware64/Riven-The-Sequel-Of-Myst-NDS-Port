@@ -379,7 +379,7 @@ namespace
 
         const std::uint32_t next = e.movieDurationMs(30)
                                    + static_cast<std::uint32_t>(randomBetween(0, 60)) * 1000;
-        e.installTimer(catherineViewerIdleTimer, next);
+        e.installTimer(catherineViewerIdleTimer, next, "gspit imager");
     }
 
     /// GSpit::catherineViewerIdleTimer (gspit.cpp:410-441).
@@ -453,7 +453,8 @@ namespace
 
         e.activatePlst(8);
         e.installTimer(catherineViewerIdleTimer,
-                       static_cast<std::uint32_t>(randomBetween(10, 20)) * 1000);
+                       static_cast<std::uint32_t>(randomBetween(10, 20)) * 1000,
+                       "gspit imager");
     }
 
     /// GSpit::xglview_prisonoff (gspit.cpp:491-507).

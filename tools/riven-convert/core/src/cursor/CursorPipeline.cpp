@@ -4,6 +4,7 @@
 #include <cstring>
 #include <map>
 
+#include "RivenInventory.hpp"
 #include "riven/Archive.hpp"
 #include "riven/AtomicWrite.hpp"
 #include "riven/PeCursors.hpp"
@@ -357,19 +358,17 @@ CursorResult convertInventory(const fs::path &extrasMhk, const fs::path &out,
             continue;
         }
 
-        // Fit inside the cel, never enlarge: these are 24x36, 18x24 and 22x12,
-        // and blowing the small one up to fill the cel would make the three
-        // books different scales from each other.
+        // Riven's strip rect decides the size and the shape, NOT the tBMP: the
+        // original stretches each image into a fixed rect, and the three images
+        // are three different shapes from the rects they land in (tBMP 102 is
+        // 22x12 on disc and 20x11 on screen). Fitting each tBMP to the cel
+        // instead gave the three books three different scales and put Catherine's
+        // journal, a sliver in Riven, out as the widest thing on the strip.
+        // RivenInventory.hpp derives all of this and says why.
         const int w = image.width();
         const int h = image.height();
-        int drawW = w, drawH = h;
-        if (drawW > kInvCelW || drawH > kInvCelH)
-        {
-            const double scale =
-                std::min(static_cast<double>(kInvCelW) / w, static_cast<double>(kInvCelH) / h);
-            drawW = std::max(1, static_cast<int>(w * scale));
-            drawH = std::max(1, static_cast<int>(h * scale));
-        }
+        const int drawW = invDrawW(id);
+        const int drawH = invDrawH(id);
 
         // The art is opaque throughout: Riven fills the strip black behind it
         // (riven_inventory.cpp:82-88) and the DS band is the 3D clear colour,
@@ -387,17 +386,22 @@ CursorResult convertInventory(const fs::path &extrasMhk, const fs::path &out,
             snapToSourceColours(scaledRgb, scaledOpaque, sourceColours);
         }
 
+        // Not centred in the cel: each book keeps its own gap to the bottom of
+        // Riven's strip, because the books are not level with each other there.
+        // The offset goes in hotX/hotY -- an inventory cel has no hot point and
+        // the runtime cannot re-derive this from drawW/drawH.
+        const int offX = invDrawOffX(id);
+        const int offY = invDrawOffY(id);
+
         RcurSourceCel cel;
         cel.id = id;
-        cel.hotX = 0;
-        cel.hotY = 0;
+        cel.hotX = static_cast<std::uint8_t>(offX);
+        cel.hotY = static_cast<std::uint8_t>(offY);
         cel.drawW = drawW;
         cel.drawH = drawH;
         cel.rgb.assign(static_cast<std::size_t>(kInvCelW) * kInvCelH * 3, 0);
         cel.opaque.assign(static_cast<std::size_t>(kInvCelW) * kInvCelH, 0);
 
-        const int offX = (kInvCelW - drawW) / 2;
-        const int offY = (kInvCelH - drawH) / 2;
         for (int y = 0; y < drawH; ++y)
             for (int x = 0; x < drawW; ++x)
             {

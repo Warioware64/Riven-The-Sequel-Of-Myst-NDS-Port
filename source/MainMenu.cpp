@@ -6,6 +6,7 @@
 #include "DebugLog.hpp"
 #include "Global.hpp"
 #include "SaveGame.hpp"
+#include "ScreenTakeover.hpp"
 #include "Settings.hpp"
 #include "engine/Engine.hpp"
 #include "global_header.hpp"
@@ -106,118 +107,13 @@ namespace
         }
     };
 
-    /// Wait for the vblank window and spend it the way the engine does: the flip
-    /// the last redraw asked for is committed FIRST, before any of this frame's
-    /// drawing (Engine::flushUploads).
-    ///
-    /// It used to be the other way round -- draw, then requestFlip and vblank in
-    /// one breath -- which put the priority-swap register write after a 128 KB
-    /// clear and a screenful of glyphs, well into active display. The swap then
-    /// took effect part way down the screen.
-    void frame()
-    {
-        NEA_WaitForVBL(static_cast<NEA_UpdateFlags>(0));
-        bgs.vblank();
-    }
-
-    /// True when the port's screens can be drawn at all.
-    bool usable() { return bgs.exists() && textLayer.ready(); }
-
-    /// Put the pointer away, or bring it back. setVisible only raises a flag --
-    /// it is Cursor::flush that writes OAM, and nothing is calling flush while
-    /// a menu owns the frame, so this has to.
-    void showPointer(bool on)
-    {
-        Cursor &c = engine.cursor();
-        if (!c.exists())
-            return;
-        c.setVisible(on);
-        c.flush();
-    }
-
-    /// The same for the inventory strip, which is sprites too and would
-    /// otherwise float over a settings screen opened from Riven's own Options
-    /// button. setSuppressed and not setForcedHidden: that flag belongs to the
-    /// scripts (Inventory.hpp).
-    void showInventory(bool on)
-    {
-        Inventory &inv = engine.inventory();
-        if (!inv.exists())
-            return;
-        inv.setSuppressed(!on);
-        inv.flush();
-    }
-
-    /// How many port screens are stacked on the display, and whether the
-    /// outermost one found a game running. File-static because the nesting is
-    /// between two separate calls, not inside one.
-    int g_screenDepth = 0;
-    bool g_screenInGame = false;
-
-    /// Taking the display away from the card view, and giving it back.
-    ///
-    /// Every port screen does the same eight things in the same order, and two
-    /// of them were bugs before commit 1f4daf8: a buffer written past kViewH has
-    /// to be handed back with resetBuffer, and the inventory strip has to be put
-    /// away with setSuppressed rather than setForcedHidden, which belongs to
-    /// Riven's own scripts (Inventory.hpp).
-    ///
-    /// COUNTED, and that is the point of making it a guard rather than a pair of
-    /// functions. The in-game menu opens the settings screen, which is a port
-    /// screen opening a port screen; beginMovieTakeover is idempotent but
-    /// endMovieTakeover is not, so the inner screen closing would hand the card
-    /// back while the outer one was still drawing over it. Only the outermost
-    /// takes and returns the display.
-    ///
-    /// Scope-bound for the reason CursorHide is (Engine.hpp): these screens have
-    /// early returns, and a hand-written take/release pair leaks the display on
-    /// every one of them.
-    struct ScreenTakeover
-    {
-        ScreenTakeover()
-        {
-            if (g_screenDepth++ > 0)
-                return;
-            // The card view, if there is one, is on the front buffer and must
-            // survive: these screens are reachable mid-game, and the card has to
-            // come back afterwards without being reloaded. Same trick a
-            // fullscreen movie uses (BgSurface.hpp:94-100).
-            g_screenInGame = engine.booted();
-            if (g_screenInGame)
-                bgs.beginMovieTakeover();
-            bgs.setLetterbox(false);
-            showPointer(false);
-            showInventory(false);
-        }
-
-        ~ScreenTakeover()
-        {
-            if (--g_screenDepth > 0)
-                return;
-            bgs.setLetterbox(true);
-            if (g_screenInGame)
-            {
-                // Every buffer but the one holding the parked card. The text is
-                // opaque and was drawn on all 192 rows, so the rows below the
-                // card view have to be handed back transparent or the next
-                // vertical pan would slide black through the view.
-                for (int b = 0; b < BgSurface::kBuffers; ++b)
-                    if (b != bgs.parkedBuffer())
-                        bgs.resetBuffer(b);
-
-                (void)bgs.endMovieTakeover();
-                engine.surface().invalidateAll();
-                engine.applyScreenUpdate(true);
-                showPointer(true);
-            }
-            // Outside the branch: the strip is suppressed on the way in whether
-            // or not a game is running, so it has to be released either way.
-            showInventory(true);
-        }
-
-        ScreenTakeover(const ScreenTakeover &) = delete;
-        ScreenTakeover &operator=(const ScreenTakeover &) = delete;
-    };
+    // The screen guard and its four helpers live in ScreenTakeover.hpp now: the
+    // credits roll is a port screen too, and it wanted the same eight things in
+    // the same order. These are the spellings this file already used.
+    inline void frame() { screenFrame(); }
+    inline bool usable() { return screenUsable(); }
+    inline void showPointer(bool on) { screenShowPointer(on); }
+    inline void showInventory(bool on) { screenShowInventory(on); }
 
     /// Where a picker's one line of explanation goes: between the title and the
     /// first row, in the gap kFirstY already leaves.

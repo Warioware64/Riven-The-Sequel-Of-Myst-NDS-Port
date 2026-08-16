@@ -47,7 +47,7 @@ namespace
         // trap uses them: the frame counter is in the save file and a wall clock
         // is not.
         e.vars().set(VarId::RVillageTime, e.clock() + Engine::msToFrames(next));
-        e.installTimer(rebelPrisonWindowTimer, next);
+        e.installTimer(rebelPrisonWindowTimer, next, "rspit window");
     }
 
     /// RSpit::xrwindowsetup (rspit.cpp:81-112). Run from the window card's load
@@ -60,7 +60,7 @@ namespace
         if (e.clock() < villageTime)
         {
             const std::uint32_t remaining = (villageTime - e.clock()) * 1000 / 60;
-            e.installTimer(rebelPrisonWindowTimer, remaining);
+            e.installTimer(rebelPrisonWindowTimer, remaining, "rspit window");
             return;
         }
 
@@ -84,7 +84,7 @@ namespace
         // reset it to 0 a moment later, so a stamp would be overwritten anyway
         // (rspit.cpp:106-108, which notes the consequence -- returning to the
         // window twice does not reinstall the timer from the leftover).
-        e.installTimer(rebelPrisonWindowTimer, next);
+        e.installTimer(rebelPrisonWindowTimer, next, "rspit window");
     }
 
 } // namespace
@@ -107,9 +107,15 @@ bool runRspitExternal(Engine &e, const std::string &key, const std::uint16_t *ar
         // Gehn trapped he thanks you for showing him the rebel age and leaves
         // you to die, and without him the rebels burn the book. ScummVM tells
         // them apart only to pass a different frame-count override for the
-        // Polish release's credits (rspit.cpp:42-56), which is the one thing
-        // this port's runEndGame does not do.
-        runEndGame(e, 1);
+        // Polish release's credits (rspit.cpp:42-56).
+        //
+        // The distinction is kept even though this port does not honour the
+        // override, because it costs a branch and the alternative is a call
+        // site that has quietly lost the one thing that made two endings two:
+        // see runEndGame on why the number is carried rather than dropped.
+        const std::uint32_t frameCountOverride =
+            e.vars().get(VarId::AGehn) == 4 ? 712u : 0u;
+        runEndGame(e, 1, 1500, frameCountOverride);
         return true;
     }
 

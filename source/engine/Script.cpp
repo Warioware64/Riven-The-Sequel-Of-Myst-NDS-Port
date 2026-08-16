@@ -296,13 +296,17 @@ namespace
             e.stopAllAmbient();
             break;
 
-        // 38: delay an opcode until a movie reaches a time. Every use in the
-        // shipped game delays an activateSLST (riven_scripts.cpp:700-715), so the
-        // ambient it was waiting to start is started now instead. The difference
-        // is a sound cue arriving early rather than a card that never gets one.
+        // 38: hold an opcode back until a movie has run for a given time
+        // (riven_scripts.cpp:699-715). Five arguments: the movie code, the delay
+        // as a HIGH and a LOW halfword, then the opcode and its one argument.
+        //
+        // The high word is not decoration -- ospit card 2 stores 79000 ms and
+        // 105800 ms into Gehn's office sequence, neither of which fits in
+        // sixteen bits.
         case Op::StoreMovieOpcode: // 38
-            if (static_cast<Op>(arg(c, 3)) == Op::ActivateSLST)
-                e.activateSlst(arg(c, 4));
+            e.storeMovieOpcode(arg(c, 0),
+                               (static_cast<std::uint32_t>(arg(c, 1)) << 16) | arg(c, 2),
+                               arg(c, 3), arg(c, 4));
             break;
 
         case Op::ActivatePLST: // 39

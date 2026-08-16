@@ -121,7 +121,7 @@ namespace
             }
             e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
         }
-        e.installTimer(sunnersTopStairsTimer, timerTime);
+        e.installTimer(sunnersTopStairsTimer, timerTime, "jspit sunners top");
     }
 
     /// JSpit::sunnersMidStairsTimer (jspit.cpp:600-637). Codes 2, 3 and 4 with
@@ -153,7 +153,7 @@ namespace
             }
             e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
         }
-        e.installTimer(sunnersMidStairsTimer, timerTime);
+        e.installTimer(sunnersMidStairsTimer, timerTime, "jspit sunners mid");
     }
 
     /// JSpit::sunnersLowerStairsTimer (jspit.cpp:639-668).
@@ -182,7 +182,7 @@ namespace
             }
             e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
         }
-        e.installTimer(sunnersLowerStairsTimer, timerTime);
+        e.installTimer(sunnersLowerStairsTimer, timerTime, "jspit sunners lower");
     }
 
     /// JSpit::sunnersBeachTimer (jspit.cpp:670-703). The odd one out: the beach
@@ -214,7 +214,7 @@ namespace
             }
             e.vars().set(VarId::JSunnerTime, e.clock() + Engine::msToFrames(timerTime));
         }
-        e.installTimer(sunnersBeachTimer, timerTime);
+        e.installTimer(sunnersBeachTimer, timerTime, "jspit sunners beach");
     }
 
     /// JSpit::xjlagoon700_alert (jspit.cpp:487-500). Mid-staircase: the sunners
@@ -465,16 +465,21 @@ namespace
         Engine::CursorHide hide{e};
         e.playMovie(2, false);
 
-        // The original queues a sound part-way through the ride with the stored
-        // movie opcode, and says that is a TODO (jspit.cpp:388). By the clock is
-        // the same result: RvidPlayer has no "how far in are you", so the frame
-        // counter stands in -- the same one Engine::delay counts.
-        const std::uint32_t cue = e.clock() + Engine::msToFrames(3333);
+        // Off the MOVIE's clock, not the engine's. ScummVM tests
+        // `secondVideo->getTime() > 3333` (jspit.cpp:393) -- and note that its
+        // own comment right above says it would rather use the stored movie
+        // opcode, so this loop stays hand-rolled: no script stores anything for
+        // this card, and opcode 38 would have nothing to run here.
+        //
+        // The two clocks agree only while nothing costs a frame. A dropped frame
+        // puts the engine's ahead of the picture and so the sound in front of the
+        // moment it belongs to; movieTimeMs is derived from the frame actually on
+        // screen and cannot drift away from it.
         bool played = false;
         while (!e.movieEnded(2) && !e.quitRequested())
         {
             e.pumpIdleFrame();
-            if (!played && e.clock() >= cue)
+            if (!played && e.movieTimeMs(2) > 3333)
             {
                 // getCard()->playSound(1, false) is an SLST activate, not an
                 // effect (riven_card.cpp:785-790).
@@ -855,16 +860,16 @@ void installJspitCardTimer(Engine &e)
     switch (e.globalCardId(e.cardId()))
     {
     case 0x77d6: // Sunners, top of stairs
-        e.installTimer(sunnersTopStairsTimer, 500);
+        e.installTimer(sunnersTopStairsTimer, 500, "jspit sunners top");
         break;
     case 0x79bd: // Sunners, middle of stairs
-        e.installTimer(sunnersMidStairsTimer, 500);
+        e.installTimer(sunnersMidStairsTimer, 500, "jspit sunners mid");
         break;
     case 0x7beb: // Sunners, bottom of stairs
-        e.installTimer(sunnersLowerStairsTimer, 500);
+        e.installTimer(sunnersLowerStairsTimer, 500, "jspit sunners lower");
         break;
     case 0xb6ca: // Sunners, shoreline
-        e.installTimer(sunnersBeachTimer, 500);
+        e.installTimer(sunnersBeachTimer, 500, "jspit sunners beach");
         break;
     default:
         break;

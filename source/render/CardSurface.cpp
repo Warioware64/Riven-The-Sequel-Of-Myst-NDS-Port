@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "data/ImageFile.hpp"
+#include "tonccpy.h" // reading a background buffer back out of VRAM
 
 using namespace rivendata;
 
@@ -115,13 +116,31 @@ bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
         return false;
     }
 
+    // THE RECTANGLE'S TOP-LEFT CORNER, AND THE PICTURE'S OWN SIZE. Not the
+    // rectangle's other two edges: copyImageToScreen ignores them and blits the
+    // image at its own size (riven_graphics.cpp:367-381), and Riven ships 96 PLST
+    // records whose rectangle disagrees with the bitmap it names -- gspit card
+    // 266's viewer among them, where a 188x196 picture of Catherine is filed
+    // under a 207x242 rectangle. Stretching to the rectangle made those wrong.
+    //
+    // The size comes from the file because only the converter saw it: the .rpic
+    // holds a picture resampled to min(kViewW, sourceWidth), so a 188-wide
+    // overlay is still 188 texels and a 608-wide still is 256 (RivenImage.hpp).
+    //
+    // Clipping the right edge to the card is ScummVM's "clip the width to fit on
+    // the screen. Fixes some images."
+    int right = cardRect.left + img.srcWidth;
+    if (right > kCardW)
+        right = kCardW;
+    const int bottom = cardRect.top + img.srcHeight;
+
     // The rectangle is in Riven's original coordinates; scaling it here rather
     // than in the converter is what keeps one scale constant in the whole port
     // (RivenData.hpp:23-29).
     int x0 = toDsX(cardRect.left);
     int y0 = toDsY(cardRect.top);
-    int x1 = toDsX(cardRect.right);
-    int y1 = toDsY(cardRect.bottom);
+    int x1 = toDsX(right);
+    int y1 = toDsY(bottom);
     if (x1 <= x0 || y1 <= y0)
     {
         error = "picture's destination rectangle is empty";
@@ -141,9 +160,10 @@ bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
 
     // Nearest neighbour. The common case is a 1:1 copy -- a full-card still is
     // already exactly 256x165 -- and where it is not, the picture is a small
-    // overlay whose converted size does not match the card scale
-    // (ImagePipeline.cpp:247-255). Resampling it properly would mean a second
-    // filter on the DS for a case the eye cannot resolve at this size.
+    // overlay the converter left at its source size (ImagePipeline.cpp:334-343),
+    // so this is the card-to-DS reduction it never had. Resampling it properly
+    // would mean a second filter on the DS for a case the eye cannot resolve at
+    // this size.
     //
     // BOTH PLANES, in the one loop. This is a script drawing, so it belongs to
     // the card and has to reach `clean_`; it also has to be seen now, so it has
@@ -313,6 +333,34 @@ void CardSurface::bakeRect(int x, int y, int w, int h)
         std::memcpy(clean_ + at, texels_ + at, bytes);
     }
     ++generation_;
+}
+
+void CardSurface::adoptBuffer(int buf)
+{
+    if (texels_ == nullptr || buf < 0 || buf >= BgSurface::kBuffers)
+        return;
+
+    // A buffer row is a card row -- both are kViewW wide and the layers rest at
+    // the letterbox offset so that bitmap row r IS card row r (BgSurface.hpp) --
+    // so the picture area copies as one run with no per-row stride to walk.
+    static_assert(BgSurface::kBufW == kViewW,
+                  "a buffer row must be a card row for this to be one copy");
+    const Texel *src = BgSurface::pixels(buf);
+    tonccpy(texels_, src, kPlaneBytes);
+    // BOTH planes: this frame is the card now, not something laid over it, so it
+    // has to survive refreshFromClean the way a drawing does.
+    std::memcpy(clean_, texels_, kPlaneBytes);
+
+    // Nothing is on top any more. The fullscreen movie covered the whole screen,
+    // and whatever an overlay had written into texels_ before it went away with
+    // the pixels just overwritten -- leaving those rows marked would have the
+    // next refresh try to take back a frame that no longer exists.
+    overlayRows_ = 0;
+    ++generation_;
+
+    for (int b = 0; b < BgSurface::kBuffers; ++b)
+        dirty_[b] = kAllDirty;
+    dirty_[buf] = 0; // this one IS the card; sending it back would be a copy to itself
 }
 
 void CardSurface::publish(BgSurface &bg, int buf)

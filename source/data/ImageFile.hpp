@@ -11,10 +11,11 @@
 //
 // A .rpic is NOT always the size of the card view. The converter scales a
 // picture to min(kViewW, sourceWidth) and keeps its aspect
-// (ImagePipeline.cpp:247-255), so a full-card still comes out 256x165 while a
-// small overlay tBMP keeps its own pixels. Where a picture goes and how big it
-// is on the card is the PLST record's business, not the file's, which is why the
-// caller passes a destination rectangle rather than assuming one.
+// (ImagePipeline.cpp:334-343), so a full-card still comes out 256x165 while a
+// small overlay tBMP keeps its own pixels. That is why srcWidth/srcHeight are in
+// the header and are read out here: how big a picture is ON THE CARD is the
+// source tBMP's size, and the resampled size no longer tells you it. Where it
+// goes is the PLST record's top-left corner.
 //
 // The zoom twin (.rpiz, 8bpp indices + a 256-entry RGB555 palette) is read here
 // too, by loadRpizImage. TWO things want it and they are not both zooms: the
@@ -42,16 +43,28 @@ namespace rivenrt
 inline constexpr int kMaxRpicW = 256;
 inline constexpr int kMaxRpicH = 1024;
 
+/// There is deliberately no bound on srcWidth/srcHeight to match these. The
+/// card would be the obvious one and it is wrong: bspit ships five 800x25 tBMPs
+/// (364-368, `278_bgehnnrs_a`..`_e`) that are wider than Riven's own screen, and
+/// a cap of 608 would refuse to load art the converter had just written. The
+/// bounds above exist because width/height size an allocation; the source size
+/// only ever becomes a destination rectangle, and drawPicture clips that on both
+/// axes, so a nonsense value costs nothing but a picture in the wrong place.
+
 /// A .rpic as it is on the card.
 struct RpicImage
 {
     int width = 0;
     int height = 0;
+    /// The source tBMP's size, in Riven's 608x392 card coordinates: how big the
+    /// picture is where it is drawn, as opposed to how many texels say so.
+    int srcWidth = 0;
+    int srcHeight = 0;
     std::vector<rivendata::Texel> texels;
 
     bool valid() const
     {
-        return width > 0 && height > 0
+        return width > 0 && height > 0 && srcWidth > 0 && srcHeight > 0
             && texels.size() >= static_cast<std::size_t>(width) * height;
     }
 };

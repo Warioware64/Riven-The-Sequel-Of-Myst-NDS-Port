@@ -91,6 +91,7 @@
 // mode that exists to look at the game closely can afford to spend the button
 // that exists to write in it.
 
+#include <cstdint>
 #include <string>
 
 namespace rivenrt
@@ -208,6 +209,21 @@ void vramDump();
 /// needs nor disturbs a caller's scanKeys(). The body says why that matters.
 void pollHotkeys();
 
+/// The ten face and shoulder buttons, straight out of REG_KEYINPUT and already
+/// inverted -- a set bit is a button that is DOWN.
+///
+/// Here rather than in a corner of DebugLog.cpp because Engine::pollNoteHotkey
+/// now needs the same thing for the same reason, and the reason is the whole
+/// point: every loop in the engine calls one of these pollers, and they
+/// disagree about who calls scanKeys(). A second scanKeys() in one frame
+/// computes its edge against the held mask the FIRST one stored, so it reports
+/// nothing pressed and eats the caller's own B/START. Reading the register is
+/// two instructions and cannot interfere with anything.
+///
+/// A poller pairs this with an edge latch OF ITS OWN. Sharing one latch between
+/// two pollers would mean whichever ran first consumed the press.
+std::uint32_t rawKeys();
+
 /// Hold the hotkeys off for as long as a screen that needs L and R ITSELF is up.
 ///
 /// The notebook is the one such screen: L and R are its page buttons, and it
@@ -226,6 +242,16 @@ struct HotkeyHold
     HotkeyHold(const HotkeyHold &) = delete;
     HotkeyHold &operator=(const HotkeyHold &) = delete;
 };
+
+/// Is a HotkeyHold alive?
+///
+/// For Engine::pollNoteHotkey, which polls the SAME button from the SAME loops
+/// and therefore needs suppressing in exactly the same places -- the notebook
+/// pages with L, and a note taken while paging would be a note of the notebook.
+/// A reader on this counter rather than a second one of its own: two counters
+/// would be two things to remember to hold, and the one that got forgotten
+/// would be forgotten at the one moment it mattered.
+bool hotkeysHeld();
 
 } // namespace DebugLog
 } // namespace rivenrt

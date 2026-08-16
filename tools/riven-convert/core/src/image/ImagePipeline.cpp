@@ -213,7 +213,8 @@ std::vector<Texel> downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH
     return out;
 }
 
-std::vector<std::uint8_t> encodeRpic(const std::vector<Texel> &texels, int w, int h)
+std::vector<std::uint8_t> encodeRpic(const std::vector<Texel> &texels, int w, int h, int srcW,
+                                     int srcH)
 {
     std::vector<std::uint8_t> out;
     const std::size_t pixelBytes = texels.size() * sizeof(Texel);
@@ -225,6 +226,8 @@ std::vector<std::uint8_t> encodeRpic(const std::vector<Texel> &texels, int w, in
     hdr.height = static_cast<std::uint16_t>(h);
     hdr.compression = static_cast<std::uint8_t>(rivendata::ImageCompression::None);
     hdr.dataBytes = static_cast<std::uint32_t>(pixelBytes);
+    hdr.srcWidth = static_cast<std::uint16_t>(srcW);
+    hdr.srcHeight = static_cast<std::uint16_t>(srcH);
 
     out.resize(sizeof(hdr) + pixelBytes);
     std::memcpy(out.data(), &hdr, sizeof(hdr));
@@ -340,7 +343,10 @@ ImageResult convertBitmapPixels(const BitmapPixels &px, std::uint16_t id,
             dstH = 1;
 
         const auto texels = downscaleToTexels(rgb, px.width, px.height, dstW, dstH);
-        const auto bytes = encodeRpic(texels, dstW, dstH);
+        // The SOURCE size travels with the file. dstW/dstH are what this filter
+        // produced; px.width/px.height are what the card thinks the picture is,
+        // and the two only agree for art the reduction left alone.
+        const auto bytes = encodeRpic(texels, dstW, dstH, px.width, px.height);
         if (!writeFileAtomic(rpicPath, bytes, res.error))
             return res;
         res.rpicBytes = bytes.size();

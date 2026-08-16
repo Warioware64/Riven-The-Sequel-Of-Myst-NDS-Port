@@ -108,6 +108,22 @@ public:
     /// restores this rest position at the end of one.
     void setLetterbox(bool on);
 
+    /// Rest the layers at an arbitrary row, so screen row r shows buffer row
+    /// (y + r) mod kBufH.
+    ///
+    /// ONE CALLER, and it is what a 256x256 buffer behind a 192-row window is
+    /// for: the credits roll (render/Credits.cpp) scrolls by moving this and
+    /// writing the ONE row that has just come into view at the bottom, rather
+    /// than shifting a screenful of pixels every frame the way ScummVM's
+    /// RivenGraphics::updateCredits does. The buffer is a ring because the
+    /// hardware wraps it, so 4700 rows of credits pass through 256 rows of VRAM
+    /// at 512 bytes a step.
+    ///
+    /// Setting it, like setLetterbox, is only safe while no transition is
+    /// running -- vblank() owns the scroll registers during one and puts them
+    /// back at the letterbox rest position at the end.
+    void setScrollY(int y);
+
     /// Show the back buffer at the next vblank. Idempotent within a frame.
     void requestFlip() { flipPending_ = true; }
     bool flipPending() const { return flipPending_; }
@@ -119,6 +135,16 @@ public:
     /// Put the parked card back on screen. Returns the buffer whose contents are
     /// now stale, so the caller can mark it for a lazy rebuild.
     int endMovieTakeover();
+    /// End the takeover the OTHER way: leave the movie's last frame on screen and
+    /// throw the parked card away. Returns the buffer holding that frame, or -1
+    /// if there is none because the movie never flipped -- in which case the card
+    /// was never covered and endMovieTakeover() is still the right call.
+    ///
+    /// This is what RivenVideo::disable() amounts to for a fullscreen movie
+    /// (riven_video.cpp:288-301): the frame stops being the movie's and becomes
+    /// the card's. The caller owes the card surface a copy of it, or the two
+    /// disagree about what is on screen.
+    int keepMovieFrame();
     bool movieTakeover() const { return keep_ >= 0; }
     /// The buffer holding the parked card, or -1. The one buffer a screen that
     /// took the others over must not write, or reset.

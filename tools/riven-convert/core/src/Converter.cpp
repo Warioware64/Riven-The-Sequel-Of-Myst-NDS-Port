@@ -15,6 +15,7 @@
 #include "riven/Archive.hpp"
 #include "riven/AtomicWrite.hpp"
 #include "riven/CardParse.hpp"
+#include "riven/Credits.hpp"
 #include "riven/CursorPipeline.hpp"
 #include "riven/Installer.hpp"
 #include "riven/ImagePipeline.hpp"
@@ -392,6 +393,30 @@ ConversionResult Converter::run(Options opts, ProgressSink &sink, CancelToken &c
                         result.bytesWritten += m.bytes;
                         out.logf(Severity::Info, stage, "%d marbles, %dx%d each",
                                  kMarbleCount, m.cellW, m.cellH);
+                    }
+
+                    // --- the credits -------------------------------------
+                    //
+                    // Same archive again, and not fatal for the same reason: a
+                    // conversion without these is a game that ends on a black
+                    // screen instead of a roll, which is a line in the log
+                    // rather than a run to do again.
+                    stage = "credits";
+                    std::vector<std::string> creditsWarnings;
+                    const auto cr = convertCredits(extras, root / "extras" / "credits",
+                                                   creditsWarnings);
+                    for (const std::string &w : creditsWarnings)
+                        out.warn(stage, w);
+                    if (!cr.ok)
+                    {
+                        out.warn(stage, cr.error + "; the endings will not roll credits");
+                    }
+                    else
+                    {
+                        result.extrasWritten += cr.images;
+                        result.bytesWritten += cr.bytes;
+                        out.logf(Severity::Info, stage, "%d credits images, %dx%d each",
+                                 cr.images, cr.width, cr.height);
                     }
                 }
 

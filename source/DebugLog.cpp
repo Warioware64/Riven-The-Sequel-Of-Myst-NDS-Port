@@ -41,10 +41,6 @@ namespace
 
     /// The ten buttons REG_KEYINPUT carries, active LOW.
     constexpr std::uint32_t kKeyMask = 0x3FF;
-    std::uint32_t keysNow()
-    {
-        return static_cast<std::uint32_t>(~REG_KEYINPUT) & kKeyMask;
-    }
 
     /// One line's worth. The console is 32 columns, so anything past this is
     /// already wrapping; the file gets the same text so both agree.
@@ -377,9 +373,13 @@ HotkeyHold::~HotkeyHold()
         g_hotkeyHold = 0;
 }
 
+bool hotkeysHeld() { return g_hotkeyHold > 0; }
+
+std::uint32_t rawKeys() { return static_cast<std::uint32_t>(~REG_KEYINPUT) & kKeyMask; }
+
 void pollHotkeys()
 {
-    // keysNow() AND OUR OWN EDGE, not scanKeys()/keysDown().
+    // rawKeys() AND OUR OWN EDGE, not scanKeys()/keysDown().
     //
     // This is called from every loop the engine has -- the card loop, the idle
     // loop a blocking movie spins, the interactive loop a drag spins -- and
@@ -389,7 +389,7 @@ void pollHotkeys()
     // held mask the FIRST one stored, so it reports nothing pressed and eats
     // the caller's own B/START. Reading the register and keeping a private
     // `last` costs two instructions and cannot interfere with anything.
-    const std::uint32_t now = keysNow();
+    const std::uint32_t now = rawKeys();
     const std::uint32_t pressed = now & ~g_lastKeys;
     // ALWAYS, even on the paths that do nothing below. The state has to keep
     // following the buttons while the hotkeys are off, or a press made inside

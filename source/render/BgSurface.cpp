@@ -178,6 +178,22 @@ int BgSurface::endMovieTakeover()
     return frontBuffer();
 }
 
+int BgSurface::keepMovieFrame()
+{
+    if (!exists() || keep_ < 0)
+        return -1;
+
+    const int parked = keep_;
+    keep_ = -1;
+    if (frontBuffer() == parked)
+        return -1; // never flipped: the card is still up, and it is still the card
+
+    // No rebind and no flip. The movie's last frame is already the front buffer
+    // and it stays there; the parked card simply stops being reserved, which
+    // makes it the spare the next publish is free to overwrite.
+    return frontBuffer();
+}
+
 void BgSurface::beginTransition(Transition t)
 {
     if (!exists())
@@ -223,6 +239,19 @@ void BgSurface::setLetterbox(bool on)
     bgSetScroll(bgId_[0], 0, y);
     bgSetScroll(bgId_[1], 0, y);
     bgUpdate();
+}
+
+void BgSurface::setScrollY(int y)
+{
+    if (!exists())
+        return;
+    bgSetScroll(bgId_[0], 0, y);
+    bgSetScroll(bgId_[1], 0, y);
+    // NOT bgUpdate(), unlike setLetterbox: this is called once per frame from a
+    // loop that is about to reach vblank(), and committing here would put the
+    // register write in the middle of active display -- which is the tear
+    // setLetterbox can afford because it happens once, at the edge of a screen
+    // change, and this cannot because it happens sixty times a second.
 }
 
 void BgSurface::vblank()

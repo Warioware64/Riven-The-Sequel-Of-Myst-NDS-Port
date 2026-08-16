@@ -796,9 +796,12 @@ void Engine::releaseCardMovies()
         // exactly as the non-blocking path does when a movie runs out
         // (pumpMovies). Safe when there is no takeover: endMovieTakeover is a
         // no-op unless a buffer was parked.
+        // No bake: the card this movie belonged to is being torn down and another
+        // is about to draw itself over the whole screen, so there is nothing for
+        // a kept frame to be part of.
         if (m.open && m.player.isPlaying()
             && m.player.profile() == VideoProfile::Full)
-            endFullscreenMovie(m);
+            endFullscreenMovie(m, false);
 
         closeSlot(i);
         m.assigned = false;
@@ -819,8 +822,24 @@ void Engine::enableMovie(std::uint16_t code, bool enabled)
     // disable, return, and the baked frame is where the pins now are.
     if (!enabled && movies_[slot].open)
     {
-        bakeOverlay(movies_[slot]);
-        movies_[slot].player.stop();
+        // A fullscreen movie bakes too -- disable() does not care how big the
+        // video was -- and it additionally owns two background buffers it has to
+        // hand back. bakeOverlay cannot do either: its pixels never pass through
+        // the card surface. Every shipped use of opcode 28 so far is on an
+        // overlay, jspit's whark elevator included, so this branch is the rule
+        // being complete rather than a bug being fixed.
+        //
+        // Only while it is PLAYING, as releaseCardMovies tests it: one that has
+        // already run out gave its buffers back in pumpMovies, and going through
+        // endFullscreenMovie again would invalidate a buffer for nothing.
+        if (movies_[slot].player.profile() == VideoProfile::Full
+            && movies_[slot].player.isPlaying())
+            endFullscreenMovie(movies_[slot], true); // stops it too
+        else
+        {
+            bakeOverlay(movies_[slot]); // a no-op on a fullscreen movie
+            movies_[slot].player.stop();
+        }
     }
 }
 
@@ -831,8 +850,16 @@ void Engine::disableAllMovies()
         movies_[i].enabled = false;
         if (movies_[i].open)
         {
-            bakeOverlay(movies_[i]); // opcode 29, same disable() as above
-            movies_[i].player.stop();
+            // Opcode 29, same disable() as above -- including the fullscreen
+            // half of it, and the same "only while it is playing" test.
+            if (movies_[i].player.profile() == VideoProfile::Full
+                && movies_[i].player.isPlaying())
+                endFullscreenMovie(movies_[i], true); // stops it too
+            else
+            {
+                bakeOverlay(movies_[i]);
+                movies_[i].player.stop();
+            }
         }
     }
 }
@@ -1012,6 +1039,17 @@ void Engine::stopMovie(std::uint16_t code)
 /// and only then spend time decoding.
 void Engine::idleFrame()
 {
+    // Scope-bound rather than a plain pair, because pollNoteHotkey below can
+    // stall for a fifth of a second inside this loop and captureNote has to be
+    // able to tell that it is already here. See Engine.hpp.
+    struct Mark
+    {
+        bool &flag;
+        const bool was;
+        explicit Mark(bool &f) : flag(f), was(f) { f = true; }
+        ~Mark() { flag = was; }
+    } mark{inIdleFrame_};
+
     NEA_WaitForVBL(static_cast<NEA_UpdateFlags>(0));
     // The clock advances here as well as in frame(), because this is the loop a
     // blocking movie spins: a timer counted only in frame() would stand still
@@ -1032,6 +1070,10 @@ void Engine::idleFrame()
     // polled them there was no way to photograph any of it. Off unless debug
     // mode is on.
     DebugLog::pollHotkeys();
+    // The player's L, for the same reason and immediately after, so the two
+    // halves of one button are decided in one place and in a fixed order: the
+    // screenshot first, and the note only if debug mode did not take the press.
+    pollNoteHotkey();
 }
 
 namespace
@@ -1045,12 +1087,18 @@ namespace
     /// that is load-bearing is the explicit one on opcodes 28 and 29: gspit's
     /// pins play a RANGED segment and then disable it by hand
     /// (gspit.cpp:58-82), and a ranged play never reaches here with `whole`.
-    /// Nothing is known to depend on THIS one, and it is what keeps a blocking
-    /// movie's last frame on a card that never redraws -- the telescope button
-    /// on tspit 137 is exactly that, and needs an explicit refreshCard()
-    /// because of it (Externals.cpp). Set false and that class of leftover
-    /// disappears at the next screen update instead; the risk is a card that
-    /// was relying on the frame the way the pins do.
+    ///
+    /// One thing DOES now depend on this one, and it is a fullscreen movie:
+    /// gspit's sub elevator (cards 12 and 13) rides in four blocking movies on
+    /// one card, and each has to start from the frame the last one stopped on --
+    /// the doors close in movie 2 and must still be closed behind movie 3.
+    /// Setting this false puts the card's own still back between them, which is
+    /// the open doors.
+    ///
+    /// Otherwise it is what keeps a blocking movie's last frame on a card that
+    /// never redraws -- the telescope button on tspit 137 is exactly that, and
+    /// needs an explicit refreshCard() because of it (Externals.cpp). Set false
+    /// and that class of leftover disappears at the next screen update instead.
     constexpr bool kBakeBlockingMovies = true;
 } // namespace
 
@@ -1089,14 +1137,55 @@ void Engine::playMovieBlocking(std::int32_t slot, bool whole)
         if ((keysDown() & (KEY_B | KEY_START)) != 0)
             break; // let the player out of a long cutscene
     }
+
+    // Opcode 38's held-back command, HERE: after the movie, not part-way through
+    // it (riven_video.cpp:255-260). The delay is a threshold on how far the movie
+    // got, so a cutscene the player skipped out of early can legitimately fail it
+    // -- currentFrame stopped where the skip did, and movieTimeMs reads that.
+    runStoredMovieOpcode(ms.code);
+
+    // ONE rule for both profiles. playBlocking ends in disable(), and disable()
+    // makes the last frame part of the card whatever size the movie was -- the
+    // fullscreen half of that was missing, which is why gspit's sub elevator
+    // snapped its doors back open between the four movies of one ride.
     if (full)
     {
-        endFullscreenMovie(ms); // stops it too
+        endFullscreenMovie(ms, whole && kBakeBlockingMovies); // stops it too
         return;
     }
     if (whole && kBakeBlockingMovies)
         bakeOverlay(ms);
     ms.player.stop();
+}
+
+void Engine::storeMovieOpcode(std::uint16_t code, std::uint32_t delayMs, std::uint16_t opcode,
+                              std::uint16_t arg)
+{
+    // setStoredMovieOpcode clears before it stores (riven_scripts.cpp:101-106):
+    // a second store forgets the first, unrun.
+    storedMovieOpcode_ = StoredMovieOpcode{true, code, delayMs, opcode, arg};
+}
+
+void Engine::runStoredMovieOpcode(std::uint16_t code)
+{
+    if (!storedMovieOpcode_.set || storedMovieOpcode_.code != code)
+        return;
+    if (movieTimeMs(code) < storedMovieOpcode_.delayMs)
+        return; // the movie never got that far; the command is simply dropped
+
+    // Cleared BEFORE it runs. The command is an activateSLST in every shipped
+    // script, but nothing here relies on that, and a command that could reach
+    // another blocking play must not be able to find itself still stored.
+    const StoredMovieOpcode op = storedMovieOpcode_;
+    storedMovieOpcode_ = StoredMovieOpcode{};
+
+    // createScriptFromData builds a one-command script and runs it through the
+    // ordinary machinery (riven_scripts.cpp:707-714); so does this, rather than
+    // switching on the opcode a second time somewhere the real table cannot see.
+    Command c;
+    c.opcode = op.opcode;
+    c.args.push_back(op.arg);
+    runCommandList(*this, {c});
 }
 
 bool Engine::movieEnded(std::uint16_t code) const
@@ -1207,7 +1296,9 @@ bool Engine::playMovieUntilClick(std::uint16_t code)
     // the way in and has to give them back, and stop() alone does not.
     if (ms.player.profile() == VideoProfile::Full)
     {
-        endFullscreenMovie(ms);
+        // No bake, for the reason spelled out just below: this loop's movies end
+        // in stop(), not disable(), so their last frame is not the card's.
+        endFullscreenMovie(ms, false);
         return clicked;
     }
 
@@ -1223,15 +1314,28 @@ bool Engine::playMovieUntilClick(std::uint16_t code)
 // The card timer
 // ---------------------------------------------------------------------------
 
-void Engine::installTimer(TimerProc proc, std::uint32_t ms)
+void Engine::installTimer(TimerProc proc, std::uint32_t ms, const char *name)
 {
     timerProc_ = proc;
+    timerName_ = name != nullptr ? name : "?";
     timerDeadline_ = frames_ + msToFrames(ms);
+
+    // Gated, and it has to be: the four sunners procs re-arm every two to
+    // fifteen seconds for as long as the player stands on a lagoon card, so
+    // ungated this would be the loudest line in the trace by an order of
+    // magnitude. Behind the gate it is the only way to see that a timer was
+    // armed at all, which is the first of the three things that can be wrong
+    // with one.
+    if (DebugLog::enabled())
+        DebugLog::log("TIMER %s +%lu ms (%lu frames)", timerName_,
+                      static_cast<unsigned long>(ms),
+                      static_cast<unsigned long>(msToFrames(ms)));
 }
 
 void Engine::removeTimer()
 {
     timerProc_ = nullptr;
+    timerName_ = "";
     timerDeadline_ = 0;
 }
 
@@ -1239,6 +1343,12 @@ void Engine::checkTimer()
 {
     if (timerProc_ == nullptr || inTimer_ || frames_ < timerDeadline_)
         return;
+
+    // Read before the call, not after: the proc's whole job is to re-arm or
+    // remove itself, so by the time it returns timerName_ is the NEXT timer's
+    // and a line printed then would name the wrong one.
+    if (DebugLog::enabled())
+        DebugLog::log("TIMER fire %s", timerName_);
 
     // The proc is NOT cleared first: re-arming or removing itself is its job,
     // and every one of them ends in one or the other (riven_stack.cpp:383).
@@ -1941,27 +2051,16 @@ void Engine::processInput()
             return;
         }
 
-        // L snapshots the zoomed view into the notebook.
-        //
-        // Here rather than in the bare-L handler further down, because this
-        // branch owns the input while the viewer is up and returns before
-        // reaching it. This is the place the feature is most wanted: the player
-        // opened the viewer to READ something, and reading something in Riven is
-        // usually the prelude to writing it down.
-        //
-        // Guarded on SELECT because the developer-chord block is also below this
-        // branch and so never runs during zoom -- without the guard, SELECT+L
-        // meant as a screenshot would take a note instead.
-        //
-        // And guarded on debug mode, which takes L outright: the viewer is one
-        // of the places worth photographing, DebugLog::pollHotkeys has already
-        // done it by the time this runs, and a note taken as well would be a
-        // second answer to one press.
-        if ((down & KEY_L) != 0 && (held & KEY_SELECT) == 0 && !DebugLog::enabled())
-        {
-            captureNote();
-            return;
-        }
+        // NO L HERE. Taking a note in the zoom viewer is the place the feature
+        // is most wanted -- the player opened the full-resolution view to READ
+        // something, and reading something in Riven is usually the prelude to
+        // writing it down -- and it still works, from pollNoteHotkey above.
+        // This branch used to have a copy of that decision, with its own SELECT
+        // and debug-mode guards, because it owns the input while the viewer is
+        // up and returns before reaching the bare-L handler further down. Two
+        // copies of one rule is one copy too many, and the poller runs before
+        // this function does, so the button is decided once for every screen.
+        // captureNote still reads mode_ for the taller capture.
 
         // Slow for the first quarter second, then fast -- the same shape as the
         // pointer's D-pad nudge below, and for the same reason: a single press
@@ -2117,22 +2216,18 @@ void Engine::processInput()
         }
     }
 
-    // The notebook, on the two buttons nothing else uses bare.
+    // The notebook, on Y.
     //
-    // Below the SELECT block on purpose: with debug mode off SELECT+L is the
-    // screenshot and SELECT+R the VRAM dump, and the block above returns before
-    // this, so the chords keep their meaning and the bare presses get the
-    // shoulder buttons and Y.
+    // L IS NOT READ HERE ANY MORE. Taking a note used to be a branch on this
+    // line, which meant it could only be done from the card loop -- so the
+    // cutscenes, transitions and slider drags that idleFrame spins were each a
+    // stretch of the game no note could be taken of. It is polled from both
+    // loops now (pollNoteHotkey), and reading it here as well would take a
+    // second note from the same press.
     //
-    // DEBUG MODE TAKES L. Taking a note is the thing L does for a player, and a
-    // screenshot is the thing it does for whoever is debugging; only one of them
-    // can have the button and debug mode is the mode that says which. Y still
-    // opens the notebook, so nothing already written is out of reach.
-    if ((keysDown() & KEY_L) != 0 && !DebugLog::enabled())
-    {
-        captureNote();
-        return;
-    }
+    // Y stays here because nothing else wants it and the notebook is a screen
+    // rather than an instant: it takes the display over and spins its own loop,
+    // which is a thing only the card loop can start.
     if ((keysDown() & KEY_Y) != 0)
     {
         runNotebook();
@@ -2169,10 +2264,23 @@ void Engine::processInput()
     // screen coordinates -- toCardY() of a row below the view is a card row that
     // does not exist. A click there leaves the card entirely, so nothing after
     // it may run.
+    //
+    // BOTH ENDS OF THE CLICK, and this is a guard rather than an accident of
+    // structure. The band is 14 rows directly under the picture, so a tap aimed
+    // at a step-down hotspot at the base of a view lands in it, and a stylus
+    // drag anywhere on the card can be released in it. Latching the press and
+    // requiring the release to agree means neither of those can link the player
+    // out of the card: only a press and a release on the same book count. Riven
+    // itself needs no such thing -- a mouse does not slide off the bottom of a
+    // 436-row window on the way to a click.
+    if (pressed)
+        pressedInvItem_ = inventory_.hitTest(pointerX_, pointerY_);
     if (released)
     {
         const std::uint16_t item = inventory_.hitTest(pointerX_, pointerY_);
-        if (item != 0)
+        const std::uint16_t was = pressedInvItem_;
+        pressedInvItem_ = 0;
+        if (item != 0 && item == was)
         {
             pressedHotspot_ = -1;
             insideHotspot_ = -1;
@@ -2291,18 +2399,40 @@ void Engine::pumpMovies()
         // only the blocking path used to do it. Opcode 33 does not block, so a
         // card that starts a fullscreen movie and carries on would otherwise be
         // left showing the movie's last frame for good.
+        // No bake: opcode 33 leaves the video enabled rather than disabling it,
+        // so nothing has told the card to keep this frame. The original gets the
+        // same picture by a different route -- it stops redrawing the movie and
+        // the next screen update repaints from _mainScreen.
         if (m.player.profile() == VideoProfile::Full && m.player.finished())
-            endFullscreenMovie(m);
+            endFullscreenMovie(m, false);
     }
 }
 
-/// Put the card back on screen after a fullscreen movie. The card's own image was
-/// parked in a buffer the movie never touched, so this is a rebind and a flip --
-/// not an upload, and certainly not a re-entry, which would run the card's
-/// scripts again and start the movie over.
-void Engine::endFullscreenMovie(MovieSlot &m)
+/// Settle the screen after a fullscreen movie: either the card comes back or the
+/// movie's last frame stays and becomes the card. See the declaration for which
+/// caller wants which, and why there is no default.
+///
+/// Putting the card back is a rebind and a flip -- its image was parked in a
+/// buffer the movie never touched -- not an upload, and certainly not a re-entry,
+/// which would run the card's scripts again and start the movie over.
+void Engine::endFullscreenMovie(MovieSlot &m, bool bake)
 {
     m.player.stop();
+
+    if (bake)
+    {
+        const int frame = bgs.keepMovieFrame();
+        if (frame >= 0)
+        {
+            surface_.adoptBuffer(frame);
+            return;
+        }
+        // -1 means the movie never flipped, so there is no frame of it anywhere
+        // and the card was never covered. keepMovieFrame has already released the
+        // takeover, which makes the call below the no-op branch of
+        // endMovieTakeover -- the same buffer, and the same answer.
+    }
+
     // The buffer handed back holds the movie's last frame rather than the card,
     // so the next publish has to send all of it.
     surface_.invalidate(bgs.endMovieTakeover());
@@ -2404,6 +2534,13 @@ void Engine::frame()
     // page with the same press. idleFrame polls them too, which is what covers
     // the loops this one never reaches.
     DebugLog::pollHotkeys();
+    // And the note, which is the same button's other half. Here rather than in
+    // processInput -- where it used to be, in two places -- because this is the
+    // only spelling that is true in every loop: processInput is the card loop's
+    // alone, and a note was therefore impossible during the cutscenes and drags
+    // that idleFrame spins. pollNoteHotkey reads the register itself, so putting
+    // it above processInput's scanKeys() costs that handler nothing.
+    pollNoteHotkey();
 
     processInput();
 

@@ -49,7 +49,12 @@ std::vector<rivendata::Texel> downscaleToTexels(const std::uint8_t *rgb, int src
                                                 int dstW, int dstH);
 
 /// Encode a finished .rpic file (header + pixels).
-std::vector<std::uint8_t> encodeRpic(const std::vector<rivendata::Texel> &texels, int w, int h);
+///
+/// `w`/`h` are the texels being written; `srcW`/`srcH` are how big the picture is
+/// in Riven's 608x392 card space, which is what the runtime needs to place it and
+/// is not recoverable from the resampled size (RivenImage.hpp).
+std::vector<std::uint8_t> encodeRpic(const std::vector<rivendata::Texel> &texels, int w, int h,
+                                     int srcW, int srcH);
 
 /// Encode a finished .rpiz file (header + RGB555 palette + 8bpp indices).
 /// `compress` picks LZ77; the result falls back to uncompressed when

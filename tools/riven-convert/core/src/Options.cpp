@@ -14,7 +14,7 @@ const char *stageName(Stage s)
     case Stage::Audio:  return "audio";
     case Stage::Video:  return "video";
     case Stage::Cursors: return "cursors";
-    case Stage::Extras: return "inventory art";
+    case Stage::Extras: return "inventory, marble and credits art";
     }
     return "?";
 }

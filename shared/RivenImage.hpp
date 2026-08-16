@@ -43,11 +43,19 @@ enum class ImageCompression : std::uint8_t
     Lz77 = 1,
 };
 
-/// 16-byte header of a .rpic display still.
+/// 20-byte header of a .rpic display still.
 ///
 /// Pixels follow immediately: width*height ARGB1555, little-endian, row-major,
 /// no padding. The DS and the file are both little-endian, so a loaded buffer
 /// can be reinterpret_cast to this and the pixels used in place.
+///
+/// TWO sizes, and they are not the same thing. width/height are the texels that
+/// follow -- what the converter resampled to. srcWidth/srcHeight are the source
+/// tBMP's own dimensions, which are in Riven's 608x392 card space and are how
+/// BIG the picture is on the card. A PLST rectangle says only where its top-left
+/// corner goes: the original blits at the image's own size and ignores the
+/// rectangle's other two edges (riven_graphics.cpp:367-381), so the runtime has
+/// to know that size, and only the converter ever saw it.
 struct RpicHeader
 {
     char magic[4];        ///< "RPIC"
@@ -57,8 +65,10 @@ struct RpicHeader
     std::uint8_t compression; ///< ImageCompression
     std::uint8_t reserved;
     std::uint32_t dataBytes;  ///< bytes of pixel payload following the header
+    std::uint16_t srcWidth;   ///< the source tBMP's width, in card coordinates
+    std::uint16_t srcHeight;  ///< the source tBMP's height, in card coordinates
 };
-static_assert(sizeof(RpicHeader) == 16, "RpicHeader must be 16 bytes");
+static_assert(sizeof(RpicHeader) == 20, "RpicHeader must be 20 bytes");
 
 /// 16-byte header of a .rpiz zoom twin, followed by a 256-entry RGB555 palette
 /// (512 bytes, little-endian) and then `dataBytes` of 8bpp indices.
@@ -74,7 +84,10 @@ struct RpizHeader
 };
 static_assert(sizeof(RpizHeader) == 16, "RpizHeader must be 16 bytes");
 
-inline constexpr std::uint16_t kImageVersion = 1;
+/// 2 added RpicHeader::srcWidth/srcHeight. The version is shared with RpizHeader
+/// because one converter run writes both, so there is no state where a card holds
+/// one generation of .rpic and another of .rpiz.
+inline constexpr std::uint16_t kImageVersion = 2;
 inline constexpr int kPaletteEntries = 256;
 inline constexpr int kPaletteBytes = kPaletteEntries * 2;
 

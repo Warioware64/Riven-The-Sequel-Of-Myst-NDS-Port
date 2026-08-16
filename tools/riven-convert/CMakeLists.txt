@@ -100,6 +100,7 @@ add_library(riven_convert_core STATIC
     core/src/ffmpeg/FFmpeg.cpp
     core/src/rvid/VideoPipeline.cpp
     core/src/image/Bmp.cpp
+    core/src/image/Credits.cpp
     core/src/image/ImagePipeline.cpp
     core/src/image/Lz77.cpp
     core/src/image/Marbles.cpp
@@ -172,7 +173,7 @@ endif()
 
 if(BUILD_TESTING)
     foreach(t schema_roundtrip archive atomic_write cards image sound video installer
-              transition topbg resume)
+              transition topbg resume credits)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE riven_convert_core)
         add_test(NAME ${t} COMMAND test_${t})

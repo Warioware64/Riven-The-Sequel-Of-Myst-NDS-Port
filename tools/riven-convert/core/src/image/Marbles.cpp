@@ -98,7 +98,11 @@ MarbleResult convertMarbles(const fs::path &extrasMhk, const fs::path &out,
     // downscaleToTexels at 1:1 is still the right call rather than a hand-rolled
     // pack -- it is where the gamma-correct ARGB1555 conversion lives.
     const auto texels = downscaleToTexels(strip.data(), stripW, r.cellH, stripW, r.cellH);
-    const auto bytes = encodeRpic(texels, stripW, r.cellH);
+    // Source size == stored size, the 1:1 above being the whole point. It is not
+    // read either way: the strip is only ever drawn through drawPictureSections,
+    // which is told both rectangles and so never asks the header how big the
+    // picture is (ExternalsTspit.cpp:334-366).
+    const auto bytes = encodeRpic(texels, stripW, r.cellH, stripW, r.cellH);
     if (!writeFileAtomic(out, bytes, r.error))
         return r;
 

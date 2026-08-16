@@ -67,10 +67,12 @@ public:
     /// reads _mainScreen and writes the visible screen).
     const rivendata::Texel *clean() const { return clean_; }
 
-    /// Draw a .rpic into `cardRect`, which is a PLST rectangle in Riven's
-    /// original 608x392 coordinates. The file's own size is whatever the
-    /// converter produced, so it is scaled to the rectangle -- the rectangle is
-    /// where the picture belongs on the card, and the only thing that knows.
+    /// Draw a .rpic at `cardRect`'s TOP-LEFT CORNER, which is a PLST rectangle in
+    /// Riven's original 608x392 coordinates. Only the corner: how big the picture
+    /// is on the card is the picture's own business, and it says so in its header
+    /// (RpicImage::srcWidth/srcHeight). The original ignores the rectangle's other
+    /// two edges the same way, and 96 of Riven's PLST records disagree with the
+    /// bitmap they name, so this is a difference you can see.
     ///
     /// Marks the rows it touched dirty.
     bool drawPicture(const std::string &path, const rivendata::Rect &cardRect,
@@ -142,6 +144,21 @@ public:
     /// gspit's pins play a movie, disable it and return without redrawing
     /// anything, so the baked frame IS the puzzle's state (gspit.cpp:58-82).
     void bakeRect(int x, int y, int w, int h);
+
+    /// Take a background buffer's pixels to BE the card, both planes of it.
+    ///
+    /// bakeRect for a fullscreen movie, and it has to read the buffer back
+    /// because that is the only copy: a FULL movie's frames go straight into
+    /// VRAM and never pass through this surface (RvidPlayer.hpp). ScummVM reaches
+    /// the same state by copying the video's rect into _mainScreen when the movie
+    /// is disabled (riven_video.cpp:288-301), which is what lets gspit's sub
+    /// elevator play its ride through the closed doors the previous movie left
+    /// rather than through the still's open ones.
+    ///
+    /// `buf` is left clean and every other buffer invalidated: `buf` is the one
+    /// already showing these pixels, and its ping-pong partner is showing an
+    /// older frame of the same movie and so genuinely needs the whole card.
+    void adoptBuffer(int buf);
 
     bool anyDirty(int buf) const { return dirty_[buf] != 0; }
 

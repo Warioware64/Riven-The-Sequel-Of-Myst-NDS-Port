@@ -89,12 +89,22 @@ bool loadRpicImage(const std::string &path, RpicImage &out, std::string &error)
         error = "picture's dimensions are not a Riven picture's";
         return false;
     }
+    // Only that it is not zero, which would place the picture nowhere at all.
+    // There is no upper bound on purpose -- see the note by kMaxRpicW.
+    if (hdr.srcWidth == 0 || hdr.srcHeight == 0)
+    {
+        std::fclose(f);
+        error = "picture does not say how big it is on the card";
+        return false;
+    }
 
     const std::size_t pixels = static_cast<std::size_t>(hdr.width) * hdr.height;
     const std::size_t pixelBytes = pixels * sizeof(Texel);
 
     out.width = hdr.width;
     out.height = hdr.height;
+    out.srcWidth = hdr.srcWidth;
+    out.srcHeight = hdr.srcHeight;
     out.texels.resize(pixels);
 
     const bool ok =

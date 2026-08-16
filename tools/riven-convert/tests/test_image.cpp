@@ -283,11 +283,16 @@ int main()
         }
         check(distinct <= 2, "a flat field quantises to at most two adjacent levels");
 
-        const auto rpic = encodeRpic(texels, rivendata::kViewW, rivendata::kViewH);
+        const auto rpic = encodeRpic(texels, rivendata::kViewW, rivendata::kViewH, w, h);
         const auto *ph = reinterpret_cast<const rivendata::RpicHeader *>(rpic.data());
         check(rivendata::isRpic(*ph), "the .rpic header validates");
         check(ph->width == rivendata::kViewW && ph->height == rivendata::kViewH,
               "the .rpic header carries the right dimensions");
+        // The two sizes are independent, and this call reduced 608x392 to
+        // 256x165: a header that echoed the stored size would pass the check
+        // above and still place every mismatched picture wrong.
+        check(ph->srcWidth == w && ph->srcHeight == h,
+              "the .rpic header carries the SOURCE dimensions, not the stored ones");
         check(rpic.size() == sizeof(rivendata::RpicHeader) + texels.size() * 2,
               "the .rpic is header plus exactly one texel per pixel");
 

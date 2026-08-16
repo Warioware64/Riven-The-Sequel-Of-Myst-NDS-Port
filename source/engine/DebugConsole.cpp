@@ -87,6 +87,7 @@
 #include "MainMenu.hpp"
 #include "SaveGame.hpp"
 #include "Settings.hpp"
+#include "engine/Externals.hpp"
 #include "global_header.hpp"
 #include "render/BgSurface.hpp"
 
@@ -197,6 +198,169 @@ namespace
         return out;
     }
 
+    // --- the endings harness -------------------------------------------------
+    //
+    // Riven has eight endings and no route to any of them shorter than a
+    // playthrough, so nothing in the game gets less testing than the code that
+    // decides which one you earned. All of it is three variables read at one of
+    // three call sites (ExternalsTspit/Ospit/Rspit), and every one of those
+    // sites can be reached from here: set the variables, stand on the card the
+    // command lives on, and fire the command.
+    //
+    // THE REAL PATH, not a shortcut to the answer. Each case calls the per-stack
+    // table declared in Externals.hpp with the same case-folded key the
+    // dispatcher would hand it, so everything below the NAME lookup runs -- the
+    // telescope's cover-and-pin gate included, which is the half of the fissure
+    // ending that a test calling xtopenfissure directly would skip over.
+    //
+    // The movie and the credits are skipped (EndingProbe): what is being checked
+    // is the choice and the state reset, and playing eight endings out would
+    // take twenty minutes and prove the video decoder instead.
+
+    /// One thing to set before firing.
+    struct VarSet
+    {
+        VarId id = VarId::Unknown;
+        std::uint32_t value = 0;
+    };
+
+    struct EndingCase
+    {
+        const char *what;    ///< what the player did, for the report
+        StackId stack;
+        const char *key;     ///< the external to fire, case-folded
+        VarSet vars[6];      ///< applied over a fresh startNewGame()
+        /// What must come back. `mlst` is tspit's fissure record, 0 elsewhere;
+        /// `movie` is the code runEndGame was handed, and is only meaningful
+        /// where the card's codes and indices agree -- which for ospit and rspit
+        /// they do, both cards having activated their record already.
+        bool expectEnding = true;
+        std::uint16_t mlst = 0;
+        std::uint16_t movie = 0;
+        std::uint32_t delayMs = 0;
+        std::uint32_t frameCountOverride = 0;
+    };
+
+    // The four telescope variables, which every fissure case needs: power on,
+    // cover off, pin up, tube at the bottom. Without them telescopeDownMove
+    // stops one step short and no ending happens at all.
+    constexpr VarSet kAtTheFissure[4] = {
+        {VarId::TTeleValve, 1},
+        {VarId::TTeleCover, 1},
+        {VarId::TTelePin, 1},
+        {VarId::TTelescope, 1},
+    };
+
+    const EndingCase kEndings[] = {
+        // Temple Island's fissure. Tested in order and the first match wins, so
+        // case 1 deliberately leaves agehn and atrapbook at their defaults and
+        // case 2 leaves pcage at its: the point of the order is that a player
+        // who did MORE gets the better ending, and only distinct preconditions
+        // can show that the order is still the right way round.
+        {"fissure: Catherine free", StackId::Tspit, "xtexterior300_telescopedown",
+         {kAtTheFissure[0], kAtTheFissure[1], kAtTheFissure[2], kAtTheFissure[3],
+          {VarId::PCage, 2}},
+         true, 8, 0, 5000, 2640},
+        {"fissure: Gehn trapped", StackId::Tspit, "xtexterior300_telescopedown",
+         {kAtTheFissure[0], kAtTheFissure[1], kAtTheFissure[2], kAtTheFissure[3],
+          {VarId::AGehn, 4}},
+         true, 9, 0, 5000, 2088},
+        {"fissure: Gehn loose", StackId::Tspit, "xtexterior300_telescopedown",
+         {kAtTheFissure[0], kAtTheFissure[1], kAtTheFissure[2], kAtTheFissure[3],
+          {VarId::ATrapBook, 1}},
+         true, 10, 0, 5000, 1703},
+        {"fissure: nothing earned", StackId::Tspit, "xtexterior300_telescopedown",
+         {kAtTheFissure[0], kAtTheFissure[1], kAtTheFissure[2], kAtTheFissure[3]},
+         true, 11, 0, 5000, 0},
+
+        // Gehn's office: the trap book used on yourself.
+        {"trap book: Gehn who?", StackId::Ospit, "xorollcredittime",
+         {{VarId::AGehn, 0}}, true, 0, 1, 9500, 1225},
+        {"trap book: you freed him", StackId::Ospit, "xorollcredittime",
+         {{VarId::AGehn, 4}}, true, 0, 2, 12000, 558},
+        {"trap book: you had met him", StackId::Ospit, "xorollcredittime",
+         {{VarId::AGehn, 1}}, true, 0, 3, 8000, 857},
+        // The same command, and NOT an ending: used on Tay it links there first
+        // and rspit's own card ends it (ExternalsOspit.cpp:41-45). Worth a case
+        // of its own because it is the one branch whose bug would look like a
+        // missing ending rather than a wrong one.
+        {"trap book: on Tay, links away", StackId::Ospit, "xorollcredittime",
+         {{VarId::ReturnStackId, static_cast<std::uint32_t>(StackId::Rspit)}},
+         false, 0, 0, 0, 0},
+
+        // Tay. One movie for both outcomes; only the Polish override differs.
+        {"Tay: Gehn trapped", StackId::Rspit, "xrcredittime",
+         {{VarId::AGehn, 4}}, true, 0, 1, 1500, 712},
+        {"Tay: Gehn loose", StackId::Rspit, "xrcredittime",
+         {{VarId::AGehn, 0}}, true, 0, 1, 1500, 0},
+    };
+    constexpr int kEndingCount = static_cast<int>(sizeof(kEndings) / sizeof(kEndings[0]));
+
+    /// Does this command list call `nameIndex` as an external? Opcode 8's arms
+    /// are commands too, so this recurses into them.
+    bool commandsCallExternal(const std::vector<Command> &commands, std::uint16_t nameIndex)
+    {
+        for (const Command &c : commands)
+        {
+            if (c.opcode == static_cast<std::uint16_t>(Op::RunExternalCommand)
+                && !c.args.empty() && c.args[0] == nameIndex)
+                return true;
+            for (const SwitchBranch &b : c.branches)
+                if (commandsCallExternal(b.commands, nameIndex))
+                    return true;
+        }
+        return false;
+    }
+
+    /// The first card in `s` whose scripts -- its own or any hotspot's -- call
+    /// the external named `key`, or -1.
+    ///
+    /// BY THE DATA, because a card id is not a constant anyone may write down:
+    /// it is stack-local and release-dependent, and the whole point of this
+    /// harness is that it keeps working on a copy of the game nobody here has.
+    std::int32_t findCardWithExternal(const Stack &s, const char *key)
+    {
+        const NameList &names = s.names[kExternalCommandNames];
+        std::int32_t nameIndex = -1;
+        for (std::size_t i = 0; i < names.names.size(); ++i)
+            if (Vars::normalise(names.names[i]) == key)
+            {
+                nameIndex = static_cast<std::int32_t>(i);
+                break;
+            }
+        if (nameIndex < 0)
+            return -1;
+
+        const auto index = static_cast<std::uint16_t>(nameIndex);
+        for (const Card &c : s.cards)
+        {
+            for (const Handler &h : c.scripts)
+                if (commandsCallExternal(h.commands, index))
+                    return c.id;
+            for (const Hotspot &spot : c.hotspots)
+                for (const Handler &h : spot.scripts)
+                    if (commandsCallExternal(h.commands, index))
+                        return c.id;
+        }
+        return -1;
+    }
+
+    /// Hand `key` to the island it belongs to. The dispatcher in Externals.cpp
+    /// tries all seven in turn because it starts from a name and not a place;
+    /// here the place is already known, so this is the same table with the
+    /// search taken out.
+    bool fireExternal(Engine &e, StackId stack, const char *key)
+    {
+        const std::string k = key;
+        switch (stack)
+        {
+        case StackId::Tspit: return runTspitExternal(e, k, nullptr, 0);
+        case StackId::Ospit: return runOspitExternal(e, k, nullptr, 0);
+        case StackId::Rspit: return runRspitExternal(e, k, nullptr, 0);
+        default: return false;
+        }
+    }
+
     struct HelpLine
     {
         const char *name;
@@ -209,6 +373,7 @@ namespace
     const HelpLine kHelp[] = {
         {"help", "help [cmd]"},
         {"where", "where - stack, card, picture, mode"},
+        {"timer", "timer - the card timer, and when"},
         {"card", "card [id] - show or go to"},
         {"stack", "stack <name|1-8> [card]"},
         {"var", "var <name> [value]"},
@@ -222,6 +387,7 @@ namespace
         {"refresh", "refresh - redraw the card"},
         {"save", "save <1-5>"},
         {"load", "load <1-5>"},
+        {"endings", "endings [n|live] - check every ending"},
         {"notes", "notes - open the notebook"},
         {"shot", "shot - screenshot to the card"},
         {"vram", "vram - dump the VRAM banks"},
@@ -282,6 +448,35 @@ bool Engine::runConsoleCommand(const std::string &line)
         // deadline as a reading of it. Comparing the two is how you tell a trap
         // that is waiting from one that will never fire.
         out("clock %lu frames", static_cast<unsigned long>(frames_));
+        return false;
+    }
+
+    // The six things in Riven that happen while the player does nothing -- the
+    // four sunners, Catherine in her cage and at the imager, the Ytram trap, and
+    // Tay's rebel window -- are all this one slot. When one of them does not
+    // happen there is no click to blame and no card change to look at, so
+    // without this there is nothing to ask. Three states, and they are the three
+    // ways such a bug goes: nothing armed (the external never ran), armed and
+    // counting (it will fire, so the fault is downstream in the movie), armed and
+    // OVERDUE (checkTimer is not being reached).
+    if (cmd == "timer")
+    {
+        const char *const name = timerName();
+        if (name == nullptr)
+        {
+            out("no timer armed");
+            return false;
+        }
+        const std::uint32_t left = timerFramesLeft();
+        out("%s", name);
+        if (left != 0)
+            out("in %lu frames (%lu.%lus)", static_cast<unsigned long>(left),
+                static_cast<unsigned long>(left / 60),
+                static_cast<unsigned long>((left % 60) * 10 / 60));
+        else
+            out("OVERDUE by %lu", static_cast<unsigned long>(frames_ - timerDeadline_));
+        out("clock %lu  due %lu", static_cast<unsigned long>(frames_),
+            static_cast<unsigned long>(timerDeadline_));
         return false;
     }
 
@@ -532,6 +727,157 @@ bool Engine::runConsoleCommand(const std::string &line)
         // The card underneath has been replaced, so there is nothing left for
         // the console to be looking at.
         return true;
+    }
+
+    if (cmd == "endings")
+    {
+        // The one ending that cannot be checked from here. xbookclick's third
+        // refusal fires from INSIDE Gehn's speech movie, off its clock
+        // (ExternalsOspit.cpp:179-183): there is no state to set that makes it
+        // happen, only a movie to sit through and not click. So `endings live`
+        // sets it up and gets out of the way, and the report below counts it as
+        // skipped rather than quietly claiming ten of eleven is all of them.
+        if (argc >= 1 && tok[1] == "live")
+        {
+            // Checked BEFORE anything is written. A setup command that fails
+            // half way leaves the player with agehn changed and no idea of it,
+            // which is worse than not having the command.
+            const std::int32_t card = stack_.id == StackId::Ospit
+                                          ? findCardWithExternal(stack_, "xbookclick")
+                                          : -1;
+            if (card < 0)
+            {
+                out("go to ospit first: stack ospit");
+                return false;
+            }
+            vars_.set(VarId::AGehn, 3);
+            if (!changeToCard(static_cast<std::uint16_t>(card)))
+            {
+                out("could not enter card %ld", static_cast<long>(card));
+                return false;
+            }
+            out("agehn=3, on the cage card.");
+            out("let Gehn ask three times.");
+            return true; // the console has to be out of the way to watch it
+        }
+
+        long only = 0;
+        if (argc >= 1 && (!parseNum(tok[1], only) || only < 1 || only > kEndingCount))
+        {
+            out("endings [1-%d|live]", kEndingCount);
+            return false;
+        }
+
+        // A diagnostic must not cost the player their game. Every case ends by
+        // throwing the state away (runEndGame), so the position is taken first
+        // and put back at the end -- and said out loud, because a restore that
+        // silently failed would look like the harness having eaten the save.
+        const SaveGame::SaveState before = buildSaveState();
+        out("-- endings: this resets the game --");
+
+        int ran = 0;
+        int failed = 0;
+        for (int i = 0; i < kEndingCount; ++i)
+        {
+            if (only != 0 && i != only - 1)
+                continue;
+            const EndingCase &c = kEndings[i];
+
+            // The stack first: findCardWithExternal searches the LOADED one, and
+            // the name index it resolves is that stack's own.
+            if (!changeToStack(c.stack))
+            {
+                out("%d %s: no stack", i + 1, c.what);
+                ++failed;
+                continue;
+            }
+            const std::int32_t target = findCardWithExternal(stack_, c.key);
+            if (target < 0 || !changeToCard(static_cast<std::uint16_t>(target)))
+            {
+                out("%d: no card calls %s", i + 1, c.key);
+                ++failed;
+                continue;
+            }
+
+            // AFTER the card is entered, because its load and enter scripts run
+            // on the way in and are entitled to write the same variables.
+            vars_.startNewGame();
+            for (const VarSet &v : c.vars)
+                if (v.id != VarId::Unknown)
+                    vars_.set(v.id, v.value);
+
+            endingProbe = EndingProbe{};
+            endingProbe.armed = true;
+            const bool handled = fireExternal(*this, c.stack, c.key);
+            const EndingProbe got = endingProbe;
+            endingProbe = EndingProbe{};
+
+            ++ran;
+            std::string why;
+            if (!handled)
+                why = "not dispatched";
+            else if (got.fired != c.expectEnding)
+                why = c.expectEnding ? "no ending" : "ended, should link";
+            else if (!c.expectEnding && stack_.id != StackId::Rspit)
+                why = "did not link to Tay";
+            else if (c.expectEnding)
+            {
+                if (c.mlst != 0 && got.mlstIndex != c.mlst)
+                    why = "mlst " + std::to_string(got.mlstIndex) + " not "
+                          + std::to_string(c.mlst);
+                else if (c.movie != 0 && got.movieCode != c.movie)
+                    why = "movie " + std::to_string(got.movieCode) + " not "
+                          + std::to_string(c.movie);
+                else if (got.delayMs != c.delayMs)
+                    why = "delay " + std::to_string(got.delayMs);
+                else if (got.frameCountOverride != c.frameCountOverride)
+                    why = "override " + std::to_string(got.frameCountOverride);
+                else if (!got.reset || !got.returned)
+                    why = "state not reset";
+            }
+
+            if (why.empty())
+                out("%d ok  %s", i + 1, c.what);
+            else
+            {
+                out("%d FAIL %s", i + 1, c.what);
+                out("     %s", why.c_str());
+                ++failed;
+            }
+        }
+
+        // Prison Island's gate, which is not an ending but is the only thing
+        // standing between a player and the best one: the elevator refuses to
+        // count a correct digit unless Gehn is already trapped
+        // (ExternalsPspit.cpp:55-56). Separate from the table because it fires a
+        // command WITH an argument and asserts a refusal rather than a movie.
+        if (only == 0 && changeToStack(StackId::Pspit))
+        {
+            const std::int32_t target =
+                findCardWithExternal(stack_, "xpisland990_elevcombo");
+            if (target >= 0 && changeToCard(static_cast<std::uint16_t>(target)))
+            {
+                vars_.startNewGame();
+                vars_.set(VarId::AGehn, 1); // loose
+                const std::uint16_t digit = static_cast<std::uint16_t>(
+                    comboDigit(vars_.get(VarId::PCorrectOrder), 0));
+                runPspitExternal(*this, "xpisland990_elevcombo", &digit, 1);
+                ++ran;
+                if (vars_.get(VarId::PElevCombo) == 0)
+                    out("%d ok  cage: gated on Gehn", kEndingCount + 1);
+                else
+                {
+                    out("%d FAIL cage: not gated", kEndingCount + 1);
+                    ++failed;
+                }
+            }
+        }
+
+        out("%d run, %d failed, 1 skipped", ran, failed);
+        out("skipped: Gehn shoots you");
+        if (!restoreFrom(before))
+            out("could NOT put the game back");
+        return false;
     }
 
     if (cmd == "notes")

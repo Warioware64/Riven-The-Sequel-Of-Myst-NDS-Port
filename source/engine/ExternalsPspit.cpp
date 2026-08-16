@@ -106,7 +106,7 @@ namespace
         // nought, which is how she sometimes moves twice in a row.
         const std::uint32_t next = static_cast<std::uint32_t>(randomBetween(0, 120)) * 1000;
         e.vars().set(VarId::PCathTime, e.clock() + Engine::msToFrames(next));
-        e.installTimer(catherineIdleTimer, next);
+        e.installTimer(catherineIdleTimer, next, "pspit catherine");
     }
 
     // --- the dome ------------------------------------------------------------
@@ -173,7 +173,8 @@ void installPspitCardTimer(Engine &e)
     // and is deliberately long: the point is that she is not performing for you.
     if (e.globalCardId(e.cardId()) == 0x3a85)
         e.installTimer(catherineIdleTimer,
-                       static_cast<std::uint32_t>(randomBetween(1, 33)) * 1000);
+                       static_cast<std::uint32_t>(randomBetween(1, 33)) * 1000,
+                       "pspit catherine");
 }
 
 } // namespace rivenrt

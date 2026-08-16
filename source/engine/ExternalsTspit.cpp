@@ -191,19 +191,39 @@ namespace
     /// ospit's and rspit's endings share (Externals.hpp).
     void xtopenfissure(Engine &e)
     {
-        std::uint16_t index = 11; // the impossible ending
+        // Each ending's credits wait is its own, and these are ScummVM's
+        // measurements against these four videos (tspit.cpp:143-161). The third
+        // number is the Polish frame-count override, carried unused -- see
+        // runEndGame.
+        std::uint16_t index = 11;             // the impossible ending
+        std::uint32_t frameCountOverride = 0; // ...which has no override
         if (e.vars().get(VarId::PCage) == 2)
+        {
             index = 8; // Catherine free, Gehn trapped, Atrus comes
+            frameCountOverride = 2640;
+        }
         else if (e.vars().get(VarId::AGehn) == 4)
+        {
             index = 9; // Catherine still trapped, Gehn trapped
+            frameCountOverride = 2088;
+        }
         else if (e.vars().get(VarId::ATrapBook) == 1)
+        {
             index = 10; // Gehn free, and everyone dies
+            frameCountOverride = 1703;
+        }
+
+        // Which of the four was chosen, for the console's `endings` command.
+        // Recorded here and not in runEndGame because this is the only place
+        // that knows: what runEndGame is handed is a movie CODE, and on this
+        // card the codes and the indices are not the same numbers.
+        endingProbe.mlstIndex = index;
 
         // The only one of the three endings that has to activate its own
         // record: tspit's card carries all four and picks between them here,
         // where ospit's and rspit's cards have already activated theirs.
         e.activateMlst(index, false);
-        runEndGame(e, codeForMlstIndex(e, index));
+        runEndGame(e, codeForMlstIndex(e, index), 5000, frameCountOverride);
     }
 
     // --- the marble grid -----------------------------------------------------

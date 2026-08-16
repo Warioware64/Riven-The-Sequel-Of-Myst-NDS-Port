@@ -4,12 +4,15 @@
 // cannot express: a book's page turn, a slider's drag maths, a dome's combination
 // check. ScummVM implements them per stack in engines/mohawk/riven_stacks/.
 //
-// ALL 115 OF THEM ARE IMPLEMENTED. That is every name in every stack's NAME 3
-// resource in the shipped game, plus the handful ScummVM registers that this
-// release's data does not call (the demo's boundary dialogues, the DVD's two
-// school resets). The fallback below still exists and still names anything it
-// does not know, because a different release could carry a name this one does
-// not -- but nothing in the 5-CD game reaches it.
+// ALL 131 OF THEM ARE IMPLEMENTED -- aspit and the shared 26, jspit 29, tspit
+// 18, bspit 19, gspit 20, ospit 8, pspit 7, rspit 4. That is every name in every
+// stack's NAME 3 resource in the shipped game, plus the handful ScummVM
+// registers that this release's data does not call (the demo's boundary
+// dialogues, the DVD's two school resets); the set matches ScummVM's
+// REGISTER_COMMAND list exactly, in both directions. The fallback below still
+// exists and still names anything it does not know, because a different release
+// could carry a name this one does not -- but nothing in the 5-CD game reaches
+// it.
 //
 // THIS FILE IS THE DISPATCHER, plus two things that are not one island's:
 // aspit's commands, which are the menu and the books rather than a place, and
@@ -36,6 +39,7 @@
 #include "engine/Engine.hpp"
 #include "engine/Externals.hpp"
 #include "engine/Script.hpp"
+#include "render/Credits.hpp"
 
 using namespace rivendata;
 
@@ -271,18 +275,40 @@ void playPageTurnSound(Engine &e)
     e.playCardSound((std::rand() & 1) != 0 ? "aPage1" : "aPage2", 51);
 }
 
-void runEndGame(Engine &e, std::uint16_t movieCode, bool alreadyPlaying)
+EndingProbe endingProbe;
+
+void runEndGame(Engine &e, std::uint16_t movieCode, std::uint32_t delayMs,
+                std::uint32_t frameCountOverride, bool alreadyPlaying)
 {
+    if (endingProbe.armed)
+    {
+        // The console is asking which ending this is, not to watch it. Record
+        // and fall through to the tail -- see EndingProbe.
+        endingProbe.fired = true;
+        endingProbe.movieCode = movieCode;
+        endingProbe.delayMs = delayMs;
+        endingProbe.frameCountOverride = frameCountOverride;
+        endingProbe.alreadyPlaying = alreadyPlaying;
+    }
+
     // The ambient stops before the movie starts: an ending is silent under its
     // own soundtrack, and Riven's last five minutes have their own
-    // (riven_stack.cpp:208).
+    // (riven_stack.cpp:209).
     e.stopAllAmbient();
     e.stopEffects();
 
-    if (alreadyPlaying)
+    if (endingProbe.armed)
+    {
+        // Neither the video nor the roll, and the movie that may already be
+        // running is stopped rather than left decoding under the menu.
+        if (alreadyPlaying)
+            e.stopMovie(movieCode);
+    }
+    else if (alreadyPlaying)
     {
         // Watch it out rather than start it. This is the loop runCredits spins
-        // (riven_stack.cpp:239-257) with the credits taken out of it.
+        // (riven_stack.cpp:239-257) with the credits taken out of it -- they
+        // are rolled below instead, once, for all three call sites.
         while (!e.movieEnded(movieCode) && !e.quitRequested())
             e.pumpIdleFrame();
     }
@@ -290,6 +316,16 @@ void runEndGame(Engine &e, std::uint16_t movieCode, bool alreadyPlaying)
     {
         e.playMovie(movieCode, true);
     }
+
+    // The roll. ScummVM interleaves it with the video's own loop because the
+    // video's AUDIO keeps playing under the credits after its picture ends
+    // (riven_stack.cpp:227-232 says so in as many words). Here the movie has
+    // been played to its end by the line above and there is nothing left of it
+    // to run under, so the roll follows rather than overlaps -- and `delayMs`,
+    // which ScummVM measures from the last picture frame, is the pause before
+    // it starts either way.
+    if (!endingProbe.armed && !e.quitRequested())
+        runCredits(e, delayMs);
 
     // riven_stack.cpp:262-270: the game state is thrown away and the player is
     // put back on the menu. startNewGame cannot clear the zip destinations --
@@ -306,6 +342,24 @@ void runEndGame(Engine &e, std::uint16_t movieCode, bool alreadyPlaying)
     // Deferred, because this is running inside a hotspot script and the
     // interpreter is still holding the stack it would replace.
     e.changeToStackAndCard(StackId::Aspit, 1, true);
+
+    if (endingProbe.armed)
+    {
+        // OBSERVED, not asserted. A flag set on the line after the call it is
+        // meant to be about proves only that control reached that line, which is
+        // the difference between a check and a decoration -- so both of these
+        // read the engine back.
+        //
+        // `reset` looks at a variable the harness had just set to something
+        // else: startNewGame's defaults have agehn and pcage at zero, so either
+        // one still carrying a case's value means the state was not thrown away.
+        // `returned` is only meaningful because the console runs outside the
+        // interpreter, where the change above is immediate rather than deferred.
+        endingProbe.reset = e.vars().get(VarId::AGehn) == 0
+                            && e.vars().get(VarId::PCage) == 0
+                            && e.vars().get(VarId::ATrapBook) == 0;
+        endingProbe.returned = e.stack().id == StackId::Aspit && e.cardId() == 1;
+    }
 }
 
 void turnBookPages(Engine &e, VarId pageVar, int delta, std::uint32_t firstPage,

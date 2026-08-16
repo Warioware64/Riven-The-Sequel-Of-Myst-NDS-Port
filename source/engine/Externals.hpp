@@ -76,29 +76,72 @@ void turnBookPages(Engine &engine, rivendata::VarId pageVar, int delta,
 /// pages does not tick identically (riven_stack.cpp:404-412).
 void playPageTurnSound(Engine &engine);
 
-/// RivenStack::runEndGame (riven_stack.cpp:207-213). Play the ending on movie
-/// `code`, throw the game state away and put the player back on the menu.
+/// RivenStack::runEndGame (riven_stack.cpp:208-215). Play the ending on movie
+/// `code`, roll the credits, throw the game state away and put the player back
+/// on the menu.
 ///
 /// Three of Riven's islands can end it -- tspit's fissure, ospit's trap book
 /// and rspit's -- and the differences between them are all in choosing WHICH
-/// movie, which is the caller's half. This is the part that is the same.
+/// movie and how long to wait afterwards, which is the caller's half. This is
+/// the part that is the same.
 ///
-/// THE CREDITS ARE NOT HERE, on any of the three. ScummVM follows the movie
-/// with runCredits (riven_stack.cpp:215-270), which scrolls extras.MHK's tBMP
-/// 302 through 320 -- nineteen full-width images, the first two held for four
-/// seconds and the rest scrolled at 60Hz. That is a presentation feature with
-/// its own converter stage and its own screen mode, and it is deliberately left
-/// for its own pass; what is here is the ending itself, which is what makes the
-/// game finishable. It is also why the `delay` and `videoFrameCountOverride`
-/// arguments ScummVM's version takes are absent: both exist only to time the
-/// credits roll behind the video.
+/// `delayMs` is the pause between the ending's video running out and the first
+/// credits image (riven_stack.cpp:244). It is per-ending and the numbers are
+/// ScummVM's own, because they were measured against these videos: the office
+/// endings wait eight to twelve seconds on a held last frame, and Tay's waits
+/// one and a half.
+///
+/// `frameCountOverride` is carried and NOT honoured. It exists for the Polish
+/// release alone, whose ending videos keep running white frames after the
+/// picture ends, so ScummVM stops the video early rather than at endOfVideo
+/// (riven_stack.cpp:227-236). This port has no language flag to test it
+/// against, and applying it to a non-Polish video would cut the ending short --
+/// so it is stored where a language check can find it later rather than dropped
+/// and having to be researched again.
 ///
 /// `alreadyPlaying` is for the one ending that is not started here: ospit's
 /// third refusal, where Gehn shoots the player part-way through the speech
 /// movie that xbookclick was watching. ScummVM reaches that one by calling
 /// runCredits directly rather than runEndGame (ospit.cpp:143-146), because
 /// starting the movie again would rewind it to the beginning of the scene.
-void runEndGame(Engine &engine, std::uint16_t movieCode, bool alreadyPlaying = false);
+void runEndGame(Engine &engine, std::uint16_t movieCode, std::uint32_t delayMs,
+                std::uint32_t frameCountOverride = 0, bool alreadyPlaying = false);
+
+/// Debug-only interception of the ending tail, for the console's `endings`
+/// command (DebugConsole.cpp).
+///
+/// Riven has eight endings and no route to any of them shorter than a
+/// playthrough, so the only way to check that the branch logic still picks the
+/// right one is to fire each branch and look at what it chose. Armed, runEndGame
+/// records its arguments and skips the video and the credits -- everything that
+/// costs minutes -- while still running the state reset and the return to the
+/// menu, which is the half that can actually be wrong.
+///
+/// A plain struct with a file-scope instance rather than a callback: there is
+/// one console and one engine, the recording is four integers, and the cost when
+/// disarmed has to be a single predictable branch on a path that is already
+/// about to play a video.
+struct EndingProbe
+{
+    bool armed = false;
+    bool fired = false;
+    /// tspit's fissure alone: WHICH of its four MLST records was chosen. The
+    /// movie code cannot stand in for it -- codeForMlstIndex maps index to code
+    /// through the card, and on the fissure card they are not the same numbers.
+    std::uint16_t mlstIndex = 0;
+    std::uint16_t movieCode = 0;
+    std::uint32_t delayMs = 0;
+    std::uint32_t frameCountOverride = 0;
+    bool alreadyPlaying = false;
+    /// The tail, READ BACK off the engine rather than asserted on the way past:
+    /// `reset` is the deciding variables all being back at their defaults, and
+    /// `returned` is the engine standing on aspit card 1. The second is only
+    /// meaningful because the console runs outside the interpreter, where
+    /// runEndGame's stack change is immediate rather than deferred.
+    bool reset = false;
+    bool returned = false;
+};
+extern EndingProbe endingProbe;
 
 // --- the per-stack tables --------------------------------------------------
 //

@@ -51,6 +51,7 @@ arm9.generate_elf()
 nds = NdsRom(
     binaries=[arm9, nitrofs],
     nds_path='riven-nds-port.nds',
+    game_icon="Logo.bmp",
     game_title='RIVEN DS',
     game_subtitle='Ported by Warioware64',
     game_author='github.com/Warioware64',

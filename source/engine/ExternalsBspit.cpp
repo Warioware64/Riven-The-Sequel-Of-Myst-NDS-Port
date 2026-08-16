@@ -227,7 +227,8 @@ namespace
         // trap and walking away work, and the branch a load has to survive.
         if (e.clock() < deadline)
         {
-            e.installTimer(ytramTrapTimer, (deadline - e.clock()) * 1000 / 60);
+            e.installTimer(ytramTrapTimer, (deadline - e.clock()) * 1000 / 60,
+                           "bspit ytram trap");
             return;
         }
 
@@ -252,7 +253,8 @@ namespace
         e.vars().set(VarId::BYTramTime,
                      e.clock() + Engine::msToFrames(static_cast<std::uint32_t>(seconds)
                                                     * 1000));
-        e.installTimer(ytramTrapTimer, static_cast<std::uint32_t>(seconds) * 1000);
+        e.installTimer(ytramTrapTimer, static_cast<std::uint32_t>(seconds) * 1000,
+                       "bspit ytram trap");
     }
 
     /// The bait and the plate share their two hotspots and their two pictures;

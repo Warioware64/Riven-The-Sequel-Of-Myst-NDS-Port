@@ -171,6 +171,47 @@ namespace
     }
 } // namespace
 
+/// L, from every loop the engine has. DebugLog::pollHotkeys is the same
+/// function for the developer's half of the button and the body of that one
+/// carries the argument for reading the register directly; this is the player's
+/// half.
+void Engine::pollNoteHotkey()
+{
+    const std::uint32_t now = DebugLog::rawKeys();
+    const std::uint32_t pressed = now & ~noteKeys_;
+    // ALWAYS, even on the paths that return without doing anything. The latch
+    // has to keep following the buttons while notes are suppressed, or an L
+    // pressed inside the notebook would be sitting here as a fresh edge the
+    // moment it closes -- and the note it then took would be of the card the
+    // player had only just got back to.
+    noteKeys_ = now;
+
+    // DEBUG MODE OWNS L. pollHotkeys has already run this frame, from this same
+    // loop, and has already written the screenshot; a note as well would be two
+    // answers to one press. Y still opens the notebook, so nothing already
+    // written is out of reach.
+    if (DebugLog::enabled())
+        return;
+
+    // A screen that needs L ITSELF is up -- the notebook pages with it. Same
+    // counter the screenshot respects, held in the same places, because the two
+    // are now the same button polled from the same loops.
+    if (DebugLog::hotkeysHeld())
+        return;
+
+    if ((pressed & KEY_L) == 0)
+        return;
+
+    // SELECT+L is the screenshot with debug mode off (Engine::processInput), and
+    // that chord has to keep meaning one thing. Held rather than pressed: the
+    // shoulder button is what completes the chord, and SELECT is the finger
+    // already down.
+    if ((now & KEY_SELECT) != 0)
+        return;
+
+    captureNote();
+}
+
 void Engine::captureNote()
 {
     if (!global.hasFat)
@@ -180,13 +221,22 @@ void Engine::captureNote()
     }
     if (!bgs.exists())
         return;
-    if (fullscreenMoviePlaying())
-    {
-        // The buffers belong to the movie and the frame on screen is halfway
-        // through being replaced. Nothing useful could be captured.
-        setStatus("no note during a cutscene");
-        return;
-    }
+
+    // NO CUTSCENE REFUSAL. There used to be one, on the argument that the
+    // buffers belong to the movie and the frame on screen is halfway through
+    // being replaced -- but that argument applies word for word to
+    // DebugLog::screenshot, which takes the picture anyway and is the more
+    // useful for it (README: "at any moment"). Both read the SAME buffer through
+    // the same accessor, so whatever a shotNNN.bmp shows during a cutscene, the
+    // note now shows too; there is no case where one of them is right and the
+    // other is not.
+    //
+    // What the frame IS mid-cutscene is the front buffer as flushUploads left
+    // it at the top of this loop's turn, which is the frame the player is
+    // looking at. A capture taken on the exact frame of a flip can be one frame
+    // behind; that is the same one-frame slack the zoom viewer's pan has below,
+    // and for a picture of something the player is reading it is not a
+    // difference anyone can see.
 
     // HOW TALL depends on which screen is up, and getting this wrong is the one
     // mistake here that would not look like a mistake.
@@ -220,10 +270,21 @@ void Engine::captureNote()
     // Up to 96 KB of SD write. Done between two pumped frames so the audio
     // stream is fed across the stall instead of dropping a chunk of the
     // ambience.
-    idleFrame();
+    //
+    // UNLESS WE ARE ALREADY IN THAT LOOP, which is the ordinary case now that
+    // pollNoteHotkey is called from idleFrame(): a pump from inside a pump would
+    // flip buffers underneath the turn that is half way through filling one.
+    // Skipping it costs the stall its cover -- a note taken during a cutscene
+    // makes the soundtrack skip, exactly as a screenshot taken there does
+    // (DebugLog.hpp) -- and that is the price of being able to take one AT ALL
+    // during a cutscene, which is where the things worth writing down are.
+    const bool pump = !inIdleFrame_;
+    if (pump)
+        idleFrame();
     const int index = BookNotes::capture(px.data(), kViewW, noteH,
                                          static_cast<std::uint8_t>(stack_.id), cardId_);
-    idleFrame();
+    if (pump)
+        idleFrame();
 
     if (index < 0)
     {

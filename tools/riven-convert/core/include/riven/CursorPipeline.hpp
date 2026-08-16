@@ -67,9 +67,11 @@ CursorResult convertCursors(const std::vector<std::uint8_t> &exeBytes,
 
 /// extras.MHK -> extras/inventory.rcur, from tBMP 100/101/102.
 ///
-/// The books are scaled DOWN to fit kInvCelW x kInvCelH and never up, then
-/// centred, so each keeps its own proportions. `drawW`/`drawH` record where the
-/// art actually is inside its cel.
+/// Each book is scaled to the size Riven draws it at -- its strip rect, under
+/// the one uniform factor RivenInventory.hpp derives -- and NOT to its own tBMP
+/// dimensions, which the original ignores. `drawW`/`drawH` and `hotX`/`hotY`
+/// record the art's size and corner inside its cel, which is how the runtime
+/// hit-tests it.
 CursorResult convertInventory(const std::filesystem::path &extrasMhk,
                               const std::filesystem::path &out,
                               std::vector<std::string> &warnings);

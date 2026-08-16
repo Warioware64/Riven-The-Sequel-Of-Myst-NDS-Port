@@ -67,6 +67,11 @@ bool Inventory::create()
                                 file_.celBytes());
 
         items_[i].id = file_.celAt(i).id;
+        // hotX/drawW on an inventory cel: where the art is inside it. See
+        // RcurCel -- the books do not fill their cels and are not centred in
+        // them, so this is the only thing that knows what to hit-test.
+        items_[i].artLeft = file_.celAt(i).hotX;
+        items_[i].artW = file_.celAt(i).drawW;
         items_[i].obj = NEA_Hw2DOBJCreateFromAsset(assets_[i]);
         if (items_[i].obj == nullptr)
         {
@@ -97,37 +102,36 @@ void Inventory::destroy()
         a = nullptr;
     }
     file_.unload();
-    shown_ = 0;
+    layout_ = 0;
 }
 
 void Inventory::layout()
 {
-    // Spread whatever is held evenly across the band, in the original's order:
-    // Atrus, then Catherine, then the trap book left to right
-    // (riven_inventory.cpp:38-43, whose rects run 222 -> 386 in card space).
-    // Even spacing rather than the original's exact positions, because the icons
-    // here are drawn at a touchable size rather than a scaled one and would
-    // otherwise overlap.
-    int visible = 0;
-    for (const Item &it : items_)
-        if (it.id != 0 && (shown_ & (1 << (it.id - kInvTrapBook))) != 0)
-            ++visible;
-    if (visible == 0)
-        return;
-
-    const int share = kScreenW / visible;
-    int slot = 0;
-    for (const std::uint16_t want : {kInvAtrusJournal, kInvCathJournal, kInvTrapBook})
+    // Riven's own positions, scaled -- invCentreX picks the rect this book has
+    // in the arrangement now held, and returns -1 for a book the arrangement
+    // does not draw. That last part matters: holding the trap book without
+    // Catherine's journal shows Atrus's journal ALONE in the original, which is
+    // the state the game starts you in.
+    //
+    // The books were spread evenly across the band here until the icons stopped
+    // being oversized. They no longer have to be: at 8-10 columns wide the
+    // original's cluster around the middle of the strip fits with room to spare
+    // between the touch rects.
+    for (Item &it : items_)
     {
-        for (Item &it : items_)
-        {
-            if (it.id != want || (shown_ & (1 << (it.id - kInvTrapBook))) == 0)
-                continue;
-            it.hitLeft = slot * share;
-            it.hitRight = (slot == visible - 1) ? kScreenW : (slot + 1) * share;
-            it.x = it.hitLeft + (share - kInvCelW) / 2;
-            ++slot;
-        }
+        const int centre = it.id == 0 ? -1 : invCentreX(layout_, it.id);
+        it.inLayout = centre >= 0;
+        if (!it.inLayout)
+            continue;
+
+        it.x = centre - kInvCelW / 2;
+
+        // Centred on the ART, not on the cel or on the sprite: a fixed-width
+        // target that is bigger than the book it belongs to, which is what pays
+        // for drawing the book at the size Riven draws it at.
+        const int artCentre = it.x + it.artLeft + it.artW / 2;
+        it.hitLeft = artCentre - kInvTouchW / 2;
+        it.hitRight = it.hitLeft + kInvTouchW;
     }
 }
 
@@ -137,13 +141,11 @@ void Inventory::update(Engine &e)
         return;
 
     // Which books the player holds. rrebel 5 or 6 is Catherine's journal and
-    // atrapbook is the trap book (riven_inventory.cpp:63-77).
+    // atrapbook is the trap book (riven_inventory.cpp:66-67), and those two
+    // between them name one of the three arrangements.
     const std::uint32_t rrebel = e.vars().get(VarId::RRebel);
-    int want = 1 << (kInvAtrusJournal - kInvTrapBook);
-    if (rrebel == 5 || rrebel == 6)
-        want |= 1 << (kInvCathJournal - kInvTrapBook);
-    if (e.vars().get(VarId::ATrapBook) == 1)
-        want |= 1 << (kInvTrapBook - kInvTrapBook);
+    const int want = invLayoutFor(rrebel == 5 || rrebel == 6,
+                                  e.vars().get(VarId::ATrapBook) == 1);
 
     // Reasons the strip may not be shown AT ALL, whatever the pointer is doing.
     // Hidden on aspit -- that is the menu and the journals themselves, and the
@@ -159,9 +161,9 @@ void Inventory::update(Engine &e)
     // journal sat on the screen for the whole game.
     const bool hide = blocked || (!forcedVisible_ && e.pointerY() < kBandTop);
 
-    if (want != shown_ || hide != hidden_ || blocked != blocked_)
+    if (want != layout_ || hide != hidden_ || blocked != blocked_)
     {
-        shown_ = want;
+        layout_ = want;
         hidden_ = hide;
         blocked_ = blocked;
         layout();
@@ -180,7 +182,7 @@ std::uint16_t Inventory::hitTest(int x, int y) const
         return 0;
     for (const Item &it : items_)
     {
-        if (it.id == 0 || (shown_ & (1 << (it.id - kInvTrapBook))) == 0)
+        if (!it.inLayout)
             continue;
         if (x >= it.hitLeft && x < it.hitRight)
             return it.id;
@@ -257,13 +259,14 @@ void Inventory::flush()
     {
         if (it.obj == nullptr)
             continue;
-        const bool on =
-            !hidden_ && it.id != 0 && (shown_ & (1 << (it.id - kInvTrapBook))) != 0;
+        const bool on = !hidden_ && it.inLayout;
         NEA_Hw2DOBJSetVisible(it.obj, on);
         if (on)
         {
-            // Two rows above the band, so a 16-row cel gets its full height
-            // without the touch rect ever reaching into the card.
+            // The cel's bottom row IS the screen's, which is what makes the
+            // per-book offsets the converter baked in read as Riven's own gaps
+            // to the bottom of the strip. The cel starts two rows above the
+            // band; the touch rect never follows it up there.
             NEA_Hw2DOBJSetPos(it.obj, it.x, kScreenH - kInvCelH);
         }
     }

@@ -202,6 +202,19 @@ public:
     /// L: put a picture of what is on screen into the notebook.
     void captureNote();
 
+    /// Take a note if L has just been pressed. The player's half of
+    /// DebugLog::pollHotkeys, and CALL IT FROM EVERY LOOP for the same reason:
+    /// this used to hang off processInput(), which only the card loop runs, so
+    /// a cutscene, a transition and a slider drag were each a stretch of the
+    /// game no note could be taken of. Those are stretches worth writing down --
+    /// Gehn's speech and a marble being dragged onto a square are both things
+    /// the player is being asked to remember.
+    ///
+    /// Reads the key register directly and keeps its own edge state, so it
+    /// neither needs nor disturbs a caller's scanKeys(). Does nothing in debug
+    /// mode, which owns L outright.
+    void pollNoteHotkey();
+
     /// Y: page through the notebook, and scribble on it.
     void runNotebook();
 
@@ -459,6 +472,29 @@ public:
     /// from the move that got here.
     bool playMovieUntilClick(std::uint16_t code);
 
+    /// Opcode 38. Keep `opcode arg` back until the movie on `code` has been
+    /// playing for `delayMs`, and run it when that movie's blocking play ends.
+    ///
+    /// RivenScriptManager::setStoredMovieOpcode (riven_scripts.cpp:101-106) and
+    /// the test at the bottom of RivenVideo::playBlocking (riven_video.cpp:
+    /// 255-260). Note where that test is: the original does NOT interrupt the
+    /// movie part-way through to run this. It waits for the movie to finish and
+    /// then asks whether the movie got as far as the stored time -- so the delay
+    /// decides IF the opcode runs, not when. Every one of the 49 shipped uses
+    /// delays an activateSLST, which is why the whole mechanism is audible rather
+    /// than visible: a cue that arrives at the button press instead of at the end
+    /// of the ride.
+    ///
+    /// There is exactly one of these at a time, and storing a second forgets the
+    /// first -- ScummVM's storage is a single member, not a queue.
+    void storeMovieOpcode(std::uint16_t code, std::uint32_t delayMs, std::uint16_t opcode,
+                          std::uint16_t arg);
+
+    /// Run a stored opcode if it was waiting on `code` and that movie reached its
+    /// time. Clears it either way it fires; leaves it alone otherwise, because
+    /// the movie it names may not have been played yet.
+    void runStoredMovieOpcode(std::uint16_t code);
+
     /// Whether the movie on `code` has stopped -- ScummVM's
     /// `!oldVideo || oldVideo->endOfVideo()` (jspit.cpp:578). A code no MLST
     /// record on this card ever claimed counts as ended, because openSlot on one
@@ -496,8 +532,23 @@ public:
 
     using TimerProc = void (*)(Engine &);
 
-    void installTimer(TimerProc proc, std::uint32_t ms);
+    /// `name` is for the trace and the console's `timer` command, and it is
+    /// required rather than defaulted for a reason: the six timers in the game
+    /// are the six things that happen while the player stands still doing
+    /// nothing, so when one of them does not happen there is no click to point
+    /// at and no card change to blame. A function pointer says nothing on a
+    /// console; a literal that travels with the install says which of the six
+    /// is armed. Expected to be a string literal -- it is stored by pointer,
+    /// not copied.
+    void installTimer(TimerProc proc, std::uint32_t ms, const char *name);
     void removeTimer();
+    /// What is armed, or nullptr. For the console.
+    const char *timerName() const { return timerProc_ != nullptr ? timerName_ : nullptr; }
+    /// Frames until the armed timer is due, or 0 if it is overdue or idle.
+    std::uint32_t timerFramesLeft() const
+    {
+        return (timerProc_ != nullptr && timerDeadline_ > frames_) ? timerDeadline_ - frames_ : 0;
+    }
     /// Engine frames since boot. Both loops advance it: a clock that stopped for
     /// the length of a cutscene would let a timer fire the instant one ended.
     std::uint32_t clock() const { return frames_; }
@@ -610,10 +661,23 @@ private:
     /// zero.
     void releaseCardMovies();
 
-    /// Stop a fullscreen movie and put the card back on screen. Both the blocking
-    /// and the non-blocking path end here; the non-blocking one used not to,
-    /// which left the bottom screen black for good.
-    void endFullscreenMovie(MovieSlot &m);
+    /// Stop a fullscreen movie and give its two background buffers back. Both the
+    /// blocking and the non-blocking path end here; the non-blocking one used not
+    /// to, which left the bottom screen black for good.
+    ///
+    /// `bake` picks WHICH image survives, and the two are not interchangeable:
+    ///
+    ///  - true is ScummVM's disable() -- the movie's last frame becomes the card
+    ///    (riven_video.cpp:288-301). Only playBlocking ends that way, and it is
+    ///    what a card that chains several movies needs, because each one has to
+    ///    start from where the last one stopped.
+    ///  - false puts the card's own drawing back, which is where a movie that was
+    ///    merely stopped leaves the screen: the next update repaints from
+    ///    _mainScreen and the movie is gone.
+    ///
+    /// Spelled at every call site rather than defaulted, because the callers
+    /// genuinely disagree and a default would let the wrong one pass unread.
+    void endFullscreenMovie(MovieSlot &m, bool bake);
 
     /// Run the transition opcode 18 asked for, blocking until it finishes -- the
     /// way ScummVM's own runScheduledTransition does (riven_graphics.cpp:549-609).
@@ -715,6 +779,9 @@ private:
     /// engine frames. One slot, like the original's (riven_stack.h:213-214).
     TimerProc timerProc_ = nullptr;
     std::uint32_t timerDeadline_ = 0;
+    /// What installTimer was told this proc is called. A borrowed string
+    /// literal; nothing else would be safe, and nothing else is passed.
+    const char *timerName_ = "";
     /// Engine frames since boot, advanced by frame() and idleFrame() alike.
     std::uint32_t frames_ = 0;
     /// True while a timer proc is running. A proc may spin idleFrame() for the
@@ -722,6 +789,22 @@ private:
     /// re-enter checkTimer while it does -- the same job as ScummVM running its
     /// procs from inside the queued-script drain (riven_scripts.cpp:984).
     bool inTimer_ = false;
+
+    /// The key register as pollNoteHotkey last saw it. ITS OWN, and not
+    /// keysDown(): this is called from frame() and from idleFrame(), which
+    /// disagree about who calls scanKeys() -- and a second scanKeys() in one
+    /// frame computes its edge against the mask the first one stored, so it
+    /// reports nothing pressed and eats the caller's own B/START. The same
+    /// reasoning, and the same shape, as DebugLog::pollHotkeys.
+    std::uint32_t noteKeys_ = 0;
+
+    /// True while idleFrame() is on the stack. captureNote() pumps a frame
+    /// either side of its SD write to keep the audio stream fed, and it is now
+    /// reached FROM that loop -- so the pump has to be skipped rather than
+    /// re-entered. Left alone, the recursion would be one frame deep and
+    /// harmless, but it would also flip buffers underneath a caller that had
+    /// just filled one.
+    bool inIdleFrame_ = false;
 
     /// How many CursorHide guards are alive. Read once a frame in flushUploads.
     int cursorSuppress_ = 0;
@@ -791,8 +874,28 @@ private:
     /// cleared KEY_TOUCH from keysHeld() -- so this is the only thing that knows
     /// whose MouseUp script to run.
     std::int32_t pressedHotspot_ = -1;
+    /// The inventory book the press landed on, latched for the same reason and
+    /// used for one more: the release must land on it too, or a drag that ends
+    /// in the strip would open a journal. Engine::processInput.
+    std::uint16_t pressedInvItem_ = 0;
 
     MovieSlot movies_[kMovieSlots];
+
+    /// Opcode 38's one held-back command. See storeMovieOpcode().
+    ///
+    /// A code and not a slot index: the code is what the script named and what
+    /// opcode 32 will name, and a slot is a thing this engine allocates -- the
+    /// two only agree by accident.
+    struct StoredMovieOpcode
+    {
+        bool set = false;
+        std::uint16_t code = 0;
+        std::uint32_t delayMs = 0;
+        std::uint16_t opcode = 0;
+        std::uint16_t arg = 0;
+    };
+    StoredMovieOpcode storedMovieOpcode_;
+
     /// The current SLST's layers: one entry per layer IN THE RECORD, holding the
     /// RivenAudio::playSound slot, or -1 for a layer that did not start.
     ///

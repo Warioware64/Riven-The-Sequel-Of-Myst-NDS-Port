@@ -44,13 +44,18 @@ namespace
             return;
         }
 
+        // The three waits are ScummVM's own (ospit.cpp:62-66) and they differ by
+        // four seconds between the endings, because each video holds its last
+        // frame for a different length of time before the credits belong over
+        // it. The third number is the Polish frame-count override, carried
+        // unused -- see runEndGame.
         const std::uint32_t gehn = e.vars().get(VarId::AGehn);
         if (gehn == 0)
-            runEndGame(e, 1); // Gehn who?
+            runEndGame(e, 1, 9500, 1225); // Gehn who?
         else if (gehn == 4)
-            runEndGame(e, 2); // you freed him
+            runEndGame(e, 2, 12000, 558); // you freed him
         else
-            runEndGame(e, 3); // you had already met him
+            runEndGame(e, 3, 8000, 857); // you had already met him
     }
 
     // --- the cage ------------------------------------------------------------
@@ -178,7 +183,7 @@ namespace
         // out rather than restarted (ospit.cpp:140-146).
         if (e.vars().get(VarId::AGehn) == 3)
         {
-            runEndGame(e, code, true);
+            runEndGame(e, code, 5000, 995, /*alreadyPlaying=*/true);
             return;
         }
 
