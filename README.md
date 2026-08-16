@@ -11,7 +11,9 @@ own copy of Riven into files the DS can read.
 > install and produces the card graph, the artwork, the sound and the movies the
 > DS reads, with a Qt GUI and a CLI. The DS engine has a menu and a settings
 > screen, boots into Riven's own main menu, draws cards, runs the scripts, plays
-> the fullscreen movies with sound, follows hotspots between cards and stacks,
+> the fullscreen movies with sound, follows hotspots between cards and stacks —
+> the linking books included, which are not in the data and are a table in the
+> engine —
 > zooms into any card at its original resolution, saves to five slots, and keeps
 > a notebook you can draw in. **Every one of Riven's 131 external commands is
 > implemented** — all eight stacks, which is the telescope, every ending and the

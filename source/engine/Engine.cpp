@@ -1581,8 +1581,76 @@ bool Engine::changeToStack(StackId id)
     return true;
 }
 
+namespace
+{
+    /// Riven's linking books are NOT in the data, and this is the table that
+    /// stands in for them (riven.cpp:592-613, "Riven uses some hacks to change
+    /// stacks for linking books; otherwise script command 27 changes stacks").
+    ///
+    /// Every one of these is a card whose scripts do an ordinary opcode 2 to a
+    /// card in the SAME stack -- and that card is a bare still with no hotspots,
+    /// no MLST and no scripts beyond drawing itself. jspit 228, the Moiety book
+    /// in the jungle, is exactly that: card 227's `linktorebel` hotspot switches
+    /// to 228 and 228 does nothing at all. In the original the engine watches for
+    /// the arrival and swaps the stack out from under it; without that the player
+    /// is left standing on a picture with nothing to click, for good.
+    ///
+    /// BOTH ENDS ARE RMAP GLOBAL IDS, and they have to be: a card id is
+    /// stack-local and release-dependent, so the start is resolved against the
+    /// stack being left and the target against the stack being entered. All
+    /// thirteen resolve on the 5-CD release, and no target is itself a start --
+    /// which is what makes the re-entry below terminate.
+    ///
+    /// ScummVM skips the whole table for the demo, whose data does not carry
+    /// these cards. There is no demo here to skip it for.
+    struct SpecialChange
+    {
+        StackId from;
+        std::uint32_t fromGlobal;
+        StackId to;
+        std::uint32_t toGlobal;
+    };
+
+    constexpr SpecialChange kSpecialChanges[] = {
+        {StackId::Aspit, 0x1f04, StackId::Ospit, 0x44ad},   // the trap book
+        {StackId::Bspit, 0x1c0e7, StackId::Ospit, 0x2e76},  // dome linking book
+        {StackId::Gspit, 0x111b1, StackId::Ospit, 0x2e76},  // dome linking book
+        {StackId::Jspit, 0x28a18, StackId::Rspit, 0xf94},   // the Moiety book to Tay
+        {StackId::Jspit, 0x26228, StackId::Ospit, 0x2e76},  // dome linking book
+        {StackId::Ospit, 0x5f0d, StackId::Pspit, 0x3bf0},   // back out of the 233rd
+        {StackId::Ospit, 0x470a, StackId::Jspit, 0x1508e},  // back out of the 233rd
+        {StackId::Ospit, 0x5c52, StackId::Gspit, 0x10bea},  // back out of the 233rd
+        {StackId::Ospit, 0x5d68, StackId::Bspit, 0x1adfd},  // back out of the 233rd
+        {StackId::Ospit, 0x5e49, StackId::Tspit, 0xe87},    // back out of the 233rd
+        {StackId::Pspit, 0x4108, StackId::Ospit, 0x2e76},   // dome linking book
+        {StackId::Rspit, 0x32d8, StackId::Jspit, 0x1c474},  // back out of Tay
+        {StackId::Tspit, 0x21b69, StackId::Ospit, 0x2e76},  // dome linking book
+    };
+} // namespace
+
 bool Engine::changeToCard(std::uint16_t cardId)
 {
+    // The linking books, before anything else -- the same place riven.cpp:617-624
+    // tests them, which is why a card that is BOTH a link and a real card cannot
+    // exist: arriving is the link.
+    //
+    // Deferred through changeToStackAndCard rather than calling changeToStack
+    // here, and that is the whole of what makes this safe in this port. Every one
+    // of these is reached from a hotspot's opcode 2, so the interpreter is
+    // walking a command list that lives inside the Stack loading the next one
+    // would destroy (Engine.hpp). ScummVM can swap the stack mid-script because
+    // its scripts are reference-counted objects; here the change waits for the
+    // outermost command list to return.
+    for (const SpecialChange &sc : kSpecialChanges)
+    {
+        if (sc.from != stack_.id)
+            continue;
+        if (stack_.localCardForGlobal(sc.fromGlobal) != static_cast<std::int32_t>(cardId))
+            continue;
+        DebugLog::log("LINK %s/%u -> %s", stackName(stack_.id), cardId, stackName(sc.to));
+        return changeToStackAndCard(sc.to, sc.toGlobal, false);
+    }
+
     const Card *next = stack_.findCard(cardId);
     if (next == nullptr)
     {
