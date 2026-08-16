@@ -881,6 +881,12 @@ private:
 
     MovieSlot movies_[kMovieSlots];
 
+    /// The slot a blocking play is waiting on, or -1. pumpMovies leaves that one
+    /// alone: the waiter drives pumpMovies through idleFrame(), and it is the
+    /// only caller that knows whether the movie's last frame is meant to stay on
+    /// the card or be handed back. See playMovieBlocking.
+    std::int32_t blockingSlot_ = -1;
+
     /// Opcode 38's one held-back command. See storeMovieOpcode().
     ///
     /// A code and not a slot index: the code is what the script named and what

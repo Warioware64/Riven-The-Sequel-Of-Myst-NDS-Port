@@ -1150,6 +1150,20 @@ void Engine::playMovieBlocking(std::int32_t slot, bool whole)
     MovieSlot &ms = movies_[slot];
     const bool full = ms.player.profile() == VideoProfile::Full;
 
+    // THIS SLOT IS SPOKEN FOR while the wait below runs. See pumpMovies, which
+    // the wait itself drives: without this it tidies the movie away on the frame
+    // it ends, one call before the tidying this function is about to do with the
+    // bake the caller asked for. Scope-bound because the `full` branch at the
+    // bottom returns early, and nested because runStoredMovieOpcode can spin a
+    // command list that reaches another blocking play.
+    struct Claim
+    {
+        std::int32_t &slot;
+        const std::int32_t was;
+        Claim(std::int32_t &s, std::int32_t v) : slot(s), was(s) { s = v; }
+        ~Claim() { slot = was; }
+    } claim{blockingSlot_, slot};
+
     // No pointer over a video. riven_video.cpp:216 and :268 bracket the whole of
     // playBlocking this way, and it is every blocking movie -- a fullscreen
     // cutscene and a small overlay alike, which is why this is here and not on
@@ -2494,8 +2508,9 @@ void Engine::processInput()
 
 void Engine::pumpMovies()
 {
-    for (MovieSlot &m : movies_)
+    for (std::int32_t i = 0; i < kMovieSlots; ++i)
     {
+        MovieSlot &m = movies_[i];
         if (!m.open || !m.enabled || !m.player.isPlaying())
             continue;
         m.player.pump();
@@ -2513,7 +2528,22 @@ void Engine::pumpMovies()
         // so nothing has told the card to keep this frame. The original gets the
         // same picture by a different route -- it stops redrawing the movie and
         // the next screen update repaints from _mainScreen.
-        if (m.player.profile() == VideoProfile::Full && m.player.finished())
+        //
+        // NOT THE SLOT A BLOCKING PLAY IS WAITING ON. That play spins
+        // idleFrame(), which is what calls this -- so on the very frame the last
+        // picture lands, this ran FIRST and ended the takeover with no bake. The
+        // blocking loop then fell out and asked for the bake it wanted, but
+        // keepMovieFrame had nothing left to keep and returned -1, so the bake
+        // was a silent no-op and the card's own still came back.
+        //
+        // gspit's sub elevator is where that shows: the ride alternates
+        // fullscreen movies with small overlays, and overlay 3 has to composite
+        // over fullscreen 2's last frame. It was drawn over the card's still
+        // instead -- the doors open again behind a movie of them being shut.
+        // Whoever is blocking on the slot owns the ending, because only that
+        // caller knows whether the frame is meant to stay.
+        if (m.player.profile() == VideoProfile::Full && m.player.finished()
+            && i != blockingSlot_)
             endFullscreenMovie(m, false);
     }
 }
