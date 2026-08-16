@@ -172,6 +172,7 @@ namespace
 
         std::uint32_t read = 0;
         std::uint64_t audio = 0;
+        std::uint32_t lastPicture = 0;
         bool ok = true;
         rivenrt::RvidFrameData frame;
         while (f.readNext(frame))
@@ -188,12 +189,27 @@ namespace
                 ok = false;
                 break;
             }
+            if (!frame.repeat)
+                lastPicture = read + 1;
             audio += frame.audioBytes;
             ++read;
         }
         check(ok && read == expectFrames,
               label + ": every frame reads (" + std::to_string(read) + " of "
                   + std::to_string(expectFrames) + ")");
+
+        // pictureFrames() against the same answer reached the other way round.
+        //
+        // The reader derives it from the INDEX -- the byte size of each frame,
+        // read backwards at open() -- and this counts the frames that actually
+        // came out carrying a picture, which is the kFrameRepeat FLAG. Two
+        // independent signals for one fact, which is the whole value of checking
+        // it here: on hardware nothing can tell you the credits started early.
+        if (ok)
+            check(f.pictureFrames() == lastPicture,
+                  label + ": pictureFrames is the last frame with a picture ("
+                      + std::to_string(f.pictureFrames()) + " vs "
+                      + std::to_string(lastPicture) + ")");
         if (f.hasAudio())
             check(audio > 0, label + ": the frames carry their audio blocks");
 
@@ -322,7 +338,13 @@ namespace
     /// A synthetic movie, so the format is covered without game data. Not a
     /// QuickTime file -- convertMovieBytes needs one of those -- so this exercises
     /// the container and the reader by writing one the same way the pipeline does.
-    void syntheticContainer(const fs::path &path, int w, int h, std::uint32_t frames)
+    ///
+    /// `tailFrames` of the total carry audio and no picture, which is how the
+    /// pipeline stores a movie whose soundtrack outlasts its video (the endings
+    /// are all like this, and ospit's tMOV 0 runs 260 seconds of dialogue over 82
+    /// seconds of picture). Zero for a movie whose two tracks end together.
+    void syntheticContainer(const fs::path &path, int w, int h, std::uint32_t frames,
+                            std::uint32_t tailFrames = 0)
     {
         const std::uint32_t pictureBytes = rvidFrameBytes(w, h);
 
@@ -335,10 +357,20 @@ namespace
         hdr.height = static_cast<std::uint16_t>(h);
         hdr.fpsNum = 15;
         hdr.fpsDen = 1;
+        hdr.flags = tailFrames > 0 ? kVideoHasAudio : 0;
         hdr.frameCount = frames;
         hdr.indexCount = frames;
         hdr.largestFrameBytes =
             static_cast<std::uint32_t>(sizeof(RvidFrameHeader)) + pictureBytes;
+
+        // A tail frame's audio block, sized the way the pipeline sizes one: the
+        // samples a frame's worth of the clock is worth, as IMA nibbles behind
+        // their state word. The number does not matter to anything being tested
+        // here; that it is FAR SMALLER than a picture does, because that is the
+        // difference RvidFile::pictureFrames reads.
+        const std::uint32_t audioBytes = tailFrames > 0 ? 4u + 22050u / 15u / 2u : 0u;
+        hdr.audioRate = tailFrames > 0 ? 22050 : 0;
+        hdr.audioSamplesPerFrame = tailFrames > 0 ? 22050 / 15 : 0;
 
         std::vector<RvidFrameEntry> index(frames);
         std::vector<Texel> picture(pictureBytes / sizeof(Texel));
@@ -353,23 +385,33 @@ namespace
         out.write(&hdr, sizeof(hdr));
         out.write(index.data(), index.size() * sizeof(RvidFrameEntry));
 
+        const std::uint32_t pictureCount = tailFrames < frames ? frames - tailFrames : frames;
+        std::vector<std::uint8_t> audio(audioBytes, 0x42);
+
         std::uint64_t offset = sizeof(hdr) + index.size() * sizeof(RvidFrameEntry);
         for (std::uint32_t n = 0; n < frames; ++n)
         {
+            const bool repeat = n >= pictureCount;
             for (std::size_t i = 0; i < picture.size(); ++i)
                 picture[i] = static_cast<Texel>(0x8000 | ((n + i) & 0x7FFF));
 
             RvidFrameHeader fh{};
-            fh.audioBytes = 0;
-            fh.flags = 0;
-            fh.byteCount = pictureBytes;
+            fh.audioBytes = static_cast<std::uint16_t>(audioBytes);
+            fh.flags = repeat ? kFrameRepeat : 0;
+            fh.byteCount = audioBytes + (repeat ? 0u : pictureBytes);
 
             index[n].frame = n;
             index[n].offset = static_cast<std::uint32_t>(offset);
             out.write(&fh, sizeof(fh));
-            out.write(picture.data(), pictureBytes);
-            offset += sizeof(fh) + pictureBytes;
+            if (audioBytes > 0)
+                out.write(audio.data(), audioBytes);
+            if (!repeat)
+                out.write(picture.data(), pictureBytes);
+            offset += sizeof(fh) + fh.byteCount;
         }
+        // Only a picture frame can be the largest, and there is always one.
+        hdr.largestFrameBytes =
+            static_cast<std::uint32_t>(sizeof(RvidFrameHeader)) + audioBytes + pictureBytes;
 
         if (!out.rewriteHeader(&hdr, sizeof(hdr), index.data(),
                                index.size() * sizeof(RvidFrameEntry), err)
@@ -509,6 +551,34 @@ int main()
         checkContainer(path, "synthetic 40x72");
         checkReader(path, "synthetic 40x72", 37);
         checkVideoSink(path, "synthetic 40x72", 37);
+        std::error_code ec;
+        fs::remove(path, ec);
+    }
+
+    // --- a movie whose soundtrack outlasts its picture -------------------------
+    //
+    // The shape every ending has, and the reason RvidFile::pictureFrames exists:
+    // twelve of the game's movies carry frames past the end of their video that
+    // hold audio and no picture at all. Before this, the credits waited for the
+    // whole container and so arrived minutes after the screen stopped moving.
+    //
+    // 12 of the 40 frames are tail, so the answer wanted is 28 -- and it has to
+    // come out of the INDEX, which is all the reader has at open() time.
+    {
+        const fs::path path = fs::temp_directory_path() / "riven-test-audio-tail.rvid";
+        syntheticContainer(path, 40, 72, 40, 12);
+        checkContainer(path, "tailed 40x72");
+        checkReader(path, "tailed 40x72", 40);
+        {
+            rivenrt::RvidFile f;
+            if (f.open(path.string()))
+                check(f.pictureFrames() == 28 && f.frameCount() == 40,
+                      "the audio tail is not counted as picture ("
+                          + std::to_string(f.pictureFrames()) + " of "
+                          + std::to_string(f.frameCount()) + ")");
+            else
+                check(false, "the tailed movie opens");
+        }
         std::error_code ec;
         fs::remove(path, ec);
     }

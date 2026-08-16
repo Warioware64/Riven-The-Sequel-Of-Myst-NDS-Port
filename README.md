@@ -166,10 +166,21 @@ to the disc, not to the game) gets the black screen it had before.
 
 **X zooms.** Riven's stills are 608x392 and the card view shows all of them at
 0.42x, which turns a good deal of what the game asks you to read into a smudge.
-**X** opens the full-resolution twin at 1:1 and the D-pad or the stylus pans it;
-**B** leaves. This is what `pics_hi/` has been for, so **do not pass
-`--no-hires`** if you want it — without that stage the button says so and does
-nothing.
+**X** opens the full-resolution twin at 1:1; the **D-pad** pans it and **B**
+leaves. This is what `pics_hi/` has been for, so **do not pass `--no-hires`** if
+you want it — without that stage the button says so and does nothing.
+
+**And the zoom is the game, not a photograph of it.** What a card's scripts draw
+on top of its still — a dome's sliders, the white page edges of a journal, the
+five D'ni numerals of the telescope combination on Catherine's page 28, a marble
+on its square — is drawn into the zoomed picture too, out of each overlay's own
+full-resolution twin, and it updates as it changes. **The stylus acts in there
+exactly as it does on the card**: press a slider and drag it a slot at a time at
+1:1 instead of at three pixels a slot, turn a page, throw a switch. **A** clicks
+where the pointer is, and **R + drag** pans instead of clicking, for the cards
+whose hotspots leave nowhere else to take hold of the picture. Anything the
+viewer cannot show — a movie, a transition, the next card — closes it first and
+then happens, so clicking a door at full resolution simply walks you through it.
 
 **Settings** live behind the menu the ROM starts on, and behind Riven's own
 Options button. Zip mode (off by default, as in the original), transitions, water,

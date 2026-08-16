@@ -39,6 +39,7 @@
 #include "BookNotes.hpp"
 #include "DebugLog.hpp"
 #include "Global.hpp"
+#include "ScreenTakeover.hpp" // screenHandBack: the way out of a port screen
 #include "global_header.hpp"
 #include "render/BgSurface.hpp"
 #include "render/TextLayer.hpp"
@@ -733,15 +734,18 @@ void Engine::runNotebook()
     saveStrokes();
 
     // --- give the screen back ----------------------------------------------
-    bgs.setLetterbox(true);
     if (inGame)
     {
-        for (int b = 0; b < BgSurface::kBuffers; ++b)
-            if (b != bgs.parkedBuffer())
-                bgs.resetBuffer(b);
-        (void)bgs.endMovieTakeover();
+        // The rebind, the flip and the clears, in the one order that does not
+        // show a frame of black on the way out (ScreenTakeover.hpp).
+        screenHandBack();
         surface_.invalidateAll();
         applyScreenUpdate(true);
+    }
+    else
+    {
+        // Nothing was taken, so there is nothing to hand back but the letterbox.
+        bgs.setLetterbox(true);
     }
     inventory_.setSuppressed(invWasSuppressed);
     inventory_.flush();

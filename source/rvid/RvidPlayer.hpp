@@ -98,6 +98,48 @@ public:
     bool isPlaying() const { return playing_; }
     bool finished() const { return finished_; }
 
+    /// Whether the PICTURE has run out, even though the movie has not.
+    ///
+    /// ScummVM's `videoPtr->getCurFrame() >= frameCount - 1` in
+    /// RivenStack::runCredits (riven_stack.cpp:236-240), and the difference
+    /// between this and finished() is up to three minutes: finished() is the
+    /// whole container, soundtrack and all. See RvidFile::pictureFrames for how
+    /// the count is arrived at and what it approximates.
+    ///
+    /// LEADS THE SCREEN by up to kReadAheadFrames, because shown_ is the frame
+    /// READ and pump() reads ahead of the clock -- about 130 ms at 15 fps.
+    /// Against the delay its one caller then sits through (1.5 to 12 seconds
+    /// before the first credits card) that is nothing, and matching
+    /// currentFrame() is worth more than the two frames.
+    bool pictureEnded() const
+    {
+        const std::uint32_t last = file_.pictureFrames();
+        return finished_ || last == 0
+               || (shown_ >= 0 && static_cast<std::uint32_t>(shown_) + 1 >= last);
+    }
+
+    /// Turn looping off (or on) on a playback that has already started.
+    ///
+    /// RivenVideo::setLooping, which RivenStack::runEndGame calls straight after
+    /// play() (riven_stack.cpp:210-213). play() decides this from its own
+    /// argument; this is for a caller that has to be sure whatever the MLST
+    /// record said -- an ending that looped would never let the credits go.
+    void setLooping(bool on) { loop_ = on; }
+
+    /// Stop presenting the picture. Keep playing the sound.
+    ///
+    /// RivenVideo::disable()'s half that matters here: ScummVM calls it the
+    /// moment the picture runs out so the credits can have the screen
+    /// (riven_stack.cpp:242). In the ordinary case it has nothing to do -- past
+    /// the last picture frame every frame is an audio block behind an eight-byte
+    /// header and there are no pixels to present -- and it exists for the case
+    /// where pictureFrames() guessed short, where without it a frame arriving
+    /// mid-credits would be written into the buffer the roll is scrolling.
+    ///
+    /// Cleared by play(): a slot is reused, and the next movie in it is not the
+    /// one that asked to be silent-with-pictures.
+    void disableVideo() { videoDisabled_ = true; }
+
     /// Read as far as the clock allows. Call once per frame.
     void pump();
 
@@ -134,6 +176,9 @@ public:
     int width() const { return file_.header().width; }
     int height() const { return file_.header().height; }
     std::uint32_t frameCount() const { return file_.frameCount(); }
+    /// Frames of PICTURE, which on a movie whose soundtrack outlasts it is fewer
+    /// than frameCount(). See RvidFile::pictureFrames.
+    std::uint32_t pictureFrames() const { return file_.pictureFrames(); }
     /// The frame currently on screen, or -1 before the first one.
     /// RivenVideo::getCurFrame (riven_video.cpp:101-104), for the dome's
     /// "did you click on the golden frame?" test (domespit.cpp:50-64).
@@ -194,6 +239,7 @@ private:
 
     bool playing_ = false;
     bool finished_ = false;
+    bool videoDisabled_ = false;
     bool loop_ = false;
     bool ownsAudio_ = false;
     bool havePicture_ = false;

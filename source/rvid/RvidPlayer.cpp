@@ -198,6 +198,7 @@ bool RvidPlayer::play(bool loop, std::uint32_t startFrame, std::uint32_t stopFra
     havePicture_ = false;
     liteDirty_ = false;
     finished_ = false;
+    videoDisabled_ = false;
     // A segment cannot loop: readNextFrame's loop path rewinds to frame 0, which
     // is outside the range. Nothing asks for both -- the only caller that gives a
     // range is the telescope, which blocks on one stroke.
@@ -304,7 +305,15 @@ bool RvidPlayer::readNextFrame()
     // never copied twice.
     void *dst = nullptr;
     std::size_t dstBytes = 0;
-    if (full)
+    if (videoDisabled_)
+    {
+        // Nowhere, which is what disableVideo() means. A null destination makes
+        // readNextInto's `toCaller` false, so the sink is bypassed too and the
+        // picture lands in the reader's own buffer to be overwritten by the next
+        // frame -- the file still has to be walked, because the audio is
+        // interleaved with it and the audio is the point.
+    }
+    else if (full)
     {
         g_fullBlit.dst = BgSurface::pixels(bg_->backBuffer());
         g_fullBlit.srcW = width();
@@ -334,7 +343,11 @@ bool RvidPlayer::readNextFrame()
 
     // A repeat frame carries no picture and leaves the last one alone. That is how
     // a movie whose audio outlasts its video carries the rest of its soundtrack.
-    if (!frame.repeat && frame.videoBytes > 0)
+    //
+    // And a disabled one has a picture that went nowhere, so there is nothing to
+    // announce: havePicture_ stays as it was, and neither the flip nor the
+    // composite is asked for.
+    if (!videoDisabled_ && !frame.repeat && frame.videoBytes > 0)
     {
         havePicture_ = true;
         if (full)

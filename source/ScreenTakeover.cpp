@@ -24,6 +24,27 @@ void screenFrame()
     bgs.vblank();
 }
 
+void screenHandBack()
+{
+    // Queued, not committed: vblank()'s own bgUpdate() at the end takes this and
+    // the flip in one write. See the header.
+    bgs.setScrollY(rivendata::kRestY);
+    (void)bgs.endMovieTakeover();
+
+    if (bgs.flipPending())
+        screenFrame();
+    else
+        // endMovieTakeover's no-flip branch: the screen never actually flipped,
+        // so the card is still the one being scanned out and there is nothing to
+        // wait for. Only the scroll is left to commit, and setLetterbox is how
+        // you commit it without spending a frame.
+        bgs.setLetterbox(true);
+
+    for (int b = 0; b < BgSurface::kBuffers; ++b)
+        if (b != bgs.frontBuffer())
+            bgs.resetBuffer(b);
+}
+
 bool screenUsable() { return bgs.exists() && textLayer.ready(); }
 
 void screenShowPointer(bool on)
@@ -64,23 +85,23 @@ ScreenTakeover::~ScreenTakeover()
 {
     if (--g_screenDepth > 0)
         return;
-    bgs.setLetterbox(true);
     if (g_screenInGame)
     {
-        // Every buffer but the one holding the parked card. The text is opaque
-        // and was drawn on all 192 rows, so the rows below the card view have to
-        // be handed back transparent or the next vertical pan would slide black
-        // through the view.
-        for (int b = 0; b < BgSurface::kBuffers; ++b)
-            if (b != bgs.parkedBuffer())
-                bgs.resetBuffer(b);
-
-        (void)bgs.endMovieTakeover();
+        // The rebind, the flip and the clears, in the order that never shows
+        // black -- and it used to be written out here in the wrong one.
+        screenHandBack();
         engine.surface().invalidateAll();
         engine.applyScreenUpdate(true);
         screenShowPointer(true);
     }
-    // Outside the branch: the strip is suppressed on the way in whether or not a
+    else
+    {
+        // No game, so no takeover to end and no buffers to hand back -- the
+        // letterbox is the only thing the ctor turned off, and it still has to
+        // go back on. screenHandBack does this half itself for the other branch.
+        bgs.setLetterbox(true);
+    }
+    // Outside both: the strip is suppressed on the way in whether or not a
     // game is running, so it has to be released either way.
     screenShowInventory(true);
 }

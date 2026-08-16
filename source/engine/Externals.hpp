@@ -85,11 +85,12 @@ void playPageTurnSound(Engine &engine);
 /// movie and how long to wait afterwards, which is the caller's half. This is
 /// the part that is the same.
 ///
-/// `delayMs` is the pause between the ending's video running out and the first
-/// credits image (riven_stack.cpp:244). It is per-ending and the numbers are
-/// ScummVM's own, because they were measured against these videos: the office
-/// endings wait eight to twelve seconds on a held last frame, and Tay's waits
-/// one and a half.
+/// `delayMs` is the pause between the ending's PICTURE running out and the first
+/// credits image (riven_stack.cpp:244), and the picture is not the movie: these
+/// videos have a soundtrack that keeps going for minutes after the last frame,
+/// and the credits are meant to roll over it. It is per-ending and the numbers
+/// are ScummVM's own, because they were measured against these videos: the
+/// office endings wait eight to twelve seconds and Tay's one and a half.
 ///
 /// `frameCountOverride` is carried and NOT honoured. It exists for the Polish
 /// release alone, whose ending videos keep running white frames after the
@@ -98,6 +99,11 @@ void playPageTurnSound(Engine &engine);
 /// against, and applying it to a non-Polish video would cut the ending short --
 /// so it is stored where a language check can find it later rather than dropped
 /// and having to be researched again.
+///
+/// It has a second use now, though: it IS the video track's frame count, which
+/// is what Engine::moviePictureEnded derives for itself out of the container. So
+/// the two are logged side by side, and a disagreement is the derivation being
+/// caught out (RvidFile::pictureFrames says how it can be).
 ///
 /// `alreadyPlaying` is for the one ending that is not started here: ospit's
 /// third refusal, where Gehn shoots the player part-way through the speech

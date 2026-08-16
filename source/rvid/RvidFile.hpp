@@ -64,6 +64,41 @@ public:
     bool hasAudio() const { return (header_.flags & rivendata::kVideoHasAudio) != 0; }
     std::uint32_t frameCount() const { return header_.frameCount; }
 
+    /// Frames up to and including the last one that carries a picture.
+    ///
+    /// The port's answer to ScummVM's `videoPtr->getFrameCount()` in
+    /// RivenStack::runCredits (riven_stack.cpp:236-240), which is the VIDEO
+    /// TRACK's count and not the container's. Twelve of Riven's movies have a
+    /// soundtrack that outlasts their picture -- ospit's tMOV 0 runs 260 seconds
+    /// of dialogue over 82 seconds of it -- and the endings are among them, so
+    /// the difference between the two counts is the difference between rolling
+    /// the credits over the ending's music and rolling them three minutes after
+    /// anyone stopped watching.
+    ///
+    /// QuickTime keeps the two tracks apart and can simply be asked. This
+    /// container interleaves them, so the answer is derived from the frame
+    /// index: a frame that carries a picture is sizeof(RvidFrameHeader) +
+    /// frameBytes() or more, and one that does not is a few hundred bytes of
+    /// audio behind an eight-byte header.
+    ///
+    /// A DERIVATION AND NOT A HEADER FIELD, deliberately: a header field means a
+    /// version bump, and a version bump means reconverting gigabytes of movie on
+    /// somebody's card for a five-second difference at the end of the game.
+    ///
+    /// WHAT IT COSTS is precision, and the amount is worth knowing. The
+    /// converter marks a frame as carrying no picture when its texels match the
+    /// frame before it (VideoPipeline.cpp), which is true of the audio tail AND
+    /// of any shot that holds still. So this is really "the frame after which
+    /// the picture stopped CHANGING" -- the video track's end unless the movie
+    /// ends on a freeze, in which case it is early by the length of the freeze.
+    /// Riven's endings hold their last frame after the picture ends, which is
+    /// what the credits' own delay is for; a movie that holds one before is the
+    /// case to watch for.
+    ///
+    /// Equal to frameCount() when there is no index to read, which is exactly
+    /// what every caller did before this existed.
+    std::uint32_t pictureFrames() const { return pictureFrames_; }
+
     /// Bytes one picture takes. Every frame that has one is this size.
     std::uint32_t frameBytes() const
     {
@@ -132,6 +167,10 @@ public:
     const char *error() const { return error_; }
 
 private:
+    /// pictureFrames(), worked out from the index at open() time. Falls back to
+    /// header_.frameCount whenever the index cannot be trusted to answer.
+    std::uint32_t derivePictureFrames();
+
     std::FILE *file_ = nullptr;
     rivendata::RvidHeader header_{};
     std::vector<rivendata::RvidFrameEntry> index_;
@@ -141,6 +180,7 @@ private:
     VideoSink sink_ = nullptr;
     void *sinkCtx_ = nullptr;
     std::uint32_t next_ = 0;
+    std::uint32_t pictureFrames_ = 0;
     const char *error_ = "";
     /// Backing store for the one error that has to carry numbers: a file written
     /// by a different converter. "Not an RVID this build reads" is indistinguishable

@@ -283,6 +283,15 @@ public:
     /// and when the card was converted without its zoom twin.
     void toggleZoom();
 
+    /// Give the screen back, if the viewer has it. Called by everything that
+    /// needs the screen for something the viewer cannot show -- a card change, a
+    /// transition, a movie -- so that a hotspot clicked at full resolution can
+    /// do what it would have done on the card. Harmless in card mode.
+    void leaveZoom();
+
+    /// True while the zoom viewer owns the screen.
+    bool zoomed() const { return mode_ == Mode::Zoom; }
+
     /// The tBMP the last full-card PLST record drew, which is the picture the
     /// zoom viewer opens. Zero until a card has drawn one.
     std::uint16_t cardPicture() const { return cardPicture_; }
@@ -452,10 +461,18 @@ public:
     ///
     /// For the externals that animate a control one notch at a time out of one
     /// long movie -- the telescope, whose five positions are five slices of the
-    /// same file. Times are the original's milliseconds; the frame numbers come
-    /// from the movie's own frame rate rather than an assumed one, because the
-    /// converter stores it (RvidHeader::fpsNum).
-    void playMovieRange(std::uint16_t code, std::uint32_t startMs, std::uint32_t endMs);
+    /// same file.
+    ///
+    /// TICKS OF A 600 Hz CLOCK, not milliseconds: RivenVideo::seek and
+    /// ::playBlocking both build their timestamps as Timestamp(0, t, 600)
+    /// (riven_video.cpp:203-206, :228-232), which is Riven's own QuickTime
+    /// timescale, and every caller passes the original's numbers unchanged.
+    /// jspit.cpp:747-748 says so out loud -- "(11560/600)s is the length of each
+    /// of the two movies". The frame numbers come from the movie's own frame
+    /// rate rather than an assumed one, because the converter stores it
+    /// (RvidHeader::fpsNum).
+    void playMovieRange(std::uint16_t code, std::uint32_t startTicks,
+                        std::uint32_t endTicks);
     void stopMovie(std::uint16_t code);
     /// Wait `ms`, pumping the loop. Opcode 14 (riven.cpp:661-667).
     void delay(std::uint32_t ms);
@@ -501,6 +518,66 @@ public:
     /// hands back an empty handle that is already at its end
     /// (riven_video.cpp:309-322).
     bool movieEnded(std::uint16_t code) const;
+
+    /// The same question about the PICTURE alone: has the movie run out of
+    /// frames to show, whether or not it has run out of soundtrack?
+    ///
+    /// ScummVM's `getCurFrame() >= frameCount - 1` against the video track
+    /// (riven_stack.cpp:236-240). Riven's endings have a soundtrack that
+    /// outlasts their picture by minutes and the credits are meant to roll over
+    /// it -- runEndGame is the caller and the only one. RvidFile::pictureFrames
+    /// says how the count is arrived at, and what it approximates.
+    bool moviePictureEnded(std::uint16_t code) const;
+
+    /// How many frames of picture that movie has, or 0 if it is not open. Only
+    /// runEndGame wants it, and only to log the derivation beside the number
+    /// ScummVM measured for the same video.
+    std::uint32_t moviePictureFrames(std::uint16_t code) const;
+
+    /// Stop showing the movie on `code`; leave its sound playing.
+    /// RivenVideo::disable's half that runCredits needs (riven_stack.cpp:242).
+    void disableMovieVideo(std::uint16_t code);
+
+    /// Stop the movie on `code` AND give the screen back, which stopMovie does
+    /// not: a fullscreen movie owns two of the three background buffers, and
+    /// stopping its decoder leaves them owned. ScummVM's videoPtr->stop() at the
+    /// end of runCredits (riven_stack.cpp:260), which is the one caller.
+    ///
+    /// Used to be implied: an ending was a blocking play, and playMovieBlocking
+    /// settled the screen on its way out. It no longer blocks, so the settling
+    /// has to be asked for -- and the path that proves it is an install with no
+    /// credits art, where runCredits returns before it has taken the screen and
+    /// there is nothing else left to hand the buffers back.
+    void endMovie(std::uint16_t code);
+
+    /// RivenVideo::setLooping, which runEndGame calls on the ending it has just
+    /// started (riven_stack.cpp:210-213). A blocking play forces looping off on
+    /// its own -- it would never return otherwise -- and the ending no longer
+    /// blocks, so the thing that used to be implied has to be said.
+    void setMovieLoop(std::uint16_t code, bool loop);
+
+    /// "The ending of this movie is mine", without blocking on it.
+    ///
+    /// pumpMovies tidies a finished fullscreen movie away on the frame it ends,
+    /// unless somebody has claimed the slot -- and tidying means
+    /// endMovieTakeover, which rebinds the parked card onto a layer and flips to
+    /// it. runEndGame rolls the credits while the ending's SOUNDTRACK is still
+    /// running, so the frame that soundtrack runs out on is a frame in the
+    /// middle of the roll: without this, the card the player left five minutes
+    /// ago would appear over the credits.
+    ///
+    /// Same claim playMovieBlocking makes and the same nesting, but scoped to
+    /// outlive the wait rather than to end with it.
+    struct MovieHold
+    {
+        MovieHold(Engine &e, std::uint16_t code);
+        ~MovieHold();
+        MovieHold(const MovieHold &) = delete;
+        MovieHold &operator=(const MovieHold &) = delete;
+
+        Engine &eng;
+        const std::int32_t was;
+    };
 
     /// How long the movie on `code` runs, in milliseconds, or 0 if it is not
     /// open. RivenVideo::getDuration, for the top-stairs timer (jspit.cpp:589).
@@ -724,6 +801,22 @@ private:
     bool runConsoleCommand(const std::string &line);
 
     void processInput();
+    /// Hit-test the pointer and run whatever hotspot scripts that implies:
+    /// enter, leave, inside, drag, down and up. RivenCard's own dispatch
+    /// (riven_card.cpp:827-1018).
+    ///
+    /// Shared by the card view and the zoom viewer, which is what "the zoom is
+    /// played the same way" means in code -- the only difference between them is
+    /// what pointerCardX/Y answer, and neither this nor any hotspot script can
+    /// tell which mode it is running in.
+    void dispatchPointer(bool pressed, bool released, bool held);
+    /// Which enabled hotspot the pointer is inside, or -1. No scripts, no state:
+    /// the hit test on its own (riven_card.cpp:827-835).
+    std::int32_t hotspotUnderPointer() const;
+    /// Adopt that hotspot as the one already entered, without running its enter
+    /// script. For the two moments the pointer's meaning changes without it
+    /// moving -- opening the zoom viewer, and leaving it.
+    void seedInsideHotspot();
     /// The two halves of processInput() that a drag loop also needs, and the
     /// only ones -- see pumpInteractiveFrame().
     void updatePointer(const touchPosition &touch);
@@ -757,8 +850,49 @@ private:
     void checkTimer();
 
     std::string picPath(std::uint16_t tbmpId) const;
+    /// The same tBMP's full-resolution twin, which is what the zoom viewer
+    /// draws from. pics_hi/ may not exist at all (--no-hires); the viewer says
+    /// so once and falls back to the card's own pixels.
+    std::string picHiPath(std::uint16_t tbmpId) const;
     std::string soundPath(std::uint16_t twavId) const;
     std::string moviePath(std::uint16_t tmovId) const;
+
+    // --- what a card has been drawn with ------------------------------------
+    //
+    // A card is a still plus whatever its scripts drew on top: a slider's
+    // position, the white edges of a journal's pages, five D'ni numerals, a
+    // marble on a square. The still is the zoom viewer's base picture; these are
+    // the rest, and without them the viewer showed a dome with no sliders in it
+    // and Catherine's page 28 with no combination on it -- which is the one
+    // thing anybody opens that page to read.
+    //
+    // Recorded here rather than in the viewer because this is where the draws
+    // are seen, and recorded ALWAYS rather than only while zoomed, because the
+    // viewer is usually opened after the drawing is done.
+
+    struct CardDraw
+    {
+        /// The overlay's full-resolution twin, or empty for art that has none --
+        /// today only extras/marbles, which the converter writes at DS size.
+        std::string hiPath;
+        /// In the twin's own pixels. Ignored when hiPath is empty.
+        rivendata::Rect src;
+        /// In Riven's card coordinates, which is the space the viewer draws in.
+        rivendata::Rect dst;
+    };
+
+    /// Remember one overlay draw, and -- if the viewer is up -- put it on the
+    /// picture now, which is what makes a slider move under the stylus.
+    void recordCardDraw(std::string hiPath, const rivendata::Rect &src,
+                        const rivendata::Rect &dst);
+    /// Put `d` on the zoomed picture, from its twin or, failing that, from the
+    /// card view's own pixels.
+    void stampZoom(const CardDraw &d);
+    /// Every overlay this card has, in the order they were drawn. Run after the
+    /// viewer opens a base picture.
+    void replayCardDraws();
+
+    std::vector<CardDraw> cardDraws_;
 
     rivendata::Stack stack_;
     const rivendata::Card *card_ = nullptr;
@@ -815,8 +949,29 @@ private:
     /// the cursor for. Touch sets it, lifting leaves it, the D-pad nudges it.
     int pointerX_ = rivendata::kScreenW / 2;
     int pointerY_ = rivendata::kViewOffsetY + rivendata::kViewH / 2;
-    /// Frames the D-pad has been held, for the slow-then-fast nudge.
+    /// Frames the D-pad has been held, for the slow-then-fast nudge. Shared
+    /// with the zoom viewer's pan, which is the D-pad's other job -- never both
+    /// at once, because the viewer takes the pad off the pointer entirely.
     int padHeld_ = 0;
+
+    /// What the stylus is doing in the zoom viewer, decided on the frame it
+    /// touches down and held until it lifts.
+    ///
+    /// One stroke is one thing. Deciding per frame would let a drag that started
+    /// on a slider turn into a pan the moment R was brushed, and -- worse -- a
+    /// pan's release would arrive at the dispatch as an ordinary click and run
+    /// the MouseUp script of whatever the finger happened to stop over.
+    enum class ZoomGesture
+    {
+        None,
+        Pan,
+        Interact,
+    };
+    ZoomGesture zoomGesture_ = ZoomGesture::None;
+
+    /// Where the zoom window was when the press landed. See dragStartCardX().
+    int zoomDragOriginX_ = 0;
+    int zoomDragOriginY_ = 0;
 
     /// Whether anything else has been pressed during the current SELECT hold.
     ///

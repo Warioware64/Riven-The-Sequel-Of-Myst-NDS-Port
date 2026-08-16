@@ -5,6 +5,7 @@
 #include "DebugLog.hpp"
 #include "Global.hpp"
 #include "MainMenu.hpp"
+#include "ScreenTakeover.hpp" // screenHandBack: leaveZoom gives the screen back
 #include "Settings.hpp"
 #include "audio/RivenAudio.hpp"
 #include "data/StackFile.hpp"
@@ -43,6 +44,11 @@ namespace
 std::string Engine::picPath(std::uint16_t tbmpId) const
 {
     return global.picsDir() + stackName(stack_.id) + "/" + std::to_string(tbmpId) + ".rpic";
+}
+
+std::string Engine::picHiPath(std::uint16_t tbmpId) const
+{
+    return global.picsHiDir() + stackName(stack_.id) + "/" + std::to_string(tbmpId) + ".rpiz";
 }
 
 std::string Engine::soundPath(std::uint16_t twavId) const
@@ -251,10 +257,39 @@ void Engine::drawBitmap(std::uint16_t tbmpId, const Rect &rect)
 
     const std::string path = picPath(tbmpId);
     std::string err;
-    if (!surface_.drawPicture(path, rect, err))
+    CardSurface::Placed placed;
+    if (!surface_.drawPicture(path, rect, err, &placed))
     {
         DebugLog::warn("card %u: picture %u: %s", cardId_, tbmpId, err.c_str());
         return;
+    }
+    // A picture that covers the card IS the card's picture, whoever drew it: a
+    // PLST record, or opcode 1 with fewer than five arguments (Script.cpp:135).
+    // For the zoom viewer that makes it a new BASE and not an overlay -- it is
+    // 476 KB of texels, which is no more a patch than the card is a detail of
+    // itself, and everything that was drawn on the old still is gone.
+    if (placed.card.left <= 0 && placed.card.top <= 0 && placed.card.right >= kCardW
+        && placed.card.bottom >= kCardH)
+    {
+        cardDraws_.clear();
+        if (mode_ == Mode::Zoom)
+        {
+            // A journal turning its page under the viewer. The window stays
+            // where the player put it, and a page that will not load leaves the
+            // one on screen rather than a blank.
+            setStatus("zoom: new page");
+            zoomView.reopen(picHiPath(tbmpId));
+        }
+    }
+    else
+    {
+        // The whole picture, at the corner it was given. The source rectangle is
+        // the destination's own size rather than the file's, because drawPicture
+        // clips the right edge to the card and the twin is cut to match.
+        recordCardDraw(picHiPath(tbmpId),
+                       Rect{0, 0, static_cast<std::int16_t>(placed.card.width()),
+                            static_cast<std::int16_t>(placed.card.height())},
+                       placed.card);
     }
     // The destination rect as well as the file: a picture that loaded and went
     // somewhere unexpected looks exactly like one that did not load.
@@ -269,8 +304,34 @@ void Engine::drawBitmapSections(std::uint16_t tbmpId, const CardSurface::Section
         return;
 
     std::string err;
-    if (!surface_.drawPictureSections(picPath(tbmpId), sections, count, err))
+    CardSurface::Placed placed;
+    if (!surface_.drawPictureSections(picPath(tbmpId), sections, count, err, &placed))
+    {
         DebugLog::warn("card %u: picture %u: %s", cardId_, tbmpId, err.c_str());
+        return;
+    }
+
+    // A section's source is in the .rpic's pixels and the twin holds the source
+    // tBMP's, which are the same numbers for every overlay Riven draws -- the
+    // converter only resamples what is wider than the view (ImagePipeline.cpp:340)
+    // -- and are not for anything it did resample. Scaled rather than assumed,
+    // so a caller that ever does slice a full-card still still lands right.
+    const std::string hi = picHiPath(tbmpId);
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        Rect src = sections[i].src;
+        if (placed.fileW > 0 && placed.fileW != placed.sourceW)
+        {
+            src.left = static_cast<std::int16_t>(src.left * placed.sourceW / placed.fileW);
+            src.right = static_cast<std::int16_t>(src.right * placed.sourceW / placed.fileW);
+        }
+        if (placed.fileH > 0 && placed.fileH != placed.sourceH)
+        {
+            src.top = static_cast<std::int16_t>(src.top * placed.sourceH / placed.fileH);
+            src.bottom = static_cast<std::int16_t>(src.bottom * placed.sourceH / placed.fileH);
+        }
+        recordCardDraw(hi, src, sections[i].dst);
+    }
 }
 
 void Engine::drawExtrasSections(const char *name, const CardSurface::Section *sections,
@@ -287,7 +348,68 @@ void Engine::drawExtrasSections(const char *name, const CardSurface::Section *se
         // no id to name and because a missing extras file is a conversion that
         // predates it rather than a card asking for something odd.
         DebugLog::warn("extras/%s.rpic: %s", name, err.c_str());
+        return;
     }
+
+    // No twin: extras.MHK is converted for the card view only, so the zoom takes
+    // these from the card's own pixels (an empty hiPath). The marble grid is the
+    // one caller, and a marble upscaled 2.375x is still a marble in the right
+    // square -- which is the whole of what the puzzle asks you to see.
+    for (std::size_t i = 0; i < count; ++i)
+        recordCardDraw(std::string(), Rect{}, sections[i].dst);
+}
+
+void Engine::recordCardDraw(std::string hiPath, const Rect &src, const Rect &dst)
+{
+    if (dst.width() <= 0 || dst.height() <= 0)
+        return;
+
+    // The same rectangle again is the same overlay redrawn -- a slider crossing
+    // a slot rewrites its twenty-five every tick -- so it replaces its entry
+    // instead of adding one. Order is kept: a script that paints over an earlier
+    // draw has to replay in the order it drew.
+    for (CardDraw &d : cardDraws_)
+        if (d.dst.left == dst.left && d.dst.top == dst.top && d.dst.right == dst.right
+            && d.dst.bottom == dst.bottom)
+        {
+            d.hiPath = std::move(hiPath);
+            d.src = src;
+            if (mode_ == Mode::Zoom)
+                stampZoom(d);
+            return;
+        }
+
+    // A backstop, not a budget: the fullest card in the game draws a few dozen.
+    // Dropping the draw rather than the list keeps what is already on the
+    // picture correct, and the card view is unaffected either way.
+    constexpr std::size_t kMaxCardDraws = 512;
+    if (cardDraws_.size() >= kMaxCardDraws)
+    {
+        DebugLog::warn("card %u: over %zu overlays; the zoom will miss one", cardId_,
+                       kMaxCardDraws);
+        return;
+    }
+
+    cardDraws_.push_back(CardDraw{std::move(hiPath), src, dst});
+    if (mode_ == Mode::Zoom)
+        stampZoom(cardDraws_.back());
+}
+
+void Engine::stampZoom(const CardDraw &d)
+{
+    if (!d.hiPath.empty() && zoomView.stamp(d.hiPath, d.src, d.dst))
+        return;
+    // Either there is no twin for this one picture, or pics_hi/ was never
+    // written (--no-hires) -- in which case the base picture is not there
+    // either and the viewer is not open. What is on the card is always right,
+    // even when it is 0.42x of right.
+    zoomView.stampFromCard(surface_.texels(), d.dst);
+}
+
+void Engine::replayCardDraws()
+{
+    for (const CardDraw &d : cardDraws_)
+        stampZoom(d);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +468,11 @@ void Engine::activatePlst(std::uint16_t index)
             {
                 cardPicture_ = p.id;
             }
+            // What the viewer does about it -- new base, patches dropped -- is
+            // decided in drawBitmap from the pixels the picture actually covers,
+            // not from this rectangle: 96 of Riven's PLST records disagree with
+            // the bitmap they name, and only one of the two can be right about
+            // whether the card has just been repainted.
             drawBitmap(p.id, p.rect);
             return;
         }
@@ -568,6 +695,19 @@ void Engine::updatePointer(const touchPosition &touch)
         pointerX_ = touch.px;
         pointerY_ = touch.py;
     }
+    else if (mode_ == Mode::Zoom && !mouseDown_)
+    {
+        // The D-pad belongs to the WINDOW in here, not to the pointer: it is
+        // what moves the picture, and a stick that did both would fight itself.
+        // padHeld_ is the zoom branch's for as long as that is true, so it is
+        // left alone as well as unread.
+        //
+        // Only for as long as that is true, though: with A held the pad is
+        // dragging, and a drag is the one thing in the game that CANNOT be done
+        // with the stylus alone on the hardware Riven asks for it -- a slider
+        // followed pixel by pixel. So a press hands the pad back to the pointer
+        // (and processInput stops panning with it) until the button comes up.
+    }
     else
     {
         const int pad = keysHeld() & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN);
@@ -611,6 +751,13 @@ void Engine::updateMouseLatch()
         // script runs, and whether or not a hotspot was hit.
         dragStartX_ = pointerX_;
         dragStartY_ = pointerY_;
+        // And, in the zoom viewer, WHERE THE WINDOW WAS: a screen pixel only
+        // means a card pixel through the window's corner, so a drag whose
+        // threshold is in card pixels (bspit's water, the marbles) has to
+        // measure against the corner the press happened at rather than the one
+        // the picture has drifted to since.
+        zoomDragOriginX_ = zoomView.originX();
+        zoomDragOriginY_ = zoomView.originY();
     }
     if (!down)
     {
@@ -649,13 +796,37 @@ void Engine::mouseForceUp()
     mouseDown_ = false;
 }
 
-int Engine::pointerCardX() const { return toCardX(pointerX_); }
+// The pointer in Riven's own 608x392 space, which is the space every hotspot,
+// every drag threshold and every external's arithmetic is written in.
+//
+// TWO MAPPINGS, one per mode, and this is the whole of what makes the zoom
+// viewer playable. The card view shows all 608 columns in 256, so a screen pixel
+// is 2.375 card pixels and the picture sits below the letterbox. The viewer
+// shows 256 of the 608 at 1:1 with no letterbox, so a screen pixel IS a card
+// pixel and the only difference is where the window starts. Everything that
+// reads these -- the hit test, the dome's slider drag, the marbles, the valve --
+// then works in the viewer without knowing it exists.
+int Engine::pointerCardX() const
+{
+    return mode_ == Mode::Zoom ? zoomView.originX() + pointerX_ : toCardX(pointerX_);
+}
 
-int Engine::pointerCardY() const { return toCardY(pointerY_ - kViewOffsetY); }
+int Engine::pointerCardY() const
+{
+    return mode_ == Mode::Zoom ? zoomView.originY() + pointerY_
+                               : toCardY(pointerY_ - kViewOffsetY);
+}
 
-int Engine::dragStartCardX() const { return toCardX(dragStartX_); }
+int Engine::dragStartCardX() const
+{
+    return mode_ == Mode::Zoom ? zoomDragOriginX_ + dragStartX_ : toCardX(dragStartX_);
+}
 
-int Engine::dragStartCardY() const { return toCardY(dragStartY_ - kViewOffsetY); }
+int Engine::dragStartCardY() const
+{
+    return mode_ == Mode::Zoom ? zoomDragOriginY_ + dragStartY_
+                               : toCardY(dragStartY_ - kViewOffsetY);
+}
 
 // ---------------------------------------------------------------------------
 // Movies
@@ -915,7 +1086,22 @@ void Engine::playMovie(std::uint16_t code, bool blocking)
     playMovieSlot(slot, blocking);
 }
 
-void Engine::playMovieRange(std::uint16_t code, std::uint32_t startMs, std::uint32_t endMs)
+/// The clock the callers' numbers are counted on: Riven's QuickTime timescale,
+/// 600 units to the second. NOT milliseconds -- RivenVideo::seek and
+/// ::playBlocking both write Timestamp(0, t, 600) (riven_video.cpp:203-206,
+/// :228-232) and every external hands them the original's constants untouched.
+///
+/// Reading them as milliseconds made every one of these animations play the
+/// first 60% of the slice it was asked for and stop dead: gspit's viewer stops
+/// are 800 units apart, which is 20 frames at 15 fps and was being cut to 12.
+/// The data says which is right -- the pin movies are 9560 units long and
+/// xgpincontrols seeks to 9630 - pinPos*600, which only lands inside the movie
+/// at 600 Hz -- and jspit.cpp:747-748 says it in words: "(11560/600)s is the
+/// length of each of the two movies".
+static constexpr std::uint32_t kMovieTimescale = 600;
+
+void Engine::playMovieRange(std::uint16_t code, std::uint32_t startTicks,
+                            std::uint32_t endTicks)
 {
     const std::int32_t slot = slotForCode(code);
     if (slot < 0)
@@ -936,11 +1122,16 @@ void Engine::playMovieRange(std::uint16_t code, std::uint32_t startMs, std::uint
         playMovieSlot(slot, true);
         return;
     }
-    const auto frameAt = [num, den](std::uint32_t ms) {
-        return static_cast<std::uint32_t>(static_cast<std::uint64_t>(ms) * num
-                                          / (1000ull * den));
+    // Rounded DOWN, which is what a seek to a time does: the frame that is on
+    // screen at tick t is the one that started at or before it. An end tick of
+    // 816 is 20.4 frames, and frame 20 is the one still showing at 816 -- so 20
+    // is the last frame this slice owns, and 21 belongs to the next one.
+    const auto frameAt = [num, den](std::uint32_t ticks) {
+        return static_cast<std::uint32_t>(
+            static_cast<std::uint64_t>(ticks) * num
+            / (static_cast<std::uint64_t>(kMovieTimescale) * den));
     };
-    playMovieSlot(slot, true, frameAt(startMs), frameAt(endMs));
+    playMovieSlot(slot, true, frameAt(startTicks), frameAt(endTicks));
 }
 
 void Engine::playMovieSlot(std::int32_t slot, bool blocking, std::uint32_t startFrame,
@@ -948,6 +1139,14 @@ void Engine::playMovieSlot(std::int32_t slot, bool blocking, std::uint32_t start
 {
     if (!ensureSlotOpen(slot))
         return;
+
+    // A movie is the thing the zoom viewer cannot show. A LITE overlay
+    // composites into a card surface nobody is publishing, and a FULL one wants
+    // the very buffers the viewer is holding -- so the viewer gives them back
+    // and the play happens on the card, which is what the player is about to be
+    // looking at anyway. Every route to a movie comes through here.
+    leaveZoom();
+
     MovieSlot &ms = movies_[slot];
 
     // ENABLE, because playing is enabling: opcodes 32 and 33 both call
@@ -1240,6 +1439,66 @@ bool Engine::movieEnded(std::uint16_t code) const
     const RvidPlayer &p = movies_[slot].player;
     return !p.isPlaying() || p.finished();
 }
+
+bool Engine::moviePictureEnded(std::uint16_t code) const
+{
+    // Same shape as movieEnded above, INCLUDING "a code nothing claimed counts
+    // as ended": the caller spins a loop on this, and a loop that cannot end on
+    // a bad code is a hang at the end of the game.
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0 || !movies_[slot].open)
+        return true;
+    const RvidPlayer &p = movies_[slot].player;
+    return !p.isPlaying() || p.pictureEnded();
+}
+
+std::uint32_t Engine::moviePictureFrames(std::uint16_t code) const
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0 || !movies_[slot].open)
+        return 0;
+    return movies_[slot].player.pictureFrames();
+}
+
+void Engine::disableMovieVideo(std::uint16_t code)
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot >= 0 && movies_[slot].open)
+        movies_[slot].player.disableVideo();
+}
+
+void Engine::endMovie(std::uint16_t code)
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0 || !movies_[slot].open)
+        return;
+    // No bake. This is the end of a movie nobody is coming back to -- the card
+    // under it is about to be replaced wholesale -- so there is nothing for a
+    // kept last frame to be part of.
+    endFullscreenMovie(movies_[slot], false);
+}
+
+void Engine::setMovieLoop(std::uint16_t code, bool loop)
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0)
+        return;
+    // BOTH, because they answer at different times: the record is what the next
+    // play() reads, and the player is what the playback already running obeys.
+    movies_[slot].loop = loop;
+    if (movies_[slot].open)
+        movies_[slot].player.setLooping(loop);
+}
+
+Engine::MovieHold::MovieHold(Engine &e, std::uint16_t code)
+    : eng(e), was(e.blockingSlot_)
+{
+    const std::int32_t slot = e.slotForCode(code);
+    if (slot >= 0 && e.movies_[slot].open)
+        e.blockingSlot_ = slot;
+}
+
+Engine::MovieHold::~MovieHold() { eng.blockingSlot_ = was; }
 
 std::uint32_t Engine::movieDurationMs(std::uint16_t code) const
 {
@@ -1537,6 +1796,27 @@ void Engine::runScheduledTransition()
 
     if (inTransition_ || t == Transition::None)
         return;
+
+    // THE VIEWER IS THE WHOLE SCREEN, so there is no pair of cards to slide. A
+    // wipe moves an outgoing card off and an incoming one on; in here there is
+    // one picture, at 2.375x, and the new one is already up -- drawBitmap sends
+    // a full-card picture to ZoomView::reopen and every partial draw to
+    // stampZoom (Engine::recordCardDraw).
+    //
+    // Catherine's journal is what makes this visible: it is the one book that
+    // asks for a transition on a page turn (Externals.cpp, xacathbooknextpage
+    // against Atrus's Transition::None), and dragging the player out of the
+    // viewer to play one blanked the screen for a frame and then slid the wipe
+    // between two buffers that no longer held what it thought they did.
+    //
+    // DROPPED, not deferred: scheduledTransition_ was taken above, so leaving
+    // here is what makes the request stop existing. Nothing is lost -- a
+    // transition that matters arrives with a card change, a movie or a
+    // refreshCard, and all three give the screen back themselves before this
+    // could be reached.
+    if (mode_ == Mode::Zoom)
+        return;
+
     // A fullscreen movie owns both displayed buffers; there is no old/new card
     // pair to slide, and stealing them would stall the cutscene.
     if (fullscreenMoviePlaying() || !bgs.exists() || !surface_.exists())
@@ -1722,6 +2002,13 @@ bool Engine::changeToCard(std::uint16_t cardId)
     // the moment the card is going away it must not be able to fire again.
     removeTimer();
 
+    // And before any of it, while `card_` is still the card the viewer's picture
+    // belongs to: clicking a door at full resolution walks through it, and the
+    // walking starts by giving the screen back. Here rather than in enterCard()
+    // because that runs with the DESTINATION current, and leaving would then
+    // publish the new card through the old one's update script.
+    leaveZoom();
+
     leaveCard();
     card_ = next;
     cardId_ = cardId;
@@ -1817,6 +2104,9 @@ void Engine::resetCardState()
     // The new card has not drawn its picture yet, and offering the old card's
     // zoom twin would be showing the player somewhere they have left.
     cardPicture_ = 0;
+    // Nor anything that was drawn on top of it. The new card's own draws start
+    // arriving the moment its load script runs.
+    cardDraws_.clear();
     // Otherwise an opcode-13 shape from the last card is still on screen until
     // the pointer happens to cross a hotspot.
     cursor_.setShape(rivendata::kCursorMain);
@@ -1854,6 +2144,10 @@ void Engine::leaveCard()
 
 void Engine::refreshCard()
 {
+    // Opcode 19 and every external that redraws its card in place. The card is
+    // about to be drawn again from its scripts up, so the viewer's picture and
+    // its patches are both out of date -- and the buffers are wanted.
+    leaveZoom();
     if (card_ != nullptr)
         enterCard();
 }
@@ -1862,33 +2156,58 @@ void Engine::refreshCard()
 // The zoom viewer
 // ---------------------------------------------------------------------------
 
+void Engine::leaveZoom()
+{
+    if (mode_ != Mode::Zoom)
+        return;
+
+    zoomView.close();
+    mode_ = Mode::Card;
+
+    // The card was parked untouched while the viewer had the screen, so giving
+    // it back is a rebind and a flip rather than a re-upload -- and the viewer
+    // drew on all 192 rows of every OTHER buffer, which have to go back the way
+    // create() left them. Both halves, in the one order that never shows black:
+    // screenHandBack (ScreenTakeover.hpp), which the menu and the note screen
+    // hand back through too.
+    //
+    // Safe to spend the vblank it may spend: a transition cannot be running --
+    // toggleZoom refuses to open the viewer while one is (see below), and
+    // runScheduledTransition no longer closes it.
+    screenHandBack();
+
+    // Every buffer that is not the card's holds zoom pixels, not just the one
+    // endMovieTakeover named, so none of them may be trusted.
+    surface_.invalidateAll();
+
+    // NOT applyScreenUpdate(true) unconditionally. This is now reached from
+    // inside a running script -- a click at full resolution that turned out to
+    // want a movie or another card -- and forcing the depth to zero mid-bracket
+    // would publish half of an update that was meant to appear whole. With one
+    // open, the script's own apply is a few opcodes away and does the publishing;
+    // invalidateAll above is what guarantees it sends the whole card when it
+    // comes. Pressing X to leave is the other case, and there the depth is zero.
+    //
+    // A scheduled transition is NOT one of the callers, and used to be: see
+    // runScheduledTransition, which now leaves the viewer alone rather than
+    // closing it to play a wipe the viewer has no two pictures for.
+    if (updateDepth_ == 0)
+        applyScreenUpdate(true);
+
+    zoomGesture_ = ZoomGesture::None;
+    inventory_.setSuppressed(false);
+    setStatus("");
+
+    // The pointer has not moved, but what is under it has: it means 2.375 card
+    // pixels again. Adopted rather than dispatched -- see seedInsideHotspot.
+    seedInsideHotspot();
+}
+
 void Engine::toggleZoom()
 {
     if (mode_ == Mode::Zoom)
     {
-        zoomView.close();
-        mode_ = Mode::Card;
-        // The viewer draws on all 192 rows, which reaches past the card view
-        // into the rows BgSurface fills transparent once and never again. Give
-        // every buffer it could have written back the way create() left them,
-        // or a later vertical pan slides zoom pixels through the view
-        // (BgSurface::resetBuffer). Before endMovieTakeover, which is what still
-        // knows which buffer holds the parked card.
-        for (int b = 0; b < BgSurface::kBuffers; ++b)
-            if (b != bgs.parkedBuffer())
-                bgs.resetBuffer(b);
-        bgs.setLetterbox(true);
-
-        // The card was parked untouched while the viewer had the screen, so
-        // this is a rebind. Every buffer that is not the parked one holds zoom
-        // pixels, not just the one endMovieTakeover names, so none of them may
-        // be trusted (CardSurface::invalidateAll).
-        (void)bgs.endMovieTakeover();
-        surface_.invalidateAll();
-        applyScreenUpdate(true);
-        cursor_.setVisible(true);
-        inventory_.setSuppressed(false);
-        setStatus("");
+        leaveZoom();
         return;
     }
 
@@ -1906,9 +2225,7 @@ void Engine::toggleZoom()
         return;
     }
 
-    const std::string path = global.picsHiDir() + stackName(stack_.id) + "/"
-                             + std::to_string(cardPicture_) + ".rpiz";
-    if (!zoomView.open(path))
+    if (!zoomView.open(picHiPath(cardPicture_)))
     {
         // open() has already said which of the two it was: no pics_hi/ at all
         // (converted with --no-hires) or no twin for this one picture.
@@ -1916,11 +2233,25 @@ void Engine::toggleZoom()
     }
 
     mode_ = Mode::Zoom;
-    cursor_.setVisible(false);
+    // Everything the card has been drawn with since its still went down, on top
+    // of the still and in the order it was drawn. Without this the viewer is a
+    // photograph of the card as it was BEFORE anybody touched it.
+    replayCardDraws();
+
+    // The strip goes away, because the books under the picture belong to the
+    // card view. THE POINTER STAYS, where it used to be hidden here: there was
+    // nothing in the viewer to point at then, and now the same click that works
+    // on the card works in here -- and a hotspot's cursor shape is the only hint
+    // Riven ever gives that something can be touched at all.
     inventory_.setSuppressed(true);
+
     // 31 columns is what the status row has (DebugLog::consoleRow clips to it),
     // and this used to be forty characters of advice that nothing rendered.
-    setStatus("zoom: pan, L notes, B leaves");
+    setStatus("zoom: touch acts, pad pans");
+
+    // The same still stylus is now over a different hotspot, 2.375 times more
+    // precisely. Adopt it rather than dispatch it -- see seedInsideHotspot.
+    seedInsideHotspot();
 }
 
 // ---------------------------------------------------------------------------
@@ -2163,8 +2494,10 @@ void Engine::processInput()
         return;
     }
 
-    // While the viewer is up it owns the input, and nothing below runs: the
-    // hotspots under the pointer belong to a card that is not on screen.
+    // While the viewer is up it owns the input, and nothing below runs -- but
+    // the hotspots under the pointer are the ones the player can see, and at
+    // 1:1, so the click goes through to them exactly as it does on the card.
+    // What is left here is only the part that is the VIEWER's: the window.
     if (mode_ == Mode::Zoom)
     {
         const std::uint32_t held = keysHeld();
@@ -2174,6 +2507,15 @@ void Engine::processInput()
             toggleZoom();
             return;
         }
+
+        // What this stroke is, decided when it lands and held until it lifts.
+        // R is the modifier because nothing else in the viewer uses it and
+        // because the hand holding the console is already on it.
+        if ((down & KEY_TOUCH) != 0)
+            zoomGesture_ = (held & KEY_R) != 0 ? ZoomGesture::Pan : ZoomGesture::Interact;
+        const bool panStroke = zoomGesture_ == ZoomGesture::Pan;
+        if ((keysUp() & KEY_TOUCH) != 0)
+            zoomGesture_ = ZoomGesture::None;
 
         // NO L HERE. Taking a note in the zoom viewer is the place the feature
         // is most wanted -- the player opened the full-resolution view to READ
@@ -2189,37 +2531,65 @@ void Engine::processInput()
         // Slow for the first quarter second, then fast -- the same shape as the
         // pointer's D-pad nudge below, and for the same reason: a single press
         // should move a pixel and a held one should cross the picture.
-        ++padHeld_;
-        if ((held & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN)) == 0)
-            padHeld_ = 0;
-        const int step = padHeld_ > 15 ? 8 : 2;
-
+        //
+        // NOT WHILE A BUTTON IS DOWN. Then the pad is the pointer's again
+        // (updatePointer), because the pad and A together are how a drag is done
+        // without a stylus and a slider cannot be dragged by a window that moves
+        // under it instead.
         int dx = 0;
         int dy = 0;
-        if ((held & KEY_LEFT) != 0)
-            dx -= step;
-        if ((held & KEY_RIGHT) != 0)
-            dx += step;
-        if ((held & KEY_UP) != 0)
-            dy -= step;
-        if ((held & KEY_DOWN) != 0)
-            dy += step;
-
-        // Stylus drag: the picture follows the finger, so dragging left pulls
-        // the window right. Only while the stylus stays down -- a fresh touch
-        // seeds the anchor instead of jumping the view to it.
-        if ((held & KEY_TOUCH) != 0)
+        if (!mouseDown_)
         {
-            if ((down & KEY_TOUCH) == 0)
-            {
-                dx += pointerX_ - touch.px;
-                dy += pointerY_ - touch.py;
-            }
-            pointerX_ = touch.px;
-            pointerY_ = touch.py;
+            ++padHeld_;
+            if ((held & (KEY_LEFT | KEY_RIGHT | KEY_UP | KEY_DOWN)) == 0)
+                padHeld_ = 0;
+            const int step = padHeld_ > 15 ? 8 : 2;
+
+            if ((held & KEY_LEFT) != 0)
+                dx -= step;
+            if ((held & KEY_RIGHT) != 0)
+                dx += step;
+            if ((held & KEY_UP) != 0)
+                dy -= step;
+            if ((held & KEY_DOWN) != 0)
+                dy += step;
         }
 
+        if (panStroke)
+        {
+            // R and the stylus: the picture follows the finger, so dragging left
+            // pulls the window right. Only while the stylus stays down -- a
+            // fresh touch seeds the anchor instead of jumping the view to it.
+            if ((held & KEY_TOUCH) != 0)
+            {
+                if ((down & KEY_TOUCH) == 0)
+                {
+                    dx += pointerX_ - touch.px;
+                    dy += pointerY_ - touch.py;
+                }
+                pointerX_ = touch.px;
+                pointerY_ = touch.py;
+                cursor_.moveTo(pointerX_, pointerY_);
+            }
+
+            // NO DISPATCH, and that includes the frame the stylus lifts on: a
+            // pan's release is not a click. Reaching the dispatch with it would
+            // find pressedHotspot_ unset, fall back to whatever the pointer is
+            // inside, and run the MouseUp script of a hotspot nobody pressed --
+            // which on a dome is "let go of the slider you never picked up".
+            zoomView.pan(dx, dy);
+            return;
+        }
+
+        // An ordinary stroke, which means the card's own dispatch. The pad's pan
+        // still applies: nothing about panning stops the pointer being where it
+        // is, and the two are on different controls precisely so that both can
+        // happen at once.
         zoomView.pan(dx, dy);
+        updatePointer(touch);
+        updateMouseLatch();
+        dispatchPointer((down & (KEY_TOUCH | KEY_A)) != 0,
+                        (keysUp() & (KEY_TOUCH | KEY_A)) != 0, mouseDown_);
         return;
     }
 
@@ -2413,32 +2783,71 @@ void Engine::processInput()
         }
     }
 
+    dispatchPointer(pressed, released, held);
+}
+
+std::int32_t Engine::hotspotUnderPointer() const
+{
+    if (card_ == nullptr)
+        return -1;
+    // The card view is a band with the letterbox above and the inventory strip
+    // below it; the zoom viewer is the whole screen, every row of it picture.
+    if (mode_ != Mode::Zoom
+        && (pointerY_ < kViewOffsetY || pointerY_ >= kViewOffsetY + kViewH))
+        return -1;
+
+    // The pointer is in DS pixels; hotspot rects are in Riven's original
+    // 608x392 space and are deliberately never pre-scaled (RivenData.hpp), so
+    // the point is converted rather than the rect. Which conversion is the
+    // mode's business and not this loop's -- see pointerCardX().
+    const int cardX = pointerCardX();
+    const int cardY = pointerCardY();
+
+    // The LAST match wins, not the first: this loop deliberately does not
+    // break (riven_card.cpp:827-835). Riven layers small controls over a
+    // card-wide hotspot and resolves the overlap by file order, so stopping
+    // at the first containing rect makes every button that sits on top of a
+    // bigger one unreachable -- which is most of the menu and both journals.
+    std::int32_t hit = -1;
+    for (std::size_t i = 0; i < card_->hotspots.size(); ++i)
+    {
+        // hotspotRect_ and not the card's own rect: the marble grid moves
+        // its six hotspots as the player plays it (Engine::hotspotRect).
+        const Rect &r = hotspotRect(i);
+        if (!hotspotEnabled_[i] || !rectUsable(r))
+            continue;
+        if (rectContains(r, cardX, cardY))
+            hit = static_cast<std::int32_t>(i);
+    }
+    return hit;
+}
+
+/// Take the hotspot under the pointer as ALREADY entered, without running a
+/// script for it.
+///
+/// For the two moments the pointer stops meaning what it meant without having
+/// moved: opening the zoom viewer and leaving it. A screen pixel is 2.375 card
+/// pixels on one side of that and one card pixel on the other, so the hotspot
+/// under a perfectly still stylus changes -- and the ordinary dispatch would
+/// read that as the player crossing a boundary and run a leave script and an
+/// enter script for a hand that never moved. jspit's sunners scatter on exactly
+/// such a script.
+void Engine::seedInsideHotspot()
+{
+    insideHotspot_ = hotspotUnderPointer();
+    cursor_.setShape(insideHotspot_ >= 0
+                         ? card_->hotspots[static_cast<std::size_t>(insideHotspot_)].cursor
+                         : rivendata::kCursorMain);
+}
+
+void Engine::dispatchPointer(bool pressed, bool released, bool held)
+{
+    if (card_ == nullptr)
+        return;
+
     // Hit-tested every frame, whether or not anything is pressed: that is the
     // hover the pointer exists to provide.
-    std::int32_t hit = -1;
-    if (pointerY_ >= kViewOffsetY && pointerY_ < kViewOffsetY + kViewH)
-    {
-        // The pointer is in DS pixels; hotspot rects are in Riven's original
-        // 608x392 space and are deliberately never pre-scaled (RivenData.hpp), so
-        // the point is converted rather than the rect.
-        const int cardX = toCardX(pointerX_);
-        const int cardY = toCardY(pointerY_ - kViewOffsetY);
-        // The LAST match wins, not the first: this loop deliberately does not
-        // break (riven_card.cpp:827-835). Riven layers small controls over a
-        // card-wide hotspot and resolves the overlap by file order, so stopping
-        // at the first containing rect makes every button that sits on top of a
-        // bigger one unreachable -- which is most of the menu and both journals.
-        for (std::size_t i = 0; i < card_->hotspots.size(); ++i)
-        {
-            // hotspotRect_ and not the card's own rect: the marble grid moves
-            // its six hotspots as the player plays it (Engine::hotspotRect).
-            const Rect &r = hotspotRect(i);
-            if (!hotspotEnabled_[i] || !rectUsable(r))
-                continue;
-            if (rectContains(r, cardX, cardY))
-                hit = static_cast<std::int32_t>(i);
-        }
-    }
+    const std::int32_t hit = hotspotUnderPointer();
 
     // A hotspot script is the usual way a card changes, and once it has, every
     // index into the old card's hotspots is meaningless -- and the new card has
@@ -2684,11 +3093,33 @@ void Engine::frame()
 
     processInput();
 
-    // Nothing below this belongs to a card that is not on screen. A queued
-    // command list would draw into buffers the viewer owns, and a CardFrame
-    // handler is an animation nobody can see.
+    // In the viewer, the queue and NOTHING ELSE.
+    //
+    // The queue has to run: a hotspot clicked at full resolution can end in
+    // opcode 12, and a click whose second half never happens is worse than a
+    // click that was refused -- half of Riven's buttons set a variable in the
+    // handler and redraw from the queued list. Its draws land in the card
+    // surface, which nobody is publishing while the viewer has the screen, and
+    // are stamped into the picture as they happen (recordCardDraw); anything
+    // that needs the screen itself has closed the viewer before getting here
+    // (leaveZoom).
+    //
+    // The timer and the CardFrame handler stay off. Those are animation -- a
+    // movie advancing, a marble bobbing -- and animation is the one thing the
+    // viewer cannot show, so running them would spend the frame on pictures
+    // nobody sees and leave the card mid-way through something on the way out.
     if (mode_ == Mode::Zoom)
+    {
+        if (!queued_.empty() && !runningQueued_)
+        {
+            runningQueued_ = true;
+            std::vector<Command> run = std::move(queued_);
+            queued_.clear();
+            runCommands(run, false);
+            runningQueued_ = false;
+        }
         return;
+    }
 
     // The card's timer, if it is due. RivenStack::onFrame (riven_stack.cpp:326-333):
     // skipped while there are queued scripts, and -- this is the part that

@@ -55,7 +55,8 @@ namespace
     }
 
     /// Where each of the tube's five positions starts in the travel movie, in
-    /// the original's milliseconds (tspit.cpp:93 and :63).
+    /// the original's 600 Hz movie ticks (tspit.cpp:93 and :63) -- see
+    /// Engine::playMovieRange for why that is not milliseconds.
     ///
     /// TWO TABLES, and they are not each other reversed -- 2660 and 1760 going
     /// down have no counterparts at 1680 and 2560 going up. The movies are

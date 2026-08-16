@@ -304,28 +304,91 @@ void runEndGame(Engine &e, std::uint16_t movieCode, std::uint32_t delayMs,
         if (alreadyPlaying)
             e.stopMovie(movieCode);
     }
-    else if (alreadyPlaying)
-    {
-        // Watch it out rather than start it. This is the loop runCredits spins
-        // (riven_stack.cpp:239-257) with the credits taken out of it -- they
-        // are rolled below instead, once, for all three call sites.
-        while (!e.movieEnded(movieCode) && !e.quitRequested())
-            e.pumpIdleFrame();
-    }
     else
     {
-        e.playMovie(movieCode, true);
-    }
+        // NOT playMovie(code, true), which is what this used to be. A blocking
+        // play waits for the CONTAINER to end, and on an ending that means the
+        // SOUNDTRACK: ospit's tMOV 0 carries 260 seconds of dialogue over 82
+        // seconds of picture, so the credits arrived three minutes after the
+        // screen had stopped moving.
+        //
+        // ScummVM waits on the video TRACK instead -- getCurFrame() >=
+        // frameCount - 1, where frameCount is the picture's
+        // (riven_stack.cpp:236-240) -- disables the video there, and rolls the
+        // credits over the music that is still going. This is that loop, with
+        // the roll factored out below because all four call sites share it.
 
-    // The roll. ScummVM interleaves it with the video's own loop because the
-    // video's AUDIO keeps playing under the credits after its picture ends
-    // (riven_stack.cpp:227-232 says so in as many words). Here the movie has
-    // been played to its end by the line above and there is nothing left of it
-    // to run under, so the roll follows rather than overlaps -- and `delayMs`,
-    // which ScummVM measures from the last picture frame, is the pause before
-    // it starts either way.
-    if (!endingProbe.armed && !e.quitRequested())
-        runCredits(e, delayMs);
+        // AND IT NEVER LOOPS, whatever the MLST record says. runEndGame's own
+        // video->setLooping(false) (riven_stack.cpp:213), and it stopped being
+        // implied the moment this stopped being a blocking play -- playMovieSlot
+        // forces looping off for those and for nothing else. An ending that
+        // looped would play its music under the credits for ever.
+        e.setMovieLoop(movieCode, false);
+        if (!alreadyPlaying)
+            e.playMovie(movieCode, false);
+
+        // The derivation against ScummVM's measurement of the same number. They
+        // should agree within a few frames; see RvidFile::pictureFrames for the
+        // one way they can fail to.
+        DebugLog::log("ending: movie %u, %u frames of picture (ScummVM says %u)",
+                      static_cast<unsigned>(movieCode),
+                      static_cast<unsigned>(e.moviePictureFrames(movieCode)),
+                      static_cast<unsigned>(frameCountOverride));
+
+        // Held across the roll, not just the wait -- see Engine::MovieHold.
+        Engine::MovieHold hold{e, movieCode};
+        // What playMovieBlocking would have done for us (riven_video.cpp:216).
+        Engine::CursorHide hideCursor{e};
+
+        bool skipped = false;
+        while (!e.moviePictureEnded(movieCode) && !e.quitRequested())
+        {
+            e.pumpIdleFrame();
+            scanKeys();
+            if ((keysDown() & (KEY_B | KEY_START)) != 0)
+            {
+                skipped = true;
+                break;
+            }
+        }
+
+        // Opcode 38's held-back command, where playMovieBlocking runs it: after
+        // the movie rather than part way through (riven_video.cpp:255-260).
+        // "After" now means after the PICTURE, which is the thing its delay was
+        // measured against -- and every shipped use of it is an activateSLST, a
+        // cue that is no less on time for the ending's own music still playing.
+        e.runStoredMovieOpcode(movieCode);
+
+        if (skipped)
+        {
+            // The player asked to get on with it, and nothing of the ending is
+            // meant to outlive that -- soundtrack included.
+            e.stopMovie(movieCode);
+        }
+        else
+        {
+            // videoPtr->disable() (riven_stack.cpp:242). Past the last picture
+            // frame there is nothing left for this to stop, the tail being audio
+            // behind an eight-byte header and no pixels at all -- so it is
+            // insurance against the picture count having come out short, and it
+            // costs nothing when it has not.
+            e.disableMovieVideo(movieCode);
+        }
+
+        // The roll, over the soundtrack, which is what ScummVM's own loop does
+        // (riven_stack.cpp:227-232 says so in as many words).
+        if (!e.quitRequested())
+            runCredits(e, delayMs);
+
+        // Every exit lands here -- skipped, quit, the roll cut short by a button,
+        // no credits art on the card. ScummVM's videoPtr->stop() at
+        // riven_stack.cpp:260, in the same place and for the same reason.
+        //
+        // endMovie and not stopMovie: the buffers have to come back as well as
+        // the decoder go, and on the no-credits-art path nothing else is left to
+        // do it.
+        e.endMovie(movieCode);
+    }
 
     // riven_stack.cpp:262-270: the game state is thrown away and the player is
     // put back on the menu. startNewGame cannot clear the zip destinations --

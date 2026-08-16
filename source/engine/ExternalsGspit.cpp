@@ -36,8 +36,14 @@ namespace
     // turn the table and the whole thing rotates a quarter turn. Both are the
     // same long movie played a slice at a time -- one movie per raisable
     // section, whose timeline is the pin going up at each of the four rotations
-    // followed by the table turning -- so every command here is a seek and a
-    // half-second of playback.
+    // followed by the table turning -- so every command here is a seek and 550
+    // ticks of playback.
+    //
+    // TICKS, not milliseconds: the numbers below are counted on the movie's own
+    // 600 Hz clock (Engine::playMovieRange), so 550 is 0.92 s and 14 frames, and
+    // the 9560-tick pin movies are exactly long enough for xgpincontrols' seek
+    // to 9630 - pinPos*600. Read as milliseconds they addressed the first 60% of
+    // each movie and every pin stopped short of its travel.
     //
     // gupmoov is which of those movies is currently holding a section up. It is
     // NOT in any stack's NAME 4 list; ScummVM's variable map invents it and
@@ -256,9 +262,15 @@ namespace
     // --- the viewers ---------------------------------------------------------
 
     /// Where each of the twelve stops sits in the viewers' movie, in the
-    /// original's milliseconds (gspit.cpp:264). Twelve for six positions,
+    /// original's 600 Hz movie ticks (gspit.cpp:264) -- 800 apart, which is 20
+    /// frames of a 15 fps movie and NOT the 12 that reading them as
+    /// milliseconds gives (Engine::playMovieRange). Twelve for six positions,
     /// because the movie holds two revolutions -- a viewer at position 4 asked
     /// to advance 5 needs somewhere past the end of the first to run to.
+    ///
+    /// The twelfth stop, 8816, is 220 frames into a 241-frame movie: the table
+    /// is cut to fit the whole recording, which is the check that says these are
+    /// ticks. At 1000 Hz it would stop 45% short of the end.
     constexpr std::uint16_t kViewerStops[] = {0,    816,  1617, 2416, 3216, 4016,
                                               4816, 5616, 6416, 7216, 8016, 8816};
 

@@ -38,6 +38,37 @@ namespace rivenrt
 /// part way down the screen.
 void screenFrame();
 
+/// Give the display back to the card parked under a screen that took it, and do
+/// it without a black frame in the middle.
+///
+/// ORDER, and it is the whole of this function. resetBuffer fills the picture
+/// rows with OPAQUE BLACK (BgSurface::resetBuffer) and has to be run on every
+/// buffer the screen wrote, because those writes cover all 192 rows and the ones
+/// below the card view must go back transparent or the next vertical pan slides
+/// black through the view. But one of the buffers the screen wrote is the one
+/// being scanned out -- so clearing first and rebinding after put a screenful of
+/// black on the hardware for the frame between them. Worse, it left
+/// endMovieTakeover's flip PENDING: a transition beginning in that frame took
+/// the flip inside its own first vblank and swapped the old and new cards half
+/// way down the slide. Catherine's journal, page-turned inside the zoom viewer,
+/// was where that showed.
+///
+/// So: rebind and ask for the flip, let ONE vblank commit it, and only then
+/// clear -- at which point frontBuffer() names the card. That is a better guard
+/// than parkedBuffer() was, because it is the buffer the hardware is reading
+/// rather than the one somebody meant to keep, and endMovieTakeover has already
+/// forgotten the latter by then.
+///
+/// setScrollY and not setLetterbox: setLetterbox commits with bgUpdate() there
+/// and then (BgSurface::setLetterbox), which would slide the OUTGOING image 14
+/// rows down for the rest of the frame. This way the scroll and the flip reach
+/// the registers together, in the one bgUpdate at the tail of vblank().
+///
+/// Caller-agnostic on purpose: it is the display half of handing back and
+/// nothing else. Repainting the card -- invalidateAll, applyScreenUpdate -- is
+/// each caller's own tail, because they do not agree on it.
+void screenHandBack();
+
 /// True when the port's screens can be drawn at all: a background surface, and
 /// the menu font that every one of them but the credits needs.
 bool screenUsable();

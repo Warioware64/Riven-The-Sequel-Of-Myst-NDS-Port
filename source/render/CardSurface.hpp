@@ -67,6 +67,25 @@ public:
     /// reads _mainScreen and writes the visible screen).
     const rivendata::Texel *clean() const { return clean_; }
 
+    /// What a draw did, for a caller that has to repeat it somewhere else.
+    ///
+    /// The zoom viewer is the one such caller: it draws the same overlays onto a
+    /// 608x392 picture out of the FULL-resolution twin of the same tBMP, and to
+    /// do that it needs two things only this class saw. Where the picture landed
+    /// on the card, which for drawPicture() is the file's own size and not the
+    /// rectangle it was given; and the two widths, because a section's source
+    /// rectangle is in the .rpic's pixels and the twin's are the source tBMP's --
+    /// the same numbers only while the converter left the picture alone, which is
+    /// every overlay and no full-card still.
+    struct Placed
+    {
+        rivendata::Rect card{}; ///< card coordinates, right/bottom edge clipped
+        int fileW = 0;          ///< the .rpic's own width
+        int fileH = 0;
+        int sourceW = 0; ///< the source tBMP's size, which is the .rpiz twin's
+        int sourceH = 0;
+    };
+
     /// Draw a .rpic at `cardRect`'s TOP-LEFT CORNER, which is a PLST rectangle in
     /// Riven's original 608x392 coordinates. Only the corner: how big the picture
     /// is on the card is the picture's own business, and it says so in its header
@@ -74,9 +93,9 @@ public:
     /// two edges the same way, and 96 of Riven's PLST records disagree with the
     /// bitmap they name, so this is a difference you can see.
     ///
-    /// Marks the rows it touched dirty.
+    /// Marks the rows it touched dirty. Fills `placed` when it is not null.
     bool drawPicture(const std::string &path, const rivendata::Rect &cardRect,
-                     std::string &error);
+                     std::string &error, Placed *placed = nullptr);
 
     /// One piece of a picture: a rectangle of the FILE's own pixels, and where
     /// on the card (608x392) it goes.
@@ -94,7 +113,8 @@ public:
     /// decodes of the same file if each piece went through drawPicture(). The
     /// file is on an SD card.
     bool drawPictureSections(const std::string &path, const Section *sections,
-                             std::size_t count, std::string &error);
+                             std::size_t count, std::string &error,
+                             Placed *placed = nullptr);
 
     /// Fill the picture with black. Marks everything dirty.
     void clear();

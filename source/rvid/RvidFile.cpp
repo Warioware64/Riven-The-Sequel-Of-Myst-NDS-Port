@@ -7,6 +7,49 @@ using namespace rivendata;
 namespace rivenrt
 {
 
+/// See RvidFile::pictureFrames for what this is and what it costs.
+///
+/// Backwards, because the answer is at the end and the tail is short: the first
+/// frame big enough to hold a picture IS the last picture, and on a movie with
+/// no tail at all that is the very first entry looked at.
+std::uint32_t RvidFile::derivePictureFrames()
+{
+    // The last frame's size is the one thing the index cannot give -- there is no
+    // entry after it to subtract from -- so the end of the file stands in for it.
+    std::uint32_t fileBytes = 0;
+    if (std::fseek(file_, 0, SEEK_END) == 0)
+    {
+        const long end = std::ftell(file_);
+        if (end > 0)
+            fileBytes = static_cast<std::uint32_t>(end);
+    }
+
+    // indexCount is documented as equal to frameCount and the converter writes
+    // them that way, but this reader does not require it of a file, so neither
+    // does this.
+    const std::uint32_t frames = header_.frameCount < index_.size()
+                                     ? header_.frameCount
+                                     : static_cast<std::uint32_t>(index_.size());
+    const std::uint32_t least =
+        static_cast<std::uint32_t>(sizeof(RvidFrameHeader)) + frameBytes();
+
+    for (std::uint32_t n = frames; n-- > 0;)
+    {
+        const std::uint32_t at = index_[n].offset;
+        const std::uint32_t next = (n + 1 < frames) ? index_[n + 1].offset : fileBytes;
+        if (next <= at)
+            break; // an index that does not run forwards answers nothing
+        if (next - at >= least)
+            return n + 1;
+    }
+
+    // No index, an index that reads backwards, or a movie of nothing but repeat
+    // frames -- which the converter cannot write, since frame 0 always carries a
+    // picture. Whichever it is, the honest answer is the one everything gave
+    // before this function existed.
+    return header_.frameCount;
+}
+
 bool RvidFile::open(const std::string &path)
 {
     close();
@@ -68,6 +111,11 @@ bool RvidFile::open(const std::string &path)
             return false;
         }
 
+        // Where the picture stops, before the position is set: this is the one
+        // read of the file's end anybody makes, and doing it here means the seek
+        // below leaves the handle where the caller expects it either way.
+        pictureFrames_ = derivePictureFrames();
+
         // Seek to the first frame rather than assuming it starts where the
         // index ends. The converter sizes the index from an upper bound on the
         // frame count (ffprobe cannot give an exact one for these movies), so a
@@ -106,6 +154,7 @@ void RvidFile::close()
     sink_ = nullptr;
     sinkCtx_ = nullptr;
     next_ = 0;
+    pictureFrames_ = 0;
 }
 
 bool RvidFile::readNextInto(RvidFrameData &out, void *videoDst, std::size_t videoDstBytes)

@@ -665,9 +665,12 @@ namespace
         const int number = randomBetween(1, 10);
         redrawWharkNumberPuzzle(e, overlayPlst, number);
 
-        // The walk is a slice of one long movie. Both films run 11560 ms and are
-        // cut into 19 parts, one per position the villager can stand in, so the
-        // slice IS the number the wheel gave (jspit.cpp:753-763).
+        // The walk is a slice of one long movie. Both films run 11560 ticks of
+        // the 600 Hz movie clock -- "(11560/600)s is the length of each of the
+        // two movies", jspit.cpp:747-748, which is where Engine::playMovieRange's
+        // units are stated outright -- and are cut into 19 parts, one per
+        // position the villager can stand in, so the slice IS the number the
+        // wheel gave (jspit.cpp:753-763).
         const std::uint32_t from = e.vars().get(posVar);
         const std::uint32_t to = from + static_cast<std::uint32_t>(number);
         e.playMovieRange(doomCode, (11560 / 19) * from, (11560 / 19) * to);

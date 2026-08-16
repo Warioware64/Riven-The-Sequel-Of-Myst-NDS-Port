@@ -99,7 +99,7 @@ void CardSurface::markRows(int y, int height)
 }
 
 bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
-                              std::string &error)
+                              std::string &error, Placed *placed)
 {
     if (texels_ == nullptr)
     {
@@ -133,6 +133,19 @@ bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
     if (right > kCardW)
         right = kCardW;
     const int bottom = cardRect.top + img.srcHeight;
+
+    // Before the DS rectangle is derived, and in card coordinates: this is where
+    // the picture went as far as Riven is concerned, which is the space the zoom
+    // viewer draws in. See Placed.
+    if (placed != nullptr)
+    {
+        placed->card = Rect{cardRect.left, cardRect.top, static_cast<std::int16_t>(right),
+                            static_cast<std::int16_t>(bottom)};
+        placed->fileW = img.width;
+        placed->fileH = img.height;
+        placed->sourceW = img.srcWidth;
+        placed->sourceH = img.srcHeight;
+    }
 
     // The rectangle is in Riven's original coordinates; scaling it here rather
     // than in the converter is what keeps one scale constant in the whole port
@@ -197,7 +210,8 @@ bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
 }
 
 bool CardSurface::drawPictureSections(const std::string &path, const Section *sections,
-                                      std::size_t count, std::string &error)
+                                      std::size_t count, std::string &error,
+                                      Placed *placed)
 {
     if (texels_ == nullptr)
     {
@@ -215,6 +229,16 @@ bool CardSurface::drawPictureSections(const std::string &path, const Section *se
     {
         error = "picture decoded to nothing";
         return false;
+    }
+
+    // Per file, not per section: the two widths are the file's, and the card
+    // rectangle a section landed on is the one its caller already has.
+    if (placed != nullptr)
+    {
+        placed->fileW = img.width;
+        placed->fileH = img.height;
+        placed->sourceW = img.srcWidth;
+        placed->sourceH = img.srcHeight;
     }
 
     bool drewAnything = false;
