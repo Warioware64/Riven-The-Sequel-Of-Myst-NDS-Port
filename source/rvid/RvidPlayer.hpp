@@ -153,14 +153,27 @@ public:
     /// upload only those. Zero when nothing changed.
     std::uint32_t compositeInto(rivendata::Texel *dst);
 
-    /// Offer the picture already held to the next compositeInto, even though no
-    /// new frame has arrived.
+    /// Put the picture already held back into `bands`, and nowhere else.
     ///
-    /// For a destination that was rebuilt underneath a still-playing overlay:
-    /// CardSurface::refreshFromClean puts a whole card-wide band back, which
-    /// takes any overlay in that band with it, and an overlay running at 15 fps
-    /// may have nothing new to say for another four published frames.
-    void refreshPicture() { liteDirty_ = havePicture_; }
+    /// A REPAIR rather than a publish, for a destination that was rebuilt
+    /// underneath a still-playing overlay: CardSurface::refreshFromClean puts a
+    /// whole card-wide band back and the water copies its own rows out of
+    /// `clean_`, both of which take any overlay in those rows with them -- and an
+    /// overlay running at 15 fps may have nothing new to say for another four
+    /// published frames, so the hole would be seen.
+    ///
+    /// BANDS, because the caller knows which rows it disturbed and this used to
+    /// ignore that: gspit's dome card has water over nine of the overlay's
+    /// seventeen bands, and repairing it redrew all 130 rows and re-marked all
+    /// seventeen bands dirty in every buffer, four times a second, for the sake
+    /// of nine.
+    ///
+    /// Ask with a mask that came from rowMask(); anything else is a guess about
+    /// arithmetic this owns.
+    std::uint32_t compositeRows(rivendata::Texel *dst, std::uint32_t bands);
+
+    /// Every band, for a caller that means "all of it".
+    static constexpr std::uint32_t kAllBands = 0xFFFFFFFFu;
 
     /// The 8-row blocks this overlay's picture occupies, in
     /// CardSurface::noteOverlayRows' form. Zero for a FULL movie, or before the
@@ -218,6 +231,11 @@ private:
     bool readNextFrame();
     std::uint32_t clockFrame() const;
     void releaseAudio();
+
+    /// The row loop both compositeInto and compositeRows are. Copies the held
+    /// picture into the bands in `bands` and returns the ones it wrote; says
+    /// nothing about liteDirty_, which is the caller's to decide.
+    std::uint32_t blit(rivendata::Texel *dst, std::uint32_t bands);
 
     RvidFile file_;
 

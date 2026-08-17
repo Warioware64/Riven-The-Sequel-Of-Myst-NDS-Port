@@ -483,6 +483,29 @@ std::uint32_t RvidPlayer::compositeInto(Texel *dst)
         || !liteDirty_)
         return 0;
 
+    const std::uint32_t touched = blit(dst, kAllBands);
+    liteDirty_ = false;
+    return touched;
+}
+
+std::uint32_t RvidPlayer::compositeRows(Texel *dst, std::uint32_t bands)
+{
+    if (dst == nullptr || file_.profile() != VideoProfile::Lite || !havePicture_
+        || bands == 0)
+        return 0;
+
+    // liteDirty_ IS NEITHER READ NOR WRITTEN, and that is the whole of what makes
+    // this safe to call at any moment. The flag means "a new frame has arrived
+    // and has not been published yet"; putting back part of the frame ALREADY on
+    // the card is not that. So a repair can never consume a pending publish, and
+    // a pending publish can never be mistaken for satisfied by a repair.
+    return blit(dst, bands);
+}
+
+std::uint32_t RvidPlayer::blit(Texel *dst, std::uint32_t bands)
+{
+    DebugLog::Perf::Scope compositeScope{DebugLog::Perf::Composite};
+
     const int w = width();
     const int h = height();
     std::uint32_t touched = 0;
@@ -492,7 +515,14 @@ std::uint32_t RvidPlayer::compositeInto(Texel *dst)
         const int vy = viewY_ + y;
         if (vy < 0 || vy >= kViewH)
             continue;
-        touched |= 1u << (vy / kRowBand);
+        // The SAME band arithmetic rowMask() uses, and it has to stay that way:
+        // a caller asks with a mask rowMask() gave it, so a disagreement here is
+        // a strip of the overlay that stops being repaired and gets eaten by
+        // whatever disturbed it.
+        const std::uint32_t bit = 1u << (vy / kRowBand);
+        if ((bands & bit) == 0)
+            continue;
+        touched |= bit;
 
         const Texel *src = scratch_.data() + static_cast<std::size_t>(y) * w;
         Texel *row = dst + static_cast<std::size_t>(vy) * kViewW;
@@ -511,7 +541,6 @@ std::uint32_t RvidPlayer::compositeInto(Texel *dst)
                     static_cast<std::size_t>(x1 - x0) * sizeof(Texel));
     }
 
-    liteDirty_ = false;
     return touched;
 }
 

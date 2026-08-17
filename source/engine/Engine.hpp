@@ -45,9 +45,36 @@ namespace rivenrt
 {
 
 /// Playback slots a card's MLST records can address. Riven's "code" field is a
-/// small integer; ScummVM keeps a slot per distinct value it sees, and no card
-/// in the shipped data uses more than a handful.
-inline constexpr int kMovieSlots = 8;
+/// small integer; ScummVM keeps a slot per distinct value it sees, and this is
+/// how many this port can hold at once.
+///
+/// SIXTEEN, and measured rather than guessed. "No card uses more than a
+/// handful" was the old comment and it was wrong: counting the distinct codes
+/// in every MLST in the game, nine cards want more than eight and three of them
+/// -- bspit 372, pspit 32 and rspit 21 -- want thirteen. gspit's pin dome, card
+/// 155, activates eleven in ONE card-load script (the Jungle Island branch), so
+/// three of its sections had no movie left to play: overflow claimed them all
+/// into the same slot, one after another, and pressing the section that maps to
+/// code 9 got "no movie activated as 9".
+///
+/// It costs almost nothing because a slot is a BINDING, not a movie: the file
+/// is opened when the code is first played (ensureSlotOpen) and a closed
+/// RvidPlayer is a handful of scalars and three empty vectors. What the extra
+/// slots must NOT do is let more files be open at once, which is kOpenMovies.
+inline constexpr int kMovieSlots = 16;
+
+/// How many of those slots may have their file OPEN at the same time.
+///
+/// This is the number that costs memory: open() allocates the composite scratch
+/// (up to 79860 bytes on the largest overlay in the game), the frame index and
+/// a read buffer. Eight was the effective ceiling before kMovieSlots grew,
+/// because the table was eight, and the budget is set here to keep it there --
+/// gspit 155 would otherwise end a thorough visit with eleven pin movies open.
+///
+/// Not a hard limit: ensureSlotOpen closes the least recently used slot that is
+/// disabled and idle, and opens anyway when there is no such slot. A movie the
+/// card is still using is never taken.
+inline constexpr int kOpenMovies = 8;
 
 class Engine
 {
@@ -709,12 +736,27 @@ private:
         bool assigned = false; ///< an MLST record has been activated into this slot
         bool enabled = false;  ///< opcodes 28/31
         bool open = false;     ///< the file is open and the planes allocated
+        /// When this slot's file was last opened, on movieUse_'s counter. What
+        /// makes "least recently used" mean anything, in ensureSlotOpen (which
+        /// closes one to stay inside kOpenMovies) and in claimSlotForCode
+        /// (which takes one when a card wants more codes than there are slots).
+        /// Zero on a slot that has never been opened, which sorts first.
+        std::uint32_t lastUse = 0;
     };
 
     /// The slot standing in for an MLST code, or -1 if no record has claimed it.
     std::int32_t slotForCode(std::uint16_t code) const;
     /// The same, claiming a free slot if the code has none yet.
     std::int32_t claimSlotForCode(std::uint16_t code);
+
+    /// The open slot least recently opened that the card is provably finished
+    /// with -- open, not playing, and disabled -- or -1 if there is none.
+    ///
+    /// DISABLED is the safe part, and it is not caution: a disabled overlay has
+    /// been BAKED into the card surface (enableMovie), so recompositeOverlays
+    /// has nothing to put back for it and closing it loses no pixels. One that
+    /// is merely stopped is still the only holder of its picture.
+    std::int32_t lruClosableSlot() const;
 
     /// Open the slot's movie if an MLST has assigned one and it is not open yet.
     /// Takes a SLOT INDEX, not an MLST code.
@@ -1035,6 +1077,12 @@ private:
     std::uint16_t pressedInvItem_ = 0;
 
     MovieSlot movies_[kMovieSlots];
+
+    /// Ticks once per slot opened, and is what MovieSlot::lastUse records. A
+    /// bare counter rather than a clock because only the ORDER is ever asked
+    /// for, and it starts at 1 so that "never opened" (0) is distinguishable
+    /// from "opened first". Wrapping it would take 4 billion movie opens.
+    std::uint32_t movieUse_ = 0;
 
     /// The slot a blocking play is waiting on, or -1. pumpMovies leaves that one
     /// alone: the waiter drives pumpMovies through idleFrame(), and it is the

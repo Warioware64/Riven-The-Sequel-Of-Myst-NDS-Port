@@ -861,16 +861,58 @@ std::int32_t Engine::claimSlotForCode(std::uint16_t code)
     // More distinct codes on one card than there are slots. Take one that is not
     // on screen rather than dropping the record; the alternative is a movie that
     // silently never plays, which is the bug this function exists to fix.
+    //
+    // THE LEAST RECENTLY OPENED, and not "the first one that is not playing".
+    // The first is slot 0 every time, and a card that overflows does it while
+    // its load script runs -- with nothing playing yet, so every code past the
+    // end was claimed into slot 0, one over the next. gspit's pin dome
+    // activates eleven codes into eight slots and lost three of them that way:
+    // 9 and 10 were overwritten before either could be played, and the section
+    // that wants code 9 reported "no movie activated as 9". The table is now
+    // sized past the worst card in the game (kMovieSlots) so this should never
+    // run again, but it must not fail like that if it does.
+    std::int32_t victim = -1;
     for (std::int32_t i = 0; i < kMovieSlots; ++i)
-        if (!movies_[i].player.isPlaying())
-        {
-            closeSlot(i);
-            movies_[i].code = code;
-            return i;
-        }
+        if (!movies_[i].player.isPlaying()
+            && (victim < 0 || movies_[i].lastUse < movies_[victim].lastUse))
+            victim = i;
 
-    DebugLog::warn("card %u: more than %d movies at once", cardId_, kMovieSlots);
-    return -1;
+    if (victim < 0)
+    {
+        DebugLog::warn("card %u: more than %d movies at once", cardId_, kMovieSlots);
+        return -1;
+    }
+
+    // Said out loud: this is a movie the card asked for being taken away from a
+    // code the card also asked for, and the symptom lands somewhere else
+    // entirely -- on whichever hotspot plays the displaced code next.
+    DebugLog::warn("card %u: code %u takes slot %ld from code %u", cardId_, code,
+                   static_cast<long>(victim), movies_[victim].code);
+    closeSlot(victim);
+    // Unassigned, and not merely closed. activateMlst fills all of this in
+    // immediately, but enableMovie claims a slot too -- and there the record
+    // left behind would be the DISPLACED movie wearing the new code's name, so
+    // the next play of it would open the wrong film. Empty is what a code with
+    // no record of its own is supposed to look like (releaseCardMovies).
+    movies_[victim].assigned = false;
+    movies_[victim].enabled = false;
+    movies_[victim].movieId = 0;
+    movies_[victim].code = code;
+    return victim;
+}
+
+std::int32_t Engine::lruClosableSlot() const
+{
+    std::int32_t best = -1;
+    for (std::int32_t i = 0; i < kMovieSlots; ++i)
+    {
+        const MovieSlot &m = movies_[i];
+        if (!m.open || m.enabled || m.player.isPlaying())
+            continue;
+        if (best < 0 || m.lastUse < movies_[best].lastUse)
+            best = i;
+    }
+    return best;
 }
 
 void Engine::activateMlst(std::uint16_t index, bool andPlay)
@@ -925,7 +967,32 @@ bool Engine::ensureSlotOpen(std::int32_t slot)
     if (!ms.assigned)
         return false;
     if (ms.open)
+    {
+        ms.lastUse = ++movieUse_; // it is being used now, whoever opened it
         return true;
+    }
+
+    // Stay inside the open-file budget (kOpenMovies), which is what stops the
+    // enlarged slot table from turning into an enlarged pile of decoders: a
+    // thorough visit to gspit's pin dome plays eleven different movies, each
+    // holding a composite scratch and a read buffer for as long as its slot
+    // does. The one closed is disabled and idle -- its last frame is already
+    // baked into the card -- so nothing on screen changes, and if there is no
+    // such slot the open goes ahead exactly as it always did.
+    std::int32_t openCount = 0;
+    for (std::int32_t i = 0; i < kMovieSlots; ++i)
+        if (movies_[i].open)
+            ++openCount;
+    if (openCount >= kOpenMovies)
+    {
+        const std::int32_t victim = lruClosableSlot();
+        if (victim >= 0)
+        {
+            DebugLog::log("  mov close %u (slot %ld) for %u", movies_[victim].movieId,
+                          static_cast<long>(victim), ms.movieId);
+            closeSlot(victim);
+        }
+    }
 
     const std::string path = moviePath(ms.movieId);
     if (!ms.player.open(path, ms.left, ms.top))
@@ -938,6 +1005,7 @@ bool Engine::ensureSlotOpen(std::int32_t slot)
     }
     ms.player.setVolume(ms.volume);
     ms.open = true;
+    ms.lastUse = ++movieUse_;
     DebugLog::log("  mov %u %dx%d %lu frames at %d,%d %s", ms.movieId, ms.player.width(),
                   ms.player.height(),
                   static_cast<unsigned long>(ms.player.frameCount()), ms.left, ms.top,
@@ -1207,8 +1275,16 @@ void Engine::playMovieSlot(std::int32_t slot, bool blocking, std::uint32_t start
 ///
 /// The counterpart to CardSurface::refreshFromClean, which does not know what is
 /// playing and restores card-wide bands. An overlay that has no new frame is
-/// asked for the one it is holding (RvidPlayer::refreshPicture), because at 15
+/// asked for the one it is holding (RvidPlayer::compositeRows), because at 15
 /// fps "no new frame" lasts four published frames and the hole would be seen.
+///
+/// ONLY THE BANDS THE CALLER DISTURBED. `rows` is what the water actually drew
+/// over, or kAllDirty from a screen update that rebuilt everything, and the
+/// overlay is put back into the intersection and nothing else. It used to be put
+/// back whole whichever the caller was, which on gspit's dome card meant redoing
+/// all 130 rows of a 35 KB overlay -- and re-marking all seventeen of its bands
+/// dirty in every buffer -- four times a second on behalf of the nine bands the
+/// ripple had touched.
 void Engine::recompositeOverlays(std::uint32_t rows)
 {
     if (rows == 0 || !surface_.exists())
@@ -1236,10 +1312,10 @@ void Engine::recompositeOverlays(std::uint32_t rows)
         // the overlay IS, and an overlay with no new frame to show returns zero
         // from the latter -- which is exactly the one that needs putting back,
         // because it has nothing else that would redraw it.
-        if ((m.player.rowMask() & rows) == 0)
+        const std::uint32_t hit = m.player.rowMask() & rows;
+        if (hit == 0)
             continue;
-        m.player.refreshPicture();
-        surface_.noteOverlayRows(m.player.compositeInto(surface_.texels()));
+        surface_.noteOverlayRows(m.player.compositeRows(surface_.texels(), hit));
     }
 }
 
