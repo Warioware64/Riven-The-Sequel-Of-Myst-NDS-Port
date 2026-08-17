@@ -1,0 +1,9 @@
+# Patches are fed to `git apply` verbatim, by CMake, at configure time
+# (tools/riven-convert/CMakeLists.txt). Git on Windows checks out with
+# core.autocrlf=true by default, and a patch whose body has been translated to
+# CRLF while its hunk headers still count LF bytes is rejected as "corrupt patch
+# at <line>" -- which is exactly how the Windows converter build failed, at
+# 0001-pack-mohawk-file-table.patch:29, before this file existed.
+#
+# -text means "never translate line endings on this path, in either direction".
+*.patch -text
