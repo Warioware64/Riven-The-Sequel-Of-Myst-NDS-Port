@@ -11,6 +11,12 @@ void Global::Init()
     irqSet(IRQ_VBLANK, NEA_VBLFunc);
     irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
+    // The profiler's clock, started here because these two handlers are half of
+    // what it reads: NEA_GetFPS and NEA_GetCPUPercent are fed by the vblank and
+    // hblank counters above and have been ticking, unread, since they were
+    // installed. Compiled out entirely unless RIVEN_PROFILE is set.
+    rivenrt::DebugLog::Perf::begin();
+
     // ROM filesystem (UI font + menu backgrounds only). Harmless if it fails;
     // recorded for callers.
     hasNitroFS = nitroFSInit(nullptr);

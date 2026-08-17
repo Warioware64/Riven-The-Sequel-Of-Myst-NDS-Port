@@ -306,11 +306,213 @@ void status(const char *text)
 
 void pumpStatus()
 {
+    Perf::frameTick();
     if (g_statusFrames == 0)
         return;
     if (--g_statusFrames == 0)
         status("");
 }
+
+// ---------------------------------------------------------------------------
+// Perf
+// ---------------------------------------------------------------------------
+
+#if RIVEN_PROFILE
+
+namespace Perf
+{
+namespace
+{
+    bool g_perfOn = false;
+    bool g_started = false;
+
+    /// Ticks and calls accumulated since the last report.
+    std::uint32_t g_ticks[kSlotCount] = {};
+    std::uint32_t g_calls[kSlotCount] = {};
+    /// When each slot was entered. One deep: none of the four nests inside
+    /// another, and a counter here would only hide it if one ever did.
+    std::uint32_t g_entered[kSlotCount] = {};
+
+    /// The clock at the last frameTick, and how many frames and missed vblanks
+    /// have gone by since the last report.
+    std::uint32_t g_lastTick = 0;
+    std::uint32_t g_frames = 0;
+    std::uint32_t g_missed = 0;
+    std::uint32_t g_worstCpu = 0;
+    /// Ticks accumulated toward the one-second report. Peaks at ~33.5 M, well
+    /// inside a uint32.
+    std::uint32_t g_window = 0;
+
+    /// 33.513982 MHz. One vblank at 59.8261 Hz is this over 59.8261.
+    constexpr std::uint32_t kTicksPerSecond = 33513982u;
+    constexpr std::uint32_t kTicksPerVbl = 560190u;
+
+    /// The row above the status line, so the two do not fight.
+    constexpr int kPerfRow = kConsoleH - 2;
+
+    std::uint32_t ticksToMs(std::uint32_t t)
+    {
+        // Ticks per millisecond is 33514, and t is at most one second's worth,
+        // so this cannot overflow before the divide.
+        return t / (kTicksPerSecond / 1000u);
+    }
+} // namespace
+
+void begin()
+{
+    if (g_started)
+        return;
+    cpuStartTiming(0);
+    g_started = true;
+    g_lastTick = cpuGetTiming();
+}
+
+bool on() { return g_perfOn; }
+
+void setOn(bool v)
+{
+    g_perfOn = v;
+    if (!v)
+        consoleRow(kPerfRow, "");
+    // A window that spanned the switch would report time nobody was measuring.
+    for (int i = 0; i < kSlotCount; ++i)
+    {
+        g_ticks[i] = 0;
+        g_calls[i] = 0;
+    }
+    g_frames = g_missed = g_worstCpu = g_window = 0;
+    g_lastTick = g_started ? cpuGetTiming() : 0;
+}
+
+void enter(Slot s)
+{
+    if (!g_perfOn)
+        return;
+    g_entered[s] = cpuGetTiming();
+}
+
+void leave(Slot s)
+{
+    if (!g_perfOn)
+        return;
+    // Unsigned subtraction, correct across the timer's 128-second wrap.
+    g_ticks[s] += cpuGetTiming() - g_entered[s];
+    ++g_calls[s];
+}
+
+void frameTick()
+{
+    if (!g_perfOn || !g_started)
+        return;
+
+    const std::uint32_t now = cpuGetTiming();
+    const std::uint32_t dt = now - g_lastTick;
+    g_lastTick = now;
+
+    ++g_frames;
+    g_window += dt;
+
+    // How many vblanks that frame really took, rounded to nearest -- everything
+    // past the first is a frame the player did not get.
+    const std::uint32_t vbls = (dt + kTicksPerVbl / 2) / kTicksPerVbl;
+    if (vbls > 1)
+        g_missed += vbls - 1;
+
+    const std::uint32_t cpu = static_cast<std::uint32_t>(NEA_GetCPUPercent());
+    if (cpu > g_worstCpu)
+        g_worstCpu = cpu;
+
+    if (g_window < kTicksPerSecond)
+        return;
+
+    // Milliseconds PER SECOND per slot, which is scale-free: 500 means half the
+    // machine. The call counts matter as much as the totals -- an overlay
+    // composited twice in one movie frame shows up here and nowhere else.
+    char line[kLineMax];
+    std::snprintf(line, sizeof(line), "%2df %3d%% -%lu R%lu/%lu C%lu/%lu U%lu/%lu W%lu",
+                  NEA_GetFPS(), static_cast<int>(g_worstCpu),
+                  static_cast<unsigned long>(g_missed),
+                  static_cast<unsigned long>(ticksToMs(g_ticks[Read])),
+                  static_cast<unsigned long>(g_calls[Read]),
+                  static_cast<unsigned long>(ticksToMs(g_ticks[Composite])),
+                  static_cast<unsigned long>(g_calls[Composite]),
+                  static_cast<unsigned long>(ticksToMs(g_ticks[Upload])),
+                  static_cast<unsigned long>(g_calls[Upload]),
+                  static_cast<unsigned long>(ticksToMs(g_ticks[Water])));
+
+    consoleRow(kPerfRow, line);
+    // AND to the file, which is the one that matters: a log read back afterwards
+    // beats photographing a screen, and it catches the walk onto the card as
+    // well as the steady state.
+    emit(line, false);
+
+    for (int i = 0; i < kSlotCount; ++i)
+    {
+        g_ticks[i] = 0;
+        g_calls[i] = 0;
+    }
+    g_frames = g_missed = g_worstCpu = g_window = 0;
+}
+
+void probeRead(const char *path, void (*out)(const char *))
+{
+    if (out == nullptr)
+        return;
+    if (!g_started)
+    {
+        out("perf: no clock (RIVEN_PROFILE off?)");
+        return;
+    }
+
+    std::FILE *const f = std::fopen(path, "rb");
+    if (f == nullptr)
+    {
+        out("perf: cannot open it");
+        return;
+    }
+
+    // The sizes that matter: the chunk the FULL path already uses, the ones
+    // either side of it, and a whole dome overlay frame.
+    static const std::size_t kSizes[] = {4096, 8192, 16384, 32768, 35360};
+    std::vector<std::uint8_t> buf(35360);
+
+    char line[kLineMax];
+    for (const std::size_t want : kSizes)
+    {
+        std::fseek(f, 0, SEEK_SET);
+        std::uint32_t worst = 0;
+        std::uint32_t total = 0;
+        std::size_t got = 0;
+        int blocks = 0;
+        for (; blocks < 64; ++blocks)
+        {
+            const std::uint32_t t0 = cpuGetTiming();
+            const std::size_t n = std::fread(buf.data(), 1, want, f);
+            const std::uint32_t dt = cpuGetTiming() - t0;
+            total += dt;
+            if (dt > worst)
+                worst = dt;
+            got += n;
+            if (n < want)
+                break; // the end of the file; report what was measured
+        }
+        // KB/s, computed before the divide so the rounding is on the answer.
+        const std::uint32_t kbs =
+            total > 0 ? static_cast<std::uint32_t>(
+                            (static_cast<std::uint64_t>(got) * kTicksPerSecond) / total / 1024u)
+                      : 0;
+        std::snprintf(line, sizeof(line), "%5lu B x%d: %4lu KB/s worst %lu us",
+                      static_cast<unsigned long>(want), blocks,
+                      static_cast<unsigned long>(kbs),
+                      static_cast<unsigned long>(worst / (kTicksPerSecond / 1000000u)));
+        out(line);
+    }
+    std::fclose(f);
+}
+
+} // namespace Perf
+
+#endif // RIVEN_PROFILE
 
 void screenshot()
 {

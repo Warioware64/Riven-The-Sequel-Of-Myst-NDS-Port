@@ -185,6 +185,116 @@ void status(const char *text);
 /// or during a blocking movie still goes away on its own.
 void pumpStatus();
 
+// ---------------------------------------------------------------------------
+// Perf: where the frame went
+// ---------------------------------------------------------------------------
+//
+// COMPILED OUT BY DEFAULT. `RIVEN_PROFILE` is off unless build.py is told
+// otherwise, and with it off every entry point below is an empty inline and
+// `Scope` an empty struct -- no timer started, no counters, no console row, and
+// nothing to switch on at run time.
+//
+// WHY IT EXISTS. docs/video.md rests the whole video design on a number it
+// admits it has never measured: "~800 KB/s ... plausible and unproven". The
+// dome cards are where that bill comes due -- a 35 KB overlay frame read in one
+// blocking fread every fourth frame -- and the honest way to find out which of
+// the read, the composite and the upload is actually spending the frame is to
+// time all three rather than reason about them.
+//
+// MOST OF THE ANSWER WAS ALREADY BEING COLLECTED AND NOBODY WAS PRINTING IT.
+// Global::Init installs NEA_VBLFunc and NEA_HBLFunc, which is all NEA_GetFPS()
+// and NEA_GetCPUPercent() need. The CPU meter is honest ABOVE 100%: its divisor
+// is a fixed 263 scanlines, so a frame that takes 2.6 vblanks reads 260% rather
+// than saturating. Half of this facility is therefore just a printf.
+//
+// AND THE OBVIOUS DETECTOR DOES NOT WORK HERE, which is worth writing down so it
+// is not tried again: NEA_WaitForVBL ends in cothread_yield_irq(IRQ_VBLANK),
+// which sleeps until the NEXT vblank interrupt rather than testing a latched
+// flag. So REG_VCOUNT on return reads ~192 whether or not the frame overran, and
+// a "were we late?" test built on it always says no. Frame time here is
+// quantised to whole vblanks -- which is exactly why the symptom is "the
+// framerate drops" and not "the frame stretches". The measurement that works is
+// the period between two returns, which is what frameTick() takes.
+
+#ifndef RIVEN_PROFILE
+#define RIVEN_PROFILE 0
+#endif
+
+namespace Perf
+{
+
+/// The four things worth separating on the dome path. `Water` is here because it
+/// is the one term that differs between gspit's dome card and the other four.
+enum Slot : int
+{
+    Read = 0,  ///< the movie frame coming off the card
+    Composite, ///< an overlay going into the card picture
+    Upload,    ///< the card picture going into VRAM
+    Water,     ///< the ripple
+    kSlotCount
+};
+
+#if RIVEN_PROFILE
+
+/// Start the clock. Once, from Global::Init, and never stopped.
+///
+/// cpuStartTiming(0) cascades ARM9 TIMER0 and TIMER1 at ClockDivider_1 --
+/// 33.513982 MHz, 29.84 ns a tick -- and cpuGetTiming() handles the low/high
+/// read race itself. Never stopping it is what lets regions nest by plain
+/// stamp-and-subtract; it wraps after 128 s and every region measured is far
+/// shorter, so unsigned subtraction is exact across a wrap.
+///
+/// THE TIMERS ARE FREE, and this was checked rather than assumed: maxmod's
+/// MM_TIMER0 (RivenAudio.cpp) names an ARM7 timer, libnds reserves ARM9 timer 3
+/// for DSWiFi and this port never brings wifi up, and nothing else in the tree
+/// calls cpuStartTiming.
+void begin();
+
+void enter(Slot s);
+void leave(Slot s);
+
+/// Fold one frame into the window, and emit a line once a second. Called from
+/// pumpStatus(), which is the one thing already running exactly once per frame
+/// in BOTH loops -- so a dome that spins under a blocking movie is measured too.
+void frameTick();
+
+bool on();
+void setOn(bool v);
+
+/// Time a real file off the card at several request sizes and report KB/s.
+/// The `perf read <path>` console command; see DebugConsole.
+void probeRead(const char *path, void (*out)(const char *));
+
+/// Scope-bound because every site it wraps has early returns, and the same
+/// reason Engine::CursorHide and playMovieBlocking's Claim are.
+struct Scope
+{
+    explicit Scope(Slot s) : slot(s) { enter(s); }
+    ~Scope() { leave(slot); }
+    Scope(const Scope &) = delete;
+    Scope &operator=(const Scope &) = delete;
+    Slot slot;
+};
+
+#else
+
+inline void begin() {}
+inline void enter(Slot) {}
+inline void leave(Slot) {}
+inline void frameTick() {}
+inline bool on() { return false; }
+inline void setOn(bool) {}
+inline void probeRead(const char *, void (*)(const char *)) {}
+
+struct Scope
+{
+    explicit Scope(Slot) {}
+};
+
+#endif
+
+} // namespace Perf
+
 /// Write what is on the bottom screen to <data>/shotNNN.bmp.
 ///
 /// The BgSurface buffer rather than the card's RAM picture, so it captures

@@ -389,6 +389,7 @@ namespace
         {"load", "load <1-5>"},
         {"endings", "endings [n|live] - check every ending"},
         {"notes", "notes - open the notebook"},
+        {"perf", "perf [read <path>] - frame time"},
         {"shot", "shot - screenshot to the card"},
         {"vram", "vram - dump the VRAM banks"},
         {"resume", "resume - close the console"},
@@ -888,6 +889,31 @@ bool Engine::runConsoleCommand(const std::string &line)
         lcdMainOnBottom();
         runNotebook();
         lcdMainOnTop();
+        return false;
+    }
+
+    if (cmd == "perf")
+    {
+        // `perf read <path>` times the card itself; bare `perf` toggles the
+        // per-frame readout. Both are no-ops in a build without RIVEN_PROFILE,
+        // and this says so rather than looking as though it worked.
+        if (argc >= 1 && tok[1] == "read")
+        {
+            if (argc < 2)
+            {
+                out("perf read <path to a .rvid>");
+                return false;
+            }
+            DebugLog::Perf::probeRead(tok[2].c_str(), [](const char *s) { out("%s", s); });
+            return false;
+        }
+        if (!RIVEN_PROFILE)
+        {
+            out("built without RIVEN_PROFILE");
+            return false;
+        }
+        DebugLog::Perf::setOn(!DebugLog::Perf::on());
+        out("perf %s", DebugLog::Perf::on() ? "on" : "off");
         return false;
     }
 

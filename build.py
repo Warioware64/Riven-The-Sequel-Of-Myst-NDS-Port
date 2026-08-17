@@ -27,6 +27,12 @@ arm9 = Arm9Binary(
     # 'thirdparty' puts yas on the include path as <yas/...>, the same spelling
     # the host converter uses -- both sides must agree on the serializer.
     includedirs=['source', 'shared', 'thirdparty'],
+    # Add 'RIVEN_PROFILE=1' here to build the frame-time readout in: where the
+    # frame went, split between the movie read, the composite, the VRAM upload
+    # and the water, reported once a second to the top screen and to debug.log.
+    # Off, every one of its entry points is an empty inline (DebugLog.hpp), so
+    # the shipped build carries none of it. Then `perf` in the debug console
+    # turns it on, and `perf read <path to a .rvid>` times the card itself.
     defines=['NEA_MAXMOD'],
     libs=['NEA', 'mm9', 'nds9', 'dswifi9d_noip'],
     libdirs=[

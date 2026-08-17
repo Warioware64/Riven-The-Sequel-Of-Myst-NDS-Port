@@ -190,6 +190,10 @@ std::uint32_t WaterEffect::update(CardSurface &surface)
 
     if (++ticks_ < period_)
         return 0;
+
+    // After the period gate, so the number is the cost of a tick that DREW and
+    // not an average over the three that did nothing.
+    DebugLog::Perf::Scope waterScope{DebugLog::Perf::Water};
     ticks_ = 0;
 
     const Frame &frame = frames_[cur_];

@@ -1,5 +1,6 @@
 #include "BgSurface.hpp"
 
+#include "DebugLog.hpp" // Perf: uploadRows is one of the three timed terms
 #include "tonccpy.h"
 
 using namespace rivendata;
@@ -115,6 +116,8 @@ void BgSurface::uploadRows(int buf, const Texel *ram, std::uint32_t mask)
 {
     if (!exists() || ram == nullptr || mask == 0)
         return;
+
+    DebugLog::Perf::Scope uploadScope{DebugLog::Perf::Upload};
 
     Texel *dst = pixels(buf);
     constexpr int kBlock = 8; ///< must match CardSurface::kRowBlock

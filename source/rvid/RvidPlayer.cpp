@@ -223,7 +223,17 @@ bool RvidPlayer::play(bool loop, std::uint32_t startFrame, std::uint32_t stopFra
 
     // Prime: get the first picture up and some audio into the ring before the
     // clock starts consuming it.
-    for (std::uint32_t i = 0; i <= kReadAheadFrames && !finished_; ++i)
+    //
+    // ONE FRAME FOR AN OVERLAY, three for a fullscreen movie, and the difference
+    // is what the lead is FOR. A cutscene's soundtrack is the clock and starts
+    // being consumed the instant maxmod pulls, so it wants a ring with something
+    // in it. An overlay starts while the player is walking around a card that is
+    // already on screen, and there the whole prime is a hitch: three dome frames
+    // is 106 KB read back to back, ~130 ms of the card standing still, every
+    // time the card is entered. pump() fills the rest over the frames that
+    // follow, which is exactly what it is for.
+    const std::uint32_t prime = full ? kReadAheadFrames : 0;
+    for (std::uint32_t i = 0; i <= prime && !finished_; ++i)
         if (!readNextFrame())
             break;
 
@@ -329,6 +339,11 @@ bool RvidPlayer::readNextFrame()
     }
 
     RvidFrameData frame;
+    // Timed HERE and not inside RvidFile, which is compiled for the host by
+    // tools/riven-convert/tests and has staying free of <nds.h> as a contract
+    // (RvidFile.hpp). The frame header and the audio block ride along in the
+    // number, which is honest: it is all time spent on the card.
+    DebugLog::Perf::Scope readScope{DebugLog::Perf::Read};
     if (!file_.readNextInto(frame, dst, dstBytes))
     {
         error_ = file_.error();
@@ -408,7 +423,13 @@ void RvidPlayer::pump()
             shown_ = static_cast<std::int32_t>(target) - 1;
     }
 
-    int guard = 8; // never spend an unbounded amount of one frame in here
+    // TWO, not eight. A 15 fps movie in step needs one read every fourth DS
+    // frame, so this only ever governs how fast a LATE player catches up -- and
+    // gross lateness is already handled by the seek above, for free. At eight, a
+    // single frame could legitimately issue eight reads of a dome overlay: 283
+    // KB, a third of a second off the card, to catch up on frames whose moment
+    // had already gone.
+    int guard = 2;
     while (!finished_ && guard-- > 0
            && (shown_ < 0 || static_cast<std::uint32_t>(shown_) < target + kReadAheadFrames))
     {
