@@ -11,11 +11,13 @@
 //
 // A .rpic is NOT always the size of the card view. The converter scales a
 // picture to min(kViewW, sourceWidth) and keeps its aspect
-// (ImagePipeline.cpp:334-343), so a full-card still comes out 256x165 while a
-// small overlay tBMP keeps its own pixels. That is why srcWidth/srcHeight are in
-// the header and are read out here: how big a picture is ON THE CARD is the
-// source tBMP's size, and the resampled size no longer tells you it. Where it
-// goes is the PLST record's top-left corner.
+// (ImagePipeline.cpp, convertBitmapPixels), so a full-card still comes out
+// 256x165 while a small overlay tBMP keeps its own pixels. Art WIDER than the
+// card is the third case and is left at 1:1: it is a strip the engine slices by
+// source-pixel offsets, not a picture, and reducing it would move the cells.
+// That is why srcWidth/srcHeight are in the header and are read out here: how
+// big a picture is ON THE CARD is the source tBMP's size, and the resampled size
+// no longer tells you it. Where it goes is the PLST record's top-left corner.
 //
 // The zoom twin (.rpiz, 8bpp indices + a 256-entry RGB555 palette) is read here
 // too, by loadRpizImage. TWO things want it and they are not both zooms: the
@@ -33,14 +35,15 @@
 namespace rivenrt
 {
 
-/// Largest .rpic this will load. The converter never emits one wider than the
-/// card view (ImagePipeline.cpp:250: min(kViewW, sourceWidth)) and never taller
-/// than its source, so these are not a policy -- they are what the writer can
-/// produce, and they are what stops a corrupt header asking for a huge
-/// allocation. Spelled as numbers because this module has no business with the
-/// card geometry; CardSurface.cpp static_asserts them against the real
-/// constants.
-inline constexpr int kMaxRpicW = 256;
+/// Largest .rpic this will load. Not a policy -- what the writer can produce,
+/// and what stops a corrupt header asking for a huge allocation. The converter
+/// emits min(kViewW, sourceWidth) for anything up to the card's own width and
+/// 1:1 above it, so the widest it can write is the widest tBMP in the game:
+/// bspit's 800x25 numeral strips. 1024 covers those with room and is still only
+/// 40 KB of texels for the strip that reaches it. Spelled as numbers because
+/// this module has no business with the card geometry; CardSurface.cpp
+/// static_asserts them against the real constants.
+inline constexpr int kMaxRpicW = 1024;
 inline constexpr int kMaxRpicH = 1024;
 
 /// There is deliberately no bound on srcWidth/srcHeight to match these. The
@@ -74,11 +77,14 @@ struct RpicImage
 /// size the header promised.
 bool loadRpicImage(const std::string &path, RpicImage &out, std::string &error);
 
-/// Largest .rpiz this will load: a full Riven still, which is the biggest thing
-/// the converter emits in this format. Spelled as numbers for the same reason
-/// kMaxRpicW is; ZoomView.cpp static_asserts them against the card geometry.
-inline constexpr int kMaxRpizW = 608;
-inline constexpr int kMaxRpizH = 392;
+/// Largest .rpiz this will load. A twin is always its source tBMP's own size,
+/// so the bound is the widest tBMP, not the card: bspit's 800x25 numeral strips
+/// are wider than Riven's screen and a cap of 608 refused the very twins the
+/// zoom viewer needs to draw the dome combination. Spelled as numbers for the
+/// same reason kMaxRpicW is; ZoomView.cpp static_asserts them against the card
+/// geometry.
+inline constexpr int kMaxRpizW = 1024;
+inline constexpr int kMaxRpizH = 1024;
 
 /// A .rpiz: 8bpp indices plus the palette to read them through.
 ///

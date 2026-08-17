@@ -30,8 +30,11 @@ namespace
     constexpr int kWindowW = rivendata::kScreenW;
     constexpr int kWindowH = rivendata::kScreenH;
 
-    static_assert(kMaxRpizW == rivendata::kCardW && kMaxRpizH == rivendata::kCardH,
-                  "the .rpiz cap and the card size have drifted apart");
+    // A twin is its source tBMP's size, and five of Riven's tBMPs are wider than
+    // its own screen, so this is >= rather than ==: the cap has to clear the
+    // card, not match it.
+    static_assert(kMaxRpizW >= rivendata::kCardW && kMaxRpizH >= rivendata::kCardH,
+                  "a .rpiz must at least hold a full-card still");
 
     /// The display alternates between two buffers, so a moved window has to be
     /// drawn twice before it is on screen whichever one is showing.
@@ -43,10 +46,13 @@ namespace
     /// something unforeseen, not a budget anything is expected to spend.
     constexpr std::size_t kPatchBudget = 96 * 1024;
 
-    /// And what the decoded overlay sources may hold. Same argument: the two
-    /// dome strips together are under 20 KB, and this exists so that a cache
-    /// cannot become the thing that runs the machine out of memory.
-    constexpr std::size_t kSourceBudget = 64 * 1024;
+    /// And what the decoded overlay sources may hold. Sized by the worst card
+    /// rather than the typical one: Gehn's lab journal stamps the dome
+    /// combination from five separate 800x25 twins, ~20 KB each, and a budget
+    /// that could not hold all five would re-read them from the card on every
+    /// pan. Beyond that this exists so that a cache cannot become the thing that
+    /// runs the machine out of memory.
+    constexpr std::size_t kSourceBudget = 128 * 1024;
 
     /// A source bigger than this is not cached at all. A full-card twin is
     /// 238 KB and would evict everything to hold something that is only ever

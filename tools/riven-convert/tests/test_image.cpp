@@ -13,8 +13,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <random>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "riven/Archive.hpp"
@@ -228,6 +230,94 @@ int main()
         check(reused == texels, "the out-parameter downscale matches the returning one");
     }
 
+    // --- the card grid ------------------------------------------------------
+    //
+    // The third scale between a tMOV and the screen, after the track matrix and
+    // the span: an overlay has to be SAMPLED where the card samples, not merely
+    // sized to fit. See ImagePipeline.hpp.
+    {
+        const int w = 152, h = 336; // jspit tMOV 116, the gallows carriage
+        std::vector<std::uint8_t> rgb(static_cast<std::size_t>(w) * h * 3);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                std::uint8_t *p = &rgb[(static_cast<std::size_t>(y) * w + x) * 3];
+                p[0] = static_cast<std::uint8_t>(x * 255 / (w - 1));
+                p[1] = static_cast<std::uint8_t>(y * 255 / (h - 1));
+                p[2] = 64;
+            }
+
+        // A FULL movie is the degenerate case, and it has to be EXACTLY what it
+        // was before this existed -- all 181 of them are 608x392 at (0,0), where
+        // the card's grid and the movie's own are the same grid. If this ever
+        // stops matching, every fullscreen movie in the game has moved.
+        {
+            const int fw = 608, fh = 392;
+            std::vector<std::uint8_t> full(static_cast<std::size_t>(fw) * fh * 3);
+            for (std::size_t i = 0; i < full.size(); ++i)
+                full[i] = static_cast<std::uint8_t>((i * 7) & 0xFF);
+
+            const auto plain = downscaleToTexels(full.data(), fw, fh, rivendata::kViewW,
+                                                 rivendata::kViewH);
+            std::vector<rivendata::Texel> onCard;
+            downscaleOnCardGrid(full.data(), fw, fh, rivendata::kViewW, rivendata::kViewH,
+                                CardPlacement{0, 0, fw, fh}, onCard);
+            check(onCard == plain, "a fullscreen movie resamples identically either way");
+        }
+
+        // The real placement, and the span the converter derives from it.
+        const int left = 224, top = 56;
+        const int dstW = rivendata::toDsX(left + w) - rivendata::toDsX(left);
+        const int dstH = rivendata::toDsY(top + h) - rivendata::toDsY(top);
+        check(dstW == 64 && dstH == 142,
+              "tMOV 116's span is 64x142 (" + std::to_string(dstW) + "x"
+                  + std::to_string(dstH) + ")");
+
+        std::vector<rivendata::Texel> onCard;
+        downscaleOnCardGrid(rgb.data(), w, h, dstW, dstH, CardPlacement{left, top, w, h},
+                            onCard);
+        check(onCard.size() == static_cast<std::size_t>(dstW) * dstH,
+              "the card-grid downscale produces the span it was asked for");
+
+        // Every source pixel index the filter uses, recomputed here from the
+        // closed form in the header. This is the assertion that matters: the
+        // whole fix is that these edges are the CARD's and not the movie's.
+        const int viewX = rivendata::toDsX(left);
+        const int viewY = rivendata::toDsY(top);
+        int badX = 0;
+        for (int dx = 0; dx <= dstW; ++dx)
+        {
+            // cardW == w here: tMOV 116's track matrix is the identity.
+            long long v = (static_cast<long long>(viewX + dx) * rivendata::kCardW
+                           - static_cast<long long>(rivendata::kViewW) * left)
+                          * w / (static_cast<long long>(rivendata::kViewW) * w);
+            if (v < 0)
+                v = 0;
+            if (v > w)
+                v = w;
+            // dx = 0 must clamp -- the span rounds outward, so the first
+            // destination column starts before the movie does. That clamp IS the
+            // edge replication.
+            if (dx == 0 && v != 0)
+                ++badX;
+        }
+        check(badX == 0, "the first column clamps to the source edge");
+
+        // And the phase is really different from the movie's own grid: if it were
+        // not, this whole change would be a no-op.
+        std::vector<rivendata::Texel> ownGrid;
+        downscaleToTexels(rgb.data(), w, h, dstW, dstH, ownGrid);
+        check(onCard != ownGrid,
+              "the card grid and the movie's own grid disagree, as measured");
+
+        // Opaque, like every other texel the DS is given.
+        bool opaque = true;
+        for (const rivendata::Texel t : onCard)
+            if ((t & 0x8000) == 0)
+                opaque = false;
+        check(opaque, "every card-grid texel is opaque");
+    }
+
     // --- downscale + encoders on synthetic input ---------------------------
     {
         const int w = 608, h = 392;
@@ -330,6 +420,104 @@ int main()
                 zh->dataBytes);
             check(back == indices, "the .rpiz index plane round-trips through lz77");
         }
+    }
+
+    // --- the sizing rule convertBitmapPixels applies ------------------------
+    //
+    // Which size a picture is STORED at is the one decision in this pipeline
+    // that the runtime cannot see being made and cannot recover from. A section
+    // drawn out of a picture names its source rectangle in the source tBMP's
+    // pixels, and that only lands on the right pixels while the file still has
+    // them: bspit's five 800x25 numeral strips were reduced to 256x8, which cost
+    // the dome combination seventeen of its twenty-five numerals and smeared the
+    // rest. So the rule is asserted here rather than left to the one call site.
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path dir = fs::temp_directory_path(ec) / "riven-image-sizing";
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+
+        struct Case
+        {
+            int w, h;          ///< the tBMP's size
+            int storedW;       ///< what convertBitmapPixels must write
+            const char *what;
+        };
+        // A full still is reduced to the view; a strip WIDER THAN THE CARD is
+        // not reduced at all; everything between is capped at the view; anything
+        // already narrower is left alone.
+        const Case cases[] = {
+            {608, 392, rivendata::kViewW, "a full-card still is reduced to the view"},
+            {800, 25, 800, "a strip wider than the card is stored at 1:1"},
+            {304, 252, rivendata::kViewW, "art between the view and the card is capped"},
+            {188, 196, 188, "art narrower than the view is left alone"},
+        };
+
+        for (const Case &c : cases)
+        {
+            BitmapPixels px;
+            px.width = c.w;
+            px.height = c.h;
+            px.rgb.assign(static_cast<std::size_t>(c.w) * c.h * 3, 0);
+            for (std::size_t i = 0; i < px.rgb.size(); ++i)
+                px.rgb[i] = static_cast<std::uint8_t>(i * 7);
+
+            const fs::path out = dir / (std::to_string(c.w) + "x" + std::to_string(c.h)
+                                        + ".rpic");
+            const ImageResult res =
+                convertBitmapPixels(px, 364, out, true, fs::path(), false);
+            check(res.ok, std::string("converts: ") + c.what);
+
+            std::vector<std::uint8_t> file;
+            if (std::FILE *f = std::fopen(out.string().c_str(), "rb"); f != nullptr)
+            {
+                std::fseek(f, 0, SEEK_END);
+                file.resize(static_cast<std::size_t>(std::ftell(f)));
+                std::fseek(f, 0, SEEK_SET);
+                if (std::fread(file.data(), 1, file.size(), f) != file.size())
+                    file.clear();
+                std::fclose(f);
+            }
+            if (file.size() < sizeof(rivendata::RpicHeader))
+            {
+                check(false, std::string("wrote a readable .rpic: ") + c.what);
+                continue;
+            }
+
+            const auto *h = reinterpret_cast<const rivendata::RpicHeader *>(file.data());
+            const int expectH = static_cast<int>(static_cast<std::int64_t>(c.h)
+                                                 * c.storedW / c.w);
+            check(h->width == c.storedW, c.what);
+            check(h->height == expectH, std::string("aspect is kept: ") + c.what);
+            // The header must still say how big the picture is ON THE CARD, or
+            // the runtime places it by the size it was resampled to.
+            check(h->srcWidth == c.w && h->srcHeight == c.h,
+                  std::string("the source size travels: ") + c.what);
+        }
+
+        // The invariant Engine::drawBitmapSections rests on, stated once: for a
+        // strip the file's pixels and the source's ARE the same pixels, so a
+        // section rectangle needs no scaling between them.
+        {
+            BitmapPixels px;
+            px.width = 800;
+            px.height = 25;
+            px.rgb.assign(static_cast<std::size_t>(800) * 25 * 3, 128);
+            const fs::path out = dir / "strip.rpic";
+            check(convertBitmapPixels(px, 364, out, true, fs::path(), false).ok,
+                  "the numeral strip converts");
+
+            std::FILE *f = std::fopen(out.string().c_str(), "rb");
+            rivendata::RpicHeader h{};
+            const bool read = f != nullptr && std::fread(&h, sizeof(h), 1, f) == 1;
+            if (f != nullptr)
+                std::fclose(f);
+            check(read && h.width == h.srcWidth && h.height == h.srcHeight,
+                  "a strip's stored size and source size are the same numbers");
+        }
+
+        fs::remove_all(dir, ec);
     }
 
     // --- against real game data, when available ----------------------------

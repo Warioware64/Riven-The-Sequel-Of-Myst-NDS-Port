@@ -142,6 +142,137 @@ namespace
     }
 } // namespace
 
+namespace
+{
+    /// One axis of the sampling grid: destination pixel `d` covers source
+    /// `[edge(d), edge(d+1))`.
+    ///
+    /// Two forms, and the difference between them is the whole of what
+    /// downscaleOnCardGrid fixes. The plain one anchors at the source's own pixel
+    /// zero. The card one places the destination pixel on the CARD first and asks
+    /// which source pixels that card span covers -- see CardPlacement.
+    struct Axis
+    {
+        std::int64_t num = 0;  ///< added to d*mul before the divide
+        std::int64_t mul = 1;
+        std::int64_t den = 1;
+        int limit = 1;         ///< srcW or srcH: the clamp, and the edge replication
+
+        int edge(int d) const
+        {
+            std::int64_t v = (num + static_cast<std::int64_t>(d) * mul) / den;
+            // Truncation toward zero is floor here only for v >= 0, and v goes
+            // negative at the first pixel of a span that rounded outward -- which
+            // is exactly the case that must clamp to 0 rather than round up.
+            if (v < 0)
+                v = 0;
+            if (v > limit)
+                v = limit;
+            return static_cast<int>(v);
+        }
+
+        /// The source's own grid: d * src / dst.
+        static Axis plain(int src, int dst)
+        {
+            return Axis{0, src, dst > 0 ? dst : 1, src};
+        }
+
+        /// The card's grid.
+        ///
+        /// `viewD` is toDsX/toDsY of the movie's card position, `cardPos` that
+        /// position, `card` its card-space extent, and (`cardDim`, `viewDim`) the
+        /// axis's own card-to-view pair -- 608 to 256 across, 392 to 165 down.
+        ///
+        /// THE TWO AXES ARE NOT THE SAME RATIO, and assuming they were is the one
+        /// thing that had to be measured rather than reasoned about. Across, the
+        /// card view is 608 to 256, exactly 19/8. Down, it is 392 to 165 --
+        /// 2.37576, not 2.375, because 165 is where 392 * 256/608 was rounded to.
+        /// A full-card still goes through downscaleToTexels(608, 392 -> 256, 165),
+        /// so 392/165 IS the card's vertical grid whatever toDsY says about
+        /// positions, and an overlay that used 19/8 would be sampled off it.
+        static Axis onCard(int src, int viewD, int cardPos, int card, int cardDim,
+                           int viewDim)
+        {
+            const std::int64_t c = card > 0 ? card : 1;
+            const std::int64_t v = viewDim > 0 ? viewDim : 1;
+            return Axis{(static_cast<std::int64_t>(viewD) * cardDim - v * cardPos)
+                            * static_cast<std::int64_t>(src),
+                        static_cast<std::int64_t>(cardDim) * src, v * c, src};
+        }
+    };
+
+    void filterToTexels(const std::uint8_t *rgb, int srcW, int srcH, int dstW, int dstH,
+                        const Axis &ax, const Axis &ay, std::vector<Texel> &out)
+    {
+        const auto &g = gamma();
+        const auto &cuts = ditherCuts();
+        out.resize(static_cast<std::size_t>(dstW) * dstH);
+
+        for (int dy = 0; dy < dstH; ++dy)
+        {
+            // Source rows covered by this destination row. Computed from exact
+            // ratios rather than a fixed box so the last row is not short.
+            const int y0 = ay.edge(dy);
+            int y1 = ay.edge(dy + 1);
+            if (y1 <= y0)
+                y1 = y0 < srcH ? y0 + 1 : srcH;
+
+            for (int dx = 0; dx < dstW; ++dx)
+            {
+                const int x0 = ax.edge(dx);
+                int x1 = ax.edge(dx + 1);
+                if (x1 <= x0)
+                    x1 = x0 < srcW ? x0 + 1 : srcW;
+
+                float r = 0.0f, gg = 0.0f, b = 0.0f;
+                int n = 0;
+                for (int sy = y0; sy < y1; ++sy)
+                {
+                    const std::uint8_t *row =
+                        rgb + (static_cast<std::size_t>(sy) * srcW + x0) * 3;
+                    for (int sx = x0; sx < x1; ++sx, row += 3)
+                    {
+                        r += g.toLinear[row[0]];
+                        gg += g.toLinear[row[1]];
+                        b += g.toLinear[row[2]];
+                        ++n;
+                    }
+                }
+                if (n == 0)
+                    n = 1;
+                r /= static_cast<float>(n);
+                gg /= static_cast<float>(n);
+                b /= static_cast<float>(n);
+
+                const float *cut = cuts.cut[bayerIndex(dx, dy)];
+                const int r5 = quantise5(r, cut);
+                const int g5 = quantise5(gg, cut);
+                const int b5 = quantise5(b, cut);
+
+                // Alpha is always set: Riven stills are opaque, and a texel with
+                // bit 15 clear would be skipped by the DS blender.
+                out[static_cast<std::size_t>(dy) * dstW + dx] =
+                    static_cast<Texel>(0x8000 | (b5 << 10) | (g5 << 5) | r5);
+            }
+        }
+    }
+} // namespace
+
+void downscaleOnCardGrid(const std::uint8_t *rgb, int srcW, int srcH, int dstW, int dstH,
+                         const CardPlacement &place, std::vector<Texel> &out)
+{
+    out.clear();
+    if (rgb == nullptr || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0)
+        return;
+
+    filterToTexels(rgb, srcW, srcH, dstW, dstH,
+                   Axis::onCard(srcW, rivendata::toDsX(place.left), place.left, place.cardW,
+                                rivendata::kCardW, rivendata::kViewW),
+                   Axis::onCard(srcH, rivendata::toDsY(place.top), place.top, place.cardH,
+                                rivendata::kCardH, rivendata::kViewH),
+                   out);
+}
+
 void downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH, int dstW, int dstH,
                        std::vector<Texel> &out)
 {
@@ -149,60 +280,8 @@ void downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH, int dstW, in
     if (rgb == nullptr || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0)
         return;
 
-    const auto &g = gamma();
-    const auto &cuts = ditherCuts();
-    out.resize(static_cast<std::size_t>(dstW) * dstH);
-
-    for (int dy = 0; dy < dstH; ++dy)
-    {
-        // Source rows covered by this destination row. Computed from exact
-        // ratios rather than a fixed box so the last row is not short.
-        const int y0 = static_cast<int>(static_cast<std::int64_t>(dy) * srcH / dstH);
-        int y1 = static_cast<int>(static_cast<std::int64_t>(dy + 1) * srcH / dstH);
-        if (y1 <= y0)
-            y1 = y0 + 1;
-        if (y1 > srcH)
-            y1 = srcH;
-
-        for (int dx = 0; dx < dstW; ++dx)
-        {
-            const int x0 = static_cast<int>(static_cast<std::int64_t>(dx) * srcW / dstW);
-            int x1 = static_cast<int>(static_cast<std::int64_t>(dx + 1) * srcW / dstW);
-            if (x1 <= x0)
-                x1 = x0 + 1;
-            if (x1 > srcW)
-                x1 = srcW;
-
-            float r = 0.0f, gg = 0.0f, b = 0.0f;
-            int n = 0;
-            for (int sy = y0; sy < y1; ++sy)
-            {
-                const std::uint8_t *row = rgb + (static_cast<std::size_t>(sy) * srcW + x0) * 3;
-                for (int sx = x0; sx < x1; ++sx, row += 3)
-                {
-                    r += g.toLinear[row[0]];
-                    gg += g.toLinear[row[1]];
-                    b += g.toLinear[row[2]];
-                    ++n;
-                }
-            }
-            if (n == 0)
-                n = 1;
-            r /= static_cast<float>(n);
-            gg /= static_cast<float>(n);
-            b /= static_cast<float>(n);
-
-            const float *cut = cuts.cut[bayerIndex(dx, dy)];
-            const int r5 = quantise5(r, cut);
-            const int g5 = quantise5(gg, cut);
-            const int b5 = quantise5(b, cut);
-
-            // Alpha is always set: Riven stills are opaque, and a texel with
-            // bit 15 clear would be skipped by the DS blender.
-            out[static_cast<std::size_t>(dy) * dstW + dx] =
-                static_cast<Texel>(0x8000 | (b5 << 10) | (g5 << 5) | r5);
-        }
-    }
+    filterToTexels(rgb, srcW, srcH, dstW, dstH, Axis::plain(srcW, dstW),
+                   Axis::plain(srcH, dstH), out);
 }
 
 std::vector<Texel> downscaleToTexels(const std::uint8_t *rgb, int srcW, int srcH, int dstW,
@@ -337,7 +416,16 @@ ImageResult convertBitmapPixels(const BitmapPixels &px, std::uint16_t id,
         // Preserve aspect from the source rather than assuming 608x392: Riven
         // ships a handful of odd-sized tBMPs (inventory art, credits), and
         // stretching those to the card ratio would visibly distort them.
-        const int dstW = std::min(rivendata::kViewW, px.width);
+        //
+        // ART WIDER THAN THE CARD IS NOT A PICTURE, it is a strip the engine
+        // slices, and it travels at 1:1. Riven has exactly one such class: bspit
+        // 364-368, the dome combination's five 800x25 rows of twenty-five 32x24
+        // D'ni numerals. Their caller names a cell in the SOURCE tBMP's pixels
+        // (ExternalsBspit.cpp, offset = (24 - bit) * 32), which only lands on
+        // the same cell here while the file keeps those pixels -- and a 3.125x
+        // reduction would also crush a 24-row glyph to 8 rows of mush.
+        const bool strip = px.width > rivendata::kCardW;
+        const int dstW = strip ? px.width : std::min(rivendata::kViewW, px.width);
         int dstH = static_cast<int>(static_cast<std::int64_t>(px.height) * dstW / px.width);
         if (dstH < 1)
             dstH = 1;

@@ -140,6 +140,41 @@ came out 26x16 where its span is 27x17; card 18's porthole (tMOV 21, 432x256 at
 No FULL movie is affected: all 181 are 608x392 at (0,0), which is 256x165 either
 way. No movie's span runs past the card edge, so nothing new is clipped.
 
+Then the **grid**, which is the same argument a third time. The span fixed how many
+DS pixels an overlay covers; it did not fix *where the samples are taken*.
+`scale=w:h` resamples on the movie's own pixel grid -- period `srcW/dstW`, anchored
+at the movie's pixel 0 -- while the still underneath went through the card's:
+608 to 256 across, 392 to 165 down, anchored at card 0. The two coincide only when
+the movie's position lands on a whole DS pixel *and* its own ratio happens to match
+the card's, and across the install 716 of the 874 overlays miss by half a DS pixel
+or more. 1053 of the 1055 have a resample ratio that is not the card's in at least
+one axis.
+
+jspit's gallows carriage is what made it visible: tMOV 116, 152x336 at (224,56),
+comes out 0.32 px too far left, 0.58 px too high and stretched 0.37% vertically --
+a seam along the top of the animation against the still it is drawn on.
+
+So an overlay is now taken from ffmpeg at its **native** size and resampled here,
+by the same box filter in the same linear light with the same Bayer threshold the
+stills go through, sampled where the card samples:
+
+```
+sx0 = ((toDsX(L) + dx)     * 608 - 256*L) * srcW / (256 * W)
+sx1 = ((toDsX(L) + dx + 1) * 608 - 256*L) * srcW / (256 * W)
+```
+
+clamped to `[0, srcW]` -- and the clamp is the edge replication the span's outward
+rounding needs. **The two axes are not the same ratio**: across, 608 to 256 is
+exactly 19/8; down, 392 to 165 is 2.37576, because 165 is where `392 * 256/608` was
+rounded. A full-card still is resampled 608x392 to 256x165, so 392/165 is the
+card's vertical grid whatever `toDsY` says about positions.
+
+FULL movies keep ffmpeg's `scale=`: at 608x392 and (0,0) the two grids are the same
+grid, the phase is zero, and piping 65 452 native frames to reproduce what ffmpeg's
+area filter already gets right would cost hours and change no pixel. There is a
+test that asserts the two agree exactly in that case, because if it ever stops
+being true every fullscreen movie in the game has moved.
+
 ## Size
 
 Raw is 7.62 GB of video, measured over every movie in the install:

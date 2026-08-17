@@ -367,24 +367,52 @@ int main()
                 const auto native =
                     lastFrameOf(ff, staged, 21, m.width, m.height, 0, 0);
 
-                if (!repeat && scaled.size() == pixels * 3)
+                const bool cardGrid =
+                    place != nullptr && vr.profile == rivendata::VideoProfile::Lite;
+                const bool haveNative =
+                    native.size() == static_cast<std::size_t>(m.width) * m.height * 3;
+
+                if (!repeat && (cardGrid ? haveNative : scaled.size() == pixels * 3))
                 {
                     const Texel *stored = reinterpret_cast<const Texel *>(
                         file.data() + starts[20] + sizeof(fh) + fh.audioBytes);
-                    const auto ours = downscaleToTexels(scaled.data(), vr.width,
-                                                        vr.height, vr.width, vr.height);
+                    // AN OVERLAY IS SAMPLED ON THE CARD'S GRID and so takes the
+                    // native frame; a fullscreen movie is exactly 608x392 at
+                    // (0,0), where the two grids coincide, and keeps ffmpeg's
+                    // scale. Either way the claim is the same and it is the whole
+                    // point of storing raw texels: what is in the file is exactly
+                    // what our quantiser produced, byte for byte.
+                    std::vector<Texel> ours;
+                    if (cardGrid)
+                        downscaleOnCardGrid(native.data(), m.width, m.height, vr.width,
+                                            vr.height,
+                                            CardPlacement{place->left, place->top,
+                                                          vr.cardWidth, vr.cardHeight},
+                                            ours);
+                    else
+                        downscaleToTexels(scaled.data(), vr.width, vr.height, vr.width,
+                                          vr.height, ours);
                     check(std::vector<Texel>(stored, stored + pixels) == ours,
                           "tMOV " + std::to_string(id)
                               + ": the stored frame is exactly our quantiser's output");
 
-                    if (native.size()
-                        == static_cast<std::size_t>(m.width) * m.height * 3)
+                    if (haveNative)
                     {
-                        const auto viaStills = downscaleToTexels(
+                        // The same native frame through the OTHER grid: the
+                        // movie's own, anchored at its own pixel zero.
+                        //
+                        // For a fullscreen movie this is the gamma-space vs
+                        // linear-light gap it always was, and it should be small.
+                        // For an overlay it is now the PHASE -- the thing
+                        // downscaleOnCardGrid exists to remove -- so a large
+                        // number here is the fix working, not a seam. The two
+                        // .ppm pairs are what you look at when it is not obvious
+                        // which of those you are seeing.
+                        const auto ownGrid = downscaleToTexels(
                             native.data(), m.width, m.height, vr.width, vr.height);
                         double mean = 0.0;
                         int worst = 0;
-                        texelDelta(ours, viaStills, mean, worst);
+                        texelDelta(ours, ownGrid, mean, worst);
                         worstMean = std::max(worstMean, mean);
                         worstMax = std::max(worstMax, worst);
                         ++parityChecked;
@@ -393,9 +421,8 @@ int main()
                             (outDir / (std::string(rivendata::stackName(stack.id)) + "-"
                                        + std::to_string(id)))
                                 .string();
-                        writePpm(base + "-ffmpeg-scaled.ppm", ours, vr.width, vr.height);
-                        writePpm(base + "-stills-scaled.ppm", viaStills, vr.width,
-                                 vr.height);
+                        writePpm(base + "-as-stored.ppm", ours, vr.width, vr.height);
+                        writePpm(base + "-own-grid.ppm", ownGrid, vr.width, vr.height);
                     }
                     ++dumped;
                 }
@@ -494,12 +521,22 @@ int main()
         // The threshold is a REGRESSION guard, not a quality bar: the measured
         // numbers on a 5-CD install are well inside it, and the point is to
         // notice if a change to either scaler moves them.
+        //
+        // ON AVERAGE ONLY, now that an overlay is deliberately sampled on a
+        // different grid from the one it is compared against here. The mean
+        // still says the two scalers agree about COLOUR -- same box filter, same
+        // linear light, same dither -- which is what this was always really
+        // guarding. The worst-case pixel no longer says anything: it is now
+        // dominated by the sub-pixel phase between the card's grid and the
+        // movie's own, which on a hard edge is a whole different pixel and can
+        // legitimately be the full 31 levels. That difference is the bug
+        // downscaleOnCardGrid fixes, so asserting it away would assert the fix
+        // away with it -- it is printed instead.
         std::printf("  scaler parity over %d frames: mean %.3f, worst %d "
-                    "(of 31 levels)\n",
+                    "(of 31 levels; worst is phase, not colour)\n",
                     parityChecked, worstMean, worstMax);
         check(worstMean < 1.5,
               "ffmpeg's scaling and the stills' scaling agree on average");
-        check(worstMax <= 12, "ffmpeg's scaling and the stills' scaling never diverge wildly");
     }
 
     if (converted > 0)

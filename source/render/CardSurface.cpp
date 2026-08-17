@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "data/ImageFile.hpp"
+#include "render/Resample.hpp"
 #include "tonccpy.h" // reading a background buffer back out of VRAM
 
 using namespace rivendata;
@@ -14,7 +15,11 @@ namespace
 {
     // ImageFile's bounds are spelled as numbers so that module needs no geometry;
     // this is where they are tied to the real thing.
-    static_assert(kMaxRpicW == kViewW, "the .rpic width bound must be the view's");
+    // Not == kViewW: the converter leaves art wider than the card at 1:1, so a
+    // .rpic can be wider than the view it is drawn into (bspit's 800x25 numeral
+    // strips). It can never be narrower than the view is wide, or a full-card
+    // still would not fit.
+    static_assert(kMaxRpicW >= kViewW, "a .rpic must at least hold a full-card still");
     static_assert(kMaxRpicH >= kCardH, "a .rpic can be as tall as its source");
 
     static_assert(CardSurface::kRowBlock == 8,
@@ -124,8 +129,10 @@ bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
     // under a 207x242 rectangle. Stretching to the rectangle made those wrong.
     //
     // The size comes from the file because only the converter saw it: the .rpic
-    // holds a picture resampled to min(kViewW, sourceWidth), so a 188-wide
-    // overlay is still 188 texels and a 608-wide still is 256 (RivenImage.hpp).
+    // holds a picture resampled to min(kViewW, sourceWidth) up to the card's own
+    // width and left alone above it, so a 188-wide overlay is still 188 texels,
+    // a 608-wide still is 256, and an 800-wide strip is still 800
+    // (RivenImage.hpp).
     //
     // Clipping the right edge to the card is ScummVM's "clip the width to fit on
     // the screen. Fixes some images."
@@ -171,29 +178,43 @@ bool CardSurface::drawPicture(const std::string &path, const Rect &cardRect,
     const int dw = x1 - x0;
     const int dh = y1 - y0;
 
-    // Nearest neighbour. The common case is a 1:1 copy -- a full-card still is
-    // already exactly 256x165 -- and where it is not, the picture is a small
-    // overlay the converter left at its source size (ImagePipeline.cpp:334-343),
-    // so this is the card-to-DS reduction it never had. Resampling it properly
-    // would mean a second filter on the DS for a case the eye cannot resolve at
-    // this size.
+    // Three cases. A full-card still is already exactly 256x165 and is copied;
+    // a picture the converter left at its source size (convertBitmapPixels in
+    // ImagePipeline.cpp: a small overlay, or a strip wider than the card) still
+    // owes the card-to-DS reduction and gets it box-filtered; and a picture
+    // being magnified falls back to the point sample, which is what averaging
+    // would do anyway.
     //
-    // BOTH PLANES, in the one loop. This is a script drawing, so it belongs to
-    // the card and has to reach `clean_`; it also has to be seen now, so it has
-    // to reach `texels_`. Mirroring afterwards instead would mean re-deriving
-    // this clipped rect a second time, one clamp away from disagreeing with the
-    // write it is meant to copy.
+    // BOTH PLANES. This is a script drawing, so it belongs to the card and has
+    // to reach `clean_`; it also has to be seen now, so it has to reach
+    // `texels_`. Mirroring afterwards instead would mean re-deriving this
+    // clipped rect a second time, one clamp away from disagreeing with the write
+    // it is meant to copy.
+    const bool reducing = img.width > dw || img.height > dh;
+    Span cols[kViewW];
+    if (reducing)
+        buildColumnSpans(0, img.width, dw, cols);
+
     for (int y = 0; y < dh; ++y)
     {
-        const int sy = img.height == dh ? y : y * img.height / dh;
-        const rivendata::Texel *src =
-            img.texels.data() + static_cast<std::size_t>(sy) * img.width;
         const std::size_t at = static_cast<std::size_t>(y0 + y) * kViewW + x0;
         Texel *dst = texels_ + at;
         Texel *keep = clean_ + at;
+        const std::size_t bytes = static_cast<std::size_t>(dw) * sizeof(Texel);
+
+        if (reducing)
+        {
+            boxFilterRow(img.texels.data(), img.width, rowSpan(0, img.height, dh, y),
+                         cols, dw, dst);
+            std::memcpy(keep, dst, bytes);
+            continue;
+        }
+
+        const int sy = img.height == dh ? y : y * img.height / dh;
+        const rivendata::Texel *src =
+            img.texels.data() + static_cast<std::size_t>(sy) * img.width;
         if (img.width == dw)
         {
-            const std::size_t bytes = static_cast<std::size_t>(dw) * sizeof(Texel);
             std::memcpy(dst, src, bytes);
             std::memcpy(keep, src, bytes);
         }
@@ -277,16 +298,33 @@ bool CardSurface::drawPictureSections(const std::string &path, const Section *se
         const int sw = sx1 - sx0;
         const int sh = sy1 - sy0;
 
-        // Nearest neighbour, and both planes, for the same reasons as
-        // drawPicture: this is card drawing, not an overlay.
+        // Box-filtered where the section is being reduced, point-sampled where
+        // it is not, and both planes either way -- the same three cases and the
+        // same reasons as drawPicture. This is the path the dome combination's
+        // numerals take: 32x24 of strip into 13x10 of card, where a point sample
+        // steps over the strokes that tell one numeral from another.
+        const bool reducing = sw > dw || sh > dh;
+        Span cols[kViewW];
+        if (reducing)
+            buildColumnSpans(sx0, sw, dw, cols);
+
         for (int y = 0; y < dh; ++y)
         {
-            const int sy = sy0 + (sh == dh ? y : y * sh / dh);
-            const rivendata::Texel *srcRow =
-                img.texels.data() + static_cast<std::size_t>(sy) * img.width;
             const std::size_t at = static_cast<std::size_t>(y0 + y) * kViewW + x0;
             Texel *dst = texels_ + at;
             Texel *keep = clean_ + at;
+
+            if (reducing)
+            {
+                boxFilterRow(img.texels.data(), img.width, rowSpan(sy0, sh, dh, y), cols,
+                             dw, dst);
+                std::memcpy(keep, dst, static_cast<std::size_t>(dw) * sizeof(Texel));
+                continue;
+            }
+
+            const int sy = sy0 + (sh == dh ? y : y * sh / dh);
+            const rivendata::Texel *srcRow =
+                img.texels.data() + static_cast<std::size_t>(sy) * img.width;
             for (int x = 0; x < dw; ++x)
                 dst[x] = keep[x] = srcRow[sx0 + (sw == dw ? x : x * sw / dw)];
         }

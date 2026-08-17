@@ -598,8 +598,33 @@ VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint1
     //
     // So the honest figure for one movie at a time is under two cores of eight. See
     // Converter.cpp on what that costs.
+    // AND THE GRID IS THE CARD'S, NOT THE MOVIE'S -- for an overlay.
+    //
+    // The paragraph above is about the dither; this is the same argument one step
+    // further on. `scale=w:h` resamples on the movie's own pixel grid, anchored
+    // at its own pixel 0, while the still underneath went through the CARD's:
+    // period 608/256, anchored at card x=0. The two coincide only when left/2.375
+    // is an integer and the movie's own ratio happens to be 2.375, and 716 of the
+    // 874 overlays in a 5-CD install fail that by half a DS pixel or more. So the
+    // overlay was not merely quantised like the still, it has to be SAMPLED like
+    // it -- jspit's gallows carriage was 0.32 px out in x, 0.58 in y and stretched
+    // 0.37% vertically, which reads as a seam along the top of the animation.
+    //
+    // So an overlay comes out of ffmpeg at its NATIVE size and is resampled here
+    // by downscaleOnCardGrid, which is the same box filter in the same linear
+    // light with the same Bayer threshold, sampled where the card samples.
+    //
+    // A FULLSCREEN MOVIE KEEPS ffmpeg's SCALE, and that is not laziness: all 181
+    // of them are 608x392 at (0,0), where the card grid and the movie's own grid
+    // are the same grid and the phase is exactly zero. Piping 65 452 frames of
+    // native 608x392 RGB to reproduce in our own loop what ffmpeg's SIMD area
+    // filter already gets right would cost hours and change no pixel.
+    const bool cardGrid = place != nullptr && profile == VideoProfile::Lite;
+    const int pipeW = cardGrid ? video.width : dstW;
+    const int pipeH = cardGrid ? video.height : dstH;
+
     char scale[64];
-    std::snprintf(scale, sizeof(scale), "scale=%d:%d:flags=area", dstW, dstH);
+    std::snprintf(scale, sizeof(scale), "scale=%d:%d:flags=area", pipeW, pipeH);
     char rate[32];
     std::snprintf(rate, sizeof(rate), "%d/%d", fpsNum, fpsDen);
 
@@ -610,6 +635,10 @@ VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint1
                     "-pix_fmt", "rgb24", "pipe:1"},
                    res.error))
         return res;
+
+    // What downscaleOnCardGrid needs to place each destination pixel on the card.
+    const CardPlacement placement{place != nullptr ? place->left : 0,
+                                  place != nullptr ? place->top : 0, cardW, cardH};
 
     // --- the file ----------------------------------------------------------
     // Written in one pass, streaming: the header and the index go down first with
@@ -645,7 +674,7 @@ VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint1
         file.write(index.data(), indexBytes);
 
     ImaStream audioStream;
-    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(dstW) * dstH * 3);
+    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(pipeW) * pipeH * 3);
     std::vector<Texel> texels;
     std::vector<Texel> previous;
     std::vector<std::uint8_t> audioBlock;
@@ -676,7 +705,11 @@ VideoResult convertMovieBytes(const std::vector<std::uint8_t> &bytes, std::uint1
             bool eof = false;
             if (pic.readExact(rgb.data(), rgb.size(), eof))
             {
-                downscaleToTexels(rgb.data(), dstW, dstH, dstW, dstH, texels);
+                if (cardGrid)
+                    downscaleOnCardGrid(rgb.data(), pipeW, pipeH, dstW, dstH, placement,
+                                        texels);
+                else
+                    downscaleToTexels(rgb.data(), pipeW, pipeH, dstW, dstH, texels);
                 if (texels.size() != frameBytes / 2)
                 {
                     res.error = what + ": frame " + std::to_string(i) + " did not quantise";

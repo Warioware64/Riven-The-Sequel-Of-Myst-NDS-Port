@@ -234,6 +234,18 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME notes_arm9 COMMAND test_notes_arm9)
 
+    # The card surface's reduction filter, header-only and free of <nds.h> for
+    # the same reason: a resampling mistake does not crash, it draws a slightly
+    # different picture, and on the dome combination's numerals a slightly
+    # different picture is the wrong number.
+    add_executable(test_resample_arm9 tests/test_resample_arm9.cpp)
+    target_include_directories(test_resample_arm9 PRIVATE "${REPO_ROOT}/source")
+    target_link_libraries(test_resample_arm9 PRIVATE riven_convert_core)
+    if(NOT MSVC)
+        target_compile_options(test_resample_arm9 PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME resample_arm9 COMMAND test_resample_arm9)
+
     # RIVEN_TEST_DATA is deliberately NOT set as a test property: a
     # set_tests_properties(ENVIRONMENT) captures the value at CONFIGURE time and
     # then overrides whatever the runtime environment holds, so

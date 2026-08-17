@@ -113,7 +113,11 @@ enum : std::uint8_t
     kFrameRepeat = 1 << 0,
 };
 
-/// 5 sizes an overlay from the DS columns it covers rather than from its length
+/// 6 resamples an overlay on the CARD's pixel grid rather than its own: same
+/// layout, same geometry, different pixels -- the size was right from 5 but the
+/// sampling phase was the movie's, so 716 of the 874 overlays sat half a DS pixel
+/// or more off the still they are drawn on. 5 sizes an overlay from the DS
+/// columns it covers rather than from its length
 /// scaled: same layout, different geometry, so old files are current-looking and
 /// a pixel short -- 583 of the 1055. 4 is the soundtrack's makeup gain
 /// (shared/RivenSound.hpp) reaching movies too: same layout, different samples,
@@ -121,7 +125,7 @@ enum : std::uint8_t
 /// raw texels, and the keyframe index became a per-frame index. 2 added a
 /// quantiser setting, 1 had none. Nothing that reads this has ever shipped, so
 /// there is no migration.
-inline constexpr std::uint16_t kVideoVersion = 5;
+inline constexpr std::uint16_t kVideoVersion = 6;
 
 /// Bytes one frame's picture takes at these dimensions. No padding and no
 /// alignment: the DS samples ARGB1555 directly, and for a FULL movie the width is

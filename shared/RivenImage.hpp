@@ -50,9 +50,11 @@ enum class ImageCompression : std::uint8_t
 /// can be reinterpret_cast to this and the pixels used in place.
 ///
 /// TWO sizes, and they are not the same thing. width/height are the texels that
-/// follow -- what the converter resampled to. srcWidth/srcHeight are the source
-/// tBMP's own dimensions, which are in Riven's 608x392 card space and are how
-/// BIG the picture is on the card. A PLST rectangle says only where its top-left
+/// follow -- what the converter resampled to, or the source's own size for art
+/// it left alone (anything narrower than the view, and any strip wider than the
+/// card). srcWidth/srcHeight are the source tBMP's own dimensions, which are in
+/// Riven's 608x392 card space and are how BIG the picture is on the card, even
+/// where that is wider than the card. A PLST rectangle says only where its top-left
 /// corner goes: the original blits at the image's own size and ignores the
 /// rectangle's other two edges (riven_graphics.cpp:367-381), so the runtime has
 /// to know that size, and only the converter ever saw it.

@@ -312,10 +312,12 @@ void Engine::drawBitmapSections(std::uint16_t tbmpId, const CardSurface::Section
     }
 
     // A section's source is in the .rpic's pixels and the twin holds the source
-    // tBMP's, which are the same numbers for every overlay Riven draws -- the
-    // converter only resamples what is wider than the view (ImagePipeline.cpp:340)
-    // -- and are not for anything it did resample. Scaled rather than assumed,
-    // so a caller that ever does slice a full-card still still lands right.
+    // tBMP's, which are the same numbers for everything Riven slices: the
+    // converter resamples what is wider than the view but leaves what is wider
+    // than the CARD alone (convertBitmapPixels in ImagePipeline.cpp), and the
+    // only sliced art in the game is on one side or the other of that line.
+    // Scaled rather than assumed, so a caller that ever does slice a full-card
+    // still lands right.
     const std::string hi = picHiPath(tbmpId);
     for (std::size_t i = 0; i < count; ++i)
     {
