@@ -273,7 +273,28 @@ namespace
 
         case Op::PlayMovieBlocking: // 32
             e.enableMovie(arg(c, 0), true);
-            e.playMovie(arg(c, 0), true);
+            // WAITS FOR a movie that is already running rather than starting it
+            // over. Opcode 32 is openSlot()->playBlocking() (riven_scripts.cpp:
+            // 669-674) and playBlocking only calls play() when !_playing
+            // (riven_video.cpp:218-220) -- see Engine::resumeMovieBlocking, which
+            // is that rule and was written for xbookclick.
+            //
+            // It matters on exactly ONE hotspot in the shipped game, and it is
+            // the dome: pspit card 43's open button runs
+            //
+            //     PlayMovie 1; Delay 1666; FadeAmbient; PlayMovieBlocking 1
+            //
+            // -- the same code both times, with a delay between them. Restarting
+            // made the dome begin to open, jump back and open again. Every other
+            // op33/op32 pair in the game (90 of them, counted over every path
+            // through every card and hotspot script in all eight stacks) has only
+            // instant commands in between, so there the restart is sub-frame and
+            // nothing changes here.
+            //
+            // The stored opcode is the other half of the same bug: opcode 38's
+            // threshold is measured from wherever the movie last started, and
+            // this hotspot stores one at 7000 ms.
+            e.resumeMovieBlocking(arg(c, 0));
             break;
 
         case Op::PlayMovie: // 33

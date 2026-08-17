@@ -22,6 +22,7 @@
 #include "DebugLog.hpp"
 #include "engine/Engine.hpp"
 #include "engine/Externals.hpp"
+#include "render/HintBar.hpp"
 
 using namespace rivendata;
 
@@ -82,7 +83,35 @@ namespace
         e.applyScreenUpdate();
 
         e.playEffect(0, 256); // the link sound
-        e.delay(12000);
+
+        // ScummVM waits a flat twelve seconds here (ospit.cpp:113). What it is
+        // waiting FOR is the link sound -- and that sound is ospit tWAV 0, which
+        // is 141120 samples at 22050 Hz: 6.4 seconds. The remaining 5.6 are
+        // black silence with nothing to look at and no control that answers, and
+        // on a handheld that reads as a hung game.
+        //
+        // So the SOUND is what is waited on, with ScummVM's twelve kept as the
+        // ceiling in case it outlasts them, and B/START let out of whatever is
+        // left -- the same escape playMovieBlocking gives a player who has seen
+        // a cutscene before, and the same legend.
+        //
+        // The refused-sound case falls out of the same test rather than needing
+        // one of its own: playEffect leaves effectSlot_ at -1 when the budget
+        // turns the sound away (it is a 2.4 MB stack), isEffectPlaying() is
+        // false on the first turn, and there is nothing left to sit through.
+        {
+            HintScope hint{"B skip"};
+            constexpr std::uint32_t kCeilingFrames = 12000 * 60 / 1000;
+            for (std::uint32_t i = 0; i < kCeilingFrames && !e.quitRequested(); ++i)
+            {
+                e.pumpIdleFrame();
+                scanKeys();
+                if ((keysDown() & (KEY_B | KEY_START)) != 0)
+                    break;
+                if (!e.isEffectPlaying())
+                    break;
+            }
+        }
 
         e.activateMlst(7, false);
         e.playMovie(codeForMlstIndex(e, 7), true); // Gehn links out
@@ -152,17 +181,21 @@ namespace
                    && e.pointerCardY() >= book.top && e.pointerCardY() < book.bottom;
         };
 
-        // Gehn is still talking; nothing may be clicked yet.
+        // Gehn is still talking; nothing may be clicked yet. Interactive all the
+        // same, which is ScummVM spinning _vm->doFrame() in this loop as well as
+        // in the one below (ospit.cpp:91-93): the pointer keeps moving even
+        // though nothing is reading it yet. This wait is 83 seconds on the second
+        // offer, and a stylus that drags a frozen cursor for 83 seconds reads as
+        // a hung game.
         while (e.movieTimeMs(code) < startTime && !e.quitRequested())
-            e.pumpIdleFrame();
+            e.pumpInteractiveFrame();
         if (e.quitRequested())
             return;
 
-        // He has opened the book and asked. This is the window.
-        //
-        // pumpInteractiveFrame and not pumpIdleFrame: the idle one deliberately
-        // does not read the button or move the pointer, so mouseIsDown() would
-        // never become true and the offer could not be taken.
+        // He has opened the book and asked. This is the window, and here the
+        // interactive pump is not a courtesy but the mechanism: pumpIdleFrame
+        // deliberately does not read the button, so mouseIsDown() would never
+        // become true and the offer could not be taken at all.
         while (e.movieTimeMs(code) < endTime && !e.quitRequested())
         {
             e.setCursor(pointerOnBook() ? kCursorOpenHand : kCursorMain);
@@ -187,8 +220,17 @@ namespace
             return;
         }
 
-        // Otherwise he puts the book away and the scene runs on.
-        e.playMovie(code, true);
+        // Otherwise he puts the book away and the scene runs on -- THE REST of
+        // the movie the player has been watching for the last minute and a half,
+        // not the whole of it again.
+        //
+        // ospit.cpp:149 is video->playBlocking() on the getSlot() handle from the
+        // top of this function, and that resumes (riven_video.cpp:218-220). This
+        // was playMovie(code, true), which starts over, and the card's four
+        // branches make that 92, 174 or 182 seconds of Gehn a second time --
+        // with opcode 38's soundtrack cue a whole movie late behind it, because
+        // its threshold is measured from wherever the movie last started.
+        e.resumeMovieBlocking(code);
     }
 
     // --- the office ----------------------------------------------------------

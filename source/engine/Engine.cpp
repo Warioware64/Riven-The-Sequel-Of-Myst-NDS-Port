@@ -1132,14 +1132,48 @@ void Engine::closeAllMovies()
     // stop() and throw the decoder away, leaving nothing behind.
     //
     // So this is "the loop that was running is over", not "freeze it where it
-    // stood". bspit's boiler is the only caller: it stops the boiling water
-    // before playing the transition that replaces it, and a baked frame of the
-    // old state under the new movie is exactly what it does not want.
+    // stood". bspit's boiler is one of the two callers: it stops the boiling
+    // water before playing the transition that replaces it, and a baked frame of
+    // the old state under the new movie is exactly what it does not want.
+    //
+    // A FULLSCREEN movie still has to hand the buffers back, and that is the
+    // whole of what was missing here. ospit's trap book is the caller that shows
+    // it: xbookclick watches the cage's speech movie, which MLST 2 puts at (0,0)
+    // and which is therefore FULL and holding two of the three background
+    // buffers -- and stop() alone leaves bgs.movieTakeover() true for ever.
+    // flushUploads refuses to publish the card surface while it is, so the LITE
+    // overlay that plays next -- Gehn linking out -- decoded, composited and
+    // never reached the screen. Thirty-four seconds of black.
+    //
+    // BAKED, unlike everything else in this function, and the two reasons are
+    // separate:
+    //
+    //   * it is what the player is looking at. closeVideos() stops DRAWING the
+    //     movie; ScummVM's screen keeps its last frame until the next
+    //     updateScreen repaints from _mainScreen -- and here the next thing to
+    //     happen is a blend to black, so that frame is the picture it fades out
+    //     OF. keepMovieFrame() + adoptBuffer is exactly that.
+    //   * it is the branch with no rebind and no flip (BgSurface.cpp:184-198).
+    //     The no-bake branch parks the card back and leaves a flip PENDING,
+    //     which the caller's transition would take inside its own first vblank
+    //     and swap the two layers half way down the slide -- the failure
+    //     ScreenTakeover.hpp:44-60 was written for.
+    //
+    // The overlay branch below is untouched, so the boiler keeps the behaviour
+    // its comment asks for: stop(), and nothing left underneath.
     for (std::int32_t i = 0; i < kMovieSlots; ++i)
     {
-        movies_[i].enabled = false;
-        if (movies_[i].open)
-            movies_[i].player.stop();
+        MovieSlot &m = movies_[i];
+        m.enabled = false;
+        if (!m.open)
+            continue;
+        // Only while it is PLAYING, as releaseCardMovies and disableAllMovies
+        // both test it: one that has already run out gave its buffers back in
+        // pumpMovies.
+        if (m.player.profile() == VideoProfile::Full && m.player.isPlaying())
+            endFullscreenMovie(m, /*bake=*/true); // stops it too
+        else
+            m.player.stop();
     }
 }
 
@@ -1154,6 +1188,58 @@ void Engine::playMovie(std::uint16_t code, bool blocking)
         return;
     }
     playMovieSlot(slot, blocking);
+}
+
+void Engine::resumeMovieBlocking(std::uint16_t code)
+{
+    const std::int32_t slot = slotForCode(code);
+    if (slot < 0)
+    {
+        DebugLog::warn("card %u: no movie activated as %u", cardId_, code);
+        return;
+    }
+    MovieSlot &ms = movies_[slot];
+
+    // Nothing to resume: no video in the slot, or one that something has
+    // stopped. ScummVM's !_playing branch, which calls play() -- and play()
+    // loads if it must and rewinds if the last play left it at the end
+    // (riven_video.cpp:218-220, :271-282). So: an ordinary blocking play.
+    if (!ms.open || !ms.player.isPlaying())
+    {
+        playMovieSlot(slot, true);
+        return;
+    }
+
+    // OUT OF FRAMES IS NOT A REASON TO START OVER. finished() is deliberately
+    // not tested above: ScummVM's _playing stays set until something stops the
+    // video, so a movie that has merely run out still takes the resume path,
+    // where playBlocking's loop finds endOfVideo() already true and falls
+    // straight through to the tail. playMovieBlocking below does exactly that --
+    // its wait tests finished() before anything else -- and the stored opcode
+    // and the bake still happen, which is the whole of what is left to do.
+
+    // AND NOT THROUGH playMovieSlot, which is the whole reason this is a
+    // separate function rather than a flag on that one. A FULL movie already in
+    // flight is already holding two of the three background buffers, and
+    // playMovieSlot's opening move is to take them again: beginMovieTakeover() a
+    // second time would park the card's picture over a buffer the decoder is
+    // writing into. Both callers are that case rather than a hypothetical: the
+    // cage's movies are FULL -- ospit MLST 2 puts codes 1 and 2 at (0,0) -- and
+    // so is the pspit dome opening opcode 32 now resumes, which is pspit MLST 43
+    // code 1 at (0,0).
+    //
+    // What is left of playMovieSlot's preamble is these two lines. ENABLE for
+    // the reason given there: `enabled` is what pumpMovies tests before it
+    // advances the decoder, and the wait below ends on the movie running out.
+    ms.enabled = true;
+    // A blocking play never loops, or it would never return -- ScummVM sets it
+    // on the handle it just opened (riven_scripts.cpp:671).
+    setMovieLoop(code, false);
+
+    // `whole` is true: the movie is being played out to its own end, which is
+    // what earns the bake. playBlocking's tail is disable(); stop(); seek(0)
+    // (riven_video.cpp:262-266) and disable() is the bake.
+    playMovieBlocking(slot, true);
 }
 
 /// The clock the callers' numbers are counted on: Riven's QuickTime timescale,

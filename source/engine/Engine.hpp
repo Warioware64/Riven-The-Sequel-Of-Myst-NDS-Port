@@ -482,8 +482,31 @@ public:
     /// RivenVideoManager::closeVideos (riven_video.cpp:151-155). Stop every open
     /// movie WITHOUT baking its last frame -- which is what separates it from
     /// disableAllMovies, opcode 29, however alike the names read. See the body.
+    ///
+    /// A FULLSCREEN movie is the exception, and has to be: it is holding two of
+    /// the three background buffers, and stopping it without giving them back
+    /// leaves the card surface unable to reach the screen at all. Its last frame
+    /// IS kept, because that frame is what the screen is showing and what the
+    /// caller's next transition has to fade out of -- the body says the rest.
     void closeAllMovies();
+    /// Start a movie, from its beginning. ALWAYS from its beginning -- see
+    /// resumeMovieBlocking for the callers that must not, and opcode 32.
     void playMovie(std::uint16_t code, bool blocking);
+    /// Block until a movie ends, WITHOUT starting over one that is already
+    /// running.
+    ///
+    /// ScummVM's openSlot()+playBlocking() pair, which reads as a fresh play and
+    /// is not one: openSlot hands back the handle a slot already has
+    /// (riven_video.cpp:309-322), playBlocking only calls play() when !_playing
+    /// (:218-220), and play() itself only rewinds at endOfVideo() (:271-282). So
+    /// a blocking play on top of a movie in flight WAITS FOR IT.
+    ///
+    /// playMovie(code, true) always starts over, which is right for every caller
+    /// whose movie is not running yet and wrong for one that is already part way
+    /// through: xbookclick, which has been watching its movie's clock for eighty
+    /// seconds, and OPCODE 32 ITSELF (Script.cpp), whose one visible site is the
+    /// pspit dome's open button.
+    void resumeMovieBlocking(std::uint16_t code);
     /// Play the slice of a movie between two times, blocking until it is done.
     ///
     /// For the externals that animate a control one notch at a time out of one
