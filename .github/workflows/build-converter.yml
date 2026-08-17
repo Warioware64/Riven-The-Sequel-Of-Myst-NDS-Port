@@ -39,21 +39,25 @@ jobs:
           - os: ubuntu-22.04
             name: linux
             artifact: riven-convert-linux
+            qt: '6.5.*'
+          # A NEWER Qt on Windows, for the reason release.yml spells out:
+          # windows-latest carries an MSVC whose STL has dropped
+          # stdext::checked_array_iterator, and Qt 6.5.3's qvarlengtharray.h
+          # still calls it, so Qt's own header fails to compile. Fixed in 6.7.2.
           - os: windows-latest
             name: windows
             artifact: riven-convert-windows
+            qt: '6.9.*'
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive   # libvaht; the build hard-errors without it
 
-      # 6.5 rather than the newest: it is what CMakeLists asks for, and pinning
-      # low keeps the binary usable on older distributions.
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.5.*'
+          version: ${{ matrix.qt }}
           cache: true
 
       - name: Configure

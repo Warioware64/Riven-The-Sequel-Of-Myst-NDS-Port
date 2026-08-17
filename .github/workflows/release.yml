@@ -111,23 +111,33 @@ jobs:
       matrix:
         include:
           # Oldest supported runner on purpose: the binaries then also run
-          # against older glibc than the runner's own.
+          # against older glibc than the runner's own. 6.5 is the minimum
+          # CMakeLists asks for, and pinning low keeps the AppImage usable on
+          # older distributions.
           - os: ubuntu-22.04
             name: linux
+            qt: '6.5.*'
+          # Windows needs a NEWER Qt, not an older one. windows-latest carries
+          # MSVC 19.5x, whose STL has dropped stdext::checked_array_iterator;
+          # Qt 6.5.3's QVarLengthArray still calls it, so qvarlengtharray.h
+          # itself fails to compile with C2065/C3861 before any of this
+          # project's code is reached. Qt removed that usage in 6.7.2. The
+          # version costs nothing here because windeployqt bundles the DLLs
+          # next to the exe, so it never has to match anything on the user's
+          # machine.
           - os: windows-latest
             name: windows
+            qt: '6.9.*'
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive   # libvaht; the CMake configure hard-errors without it
 
-      # 6.5 rather than the newest: it is what CMakeLists asks for, and pinning
-      # low keeps the binary usable on older distributions.
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.5.*'
+          version: ${{ matrix.qt }}
           cache: true
 
       - name: Configure
