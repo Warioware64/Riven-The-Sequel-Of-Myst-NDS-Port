@@ -14,7 +14,7 @@ your own copy of Riven into files the DS can read.
 **Status: it plays.** All eight stacks are in, and every one of Riven's 131
 external commands is implemented — the telescope, the marble grid, the domes, the
 boiler, the pin map, the trap book, and every ending with the credits behind it.
-The water effects are what is left.
+
 
 ## What you need
 
