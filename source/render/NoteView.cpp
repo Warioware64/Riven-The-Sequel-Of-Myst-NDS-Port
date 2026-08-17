@@ -42,6 +42,7 @@
 #include "ScreenTakeover.hpp" // screenHandBack: the way out of a port screen
 #include "global_header.hpp"
 #include "render/BgSurface.hpp"
+#include "render/HintBar.hpp"
 #include "render/TextLayer.hpp"
 
 using namespace rivendata;
@@ -295,7 +296,7 @@ void Engine::captureNote()
     }
     DebugLog::note("NOTE %d from %s/%u", index, stackName(stack_.id), cardId_);
     BookNotes::setLastOpened(index);
-    setStatus("note taken");
+    //setStatus("note taken");
 }
 
 void Engine::runNotebook()
@@ -327,6 +328,10 @@ void Engine::runNotebook()
     // up, or paging back would photograph the screen and paging forward would
     // write 600 KB to the card. See DebugLog::HotkeyHold.
     DebugLog::HotkeyHold holdHotkeys;
+
+    // The base legend. The loop below swaps it for the confirm question while
+    // that is up, and this puts the card's back however the loop is left.
+    HintScope hint{"L/R page   A draw", "X erase   Y ink", "SELECT delete  B close"};
 
     // --- take the screen ---------------------------------------------------
     //
@@ -562,6 +567,23 @@ void Engine::runNotebook()
             break;
 
         const int tapped = (down & KEY_TOUCH) != 0 ? cellAt(t.px, t.py) : -1;
+
+        // A yes/no question rebinds A and B, so the band has to say so. Set
+        // every frame rather than on the edge: HintBar::set repaints only when
+        // the text actually changes, so the steady state costs a comparison.
+        //
+        // "X or Y keep" and not "B keep", which is what this said first and
+        // what the code below looks like it means: the B|START test ABOVE runs
+        // unconditionally, so B never reaches the confirm branch's own
+        // B|X|Y test and its KEY_B is dead. B does keep the note -- nothing is
+        // deleted -- but it leaves the notebook while doing it, so it gets its
+        // own row rather than being folded in with the keys that stay.
+        if (confirmDelete)
+            hintBar.set("Delete this note?", "A delete   X or Y keep",
+                        "B keeps it and closes");
+        else
+            hintBar.set("L/R page   A draw", "X erase   Y ink",
+                        "SELECT delete  B close");
 
         if (confirmDelete)
         {

@@ -12,6 +12,7 @@
 #include "global_header.hpp"
 #include "render/BgSurface.hpp"
 #include "render/Cursor.hpp"
+#include "render/HintBar.hpp"
 #include "render/Inventory.hpp"
 #include "render/TextLayer.hpp"
 
@@ -25,12 +26,18 @@ namespace
     // Layout. Rows are full-width for the hit test even though the label is not,
     // because a menu row on a touch screen is a band, not a word.
     constexpr int kTitleY = 24;
-    /// Six rows have to fit: kFirstY + 5*kRowStep + kLineHeight must land inside
-    /// the 192-row screen. At 72 and 24 the last row started AT 192 and the
-    /// settings screen's "Back" was drawn off the bottom of the display, along
-    /// with the selection mark whenever it was there.
+    /// SEVEN rows have to fit -- the settings screen is the longest and grew one
+    /// when the control hints got a row of their own: kFirstY + 6*kRowStep +
+    /// kLineHeight must land inside the 192-row screen, and 56 + 120 + 14 is
+    /// 190. It has been lost twice now, both times the same way: at 72 and 24
+    /// the last row started AT 192, and at 56 and 22 it started at 188, so
+    /// "Back" was four pixels tall with its selection mark cut off beside it.
+    ///
+    /// kFirstY stays at 56 rather than absorbing the step: kNoteY is 38 and a
+    /// line of this font is 14, so the pickers that draw a note under the title
+    /// need the first row to begin at 52 or later.
     constexpr int kFirstY = 56;
-    constexpr int kRowStep = 22;
+    constexpr int kRowStep = 20;
     constexpr int kTextX = 40;
     /// The selection marker sits in the margin, so a row's text does not move
     /// when the selection lands on it.
@@ -155,6 +162,7 @@ void MainMenu::runSettings()
         RowTransitions,
         RowWater,
         RowVolume,
+        RowHints,
         RowDebug,
         RowBack,
         kRowCount,
@@ -166,6 +174,9 @@ void MainMenu::runSettings()
     bool leaving = false;
 
     ScreenTakeover screen;
+    // Scoped alongside the takeover, and for the same reason it is: this loop
+    // has several ways out and every one of them owes the card legend back.
+    HintScope hint{HintBar::kMenuRow0, HintBar::kMenuRow1, HintBar::kMenuRow2};
 
     while (true)
     {
@@ -216,6 +227,14 @@ void MainMenu::runSettings()
                 settings.apply();
                 break;
             }
+            case RowHints:
+                settings.controlHints = !settings.controlHints;
+                changed = true;
+                // Live, through settings.apply() below -- but the band is on the
+                // OTHER screen, so unlike every other row here the player can
+                // watch this one take effect while the settings are still up.
+                settings.apply();
+                break;
             case RowDebug:
                 settings.debugMode = !settings.debugMode;
                 changed = true;
@@ -243,6 +262,7 @@ void MainMenu::runSettings()
             std::string("Transitions: ") + onOff[settings.transitions],
             std::string("Water: ") + onOff[settings.water],
             "Volume: " + std::to_string(volumeLevel(settings.masterVolume) * 10) + "%",
+            std::string("Control hints: ") + onOff[settings.controlHints],
             // The only row that does not take effect where it is set:
             // DebugLog::begin reads it once, at startup, because it takes the
             // top screen away from the picture as it does so.
@@ -417,6 +437,7 @@ void MainMenu::runSavePicker()
         return;
     }
     ScreenTakeover screen;
+    HintScope hint{HintBar::kMenuRow0, HintBar::kMenuRow1, HintBar::kMenuRow2};
 
     // Riven's own menu and its journals are aspit cards, and Riven's Save button
     // is ON one of them -- so this is reachable with the engine standing
@@ -454,6 +475,7 @@ bool MainMenu::runLoadPicker()
         return false;
     }
     ScreenTakeover screen;
+    HintScope hint{HintBar::kMenuRow0, HintBar::kMenuRow1, HintBar::kMenuRow2};
 
     const int slot = pickSlot(false);
     if (slot == 0)
@@ -514,6 +536,7 @@ void MainMenu::runInGameMenu()
     bool wantNotebook = false;
     {
         ScreenTakeover screen;
+        HintScope hint{HintBar::kMenuRow0, HintBar::kMenuRow1, HintBar::kMenuRow2};
         Screen s;
         s.rows = kRowCount;
 
@@ -603,6 +626,10 @@ void MainMenu::run()
 
     Screen s;
     s.rows = kRowCount;
+
+    // The band is already carrying the card legend by now (HintBar::create sets
+    // it as the resting state), and none of it is true yet -- there is no card.
+    HintScope hint{HintBar::kMenuRow0, HintBar::kMenuRow1};
 
     bgs.setLetterbox(false);
     showPointer(false);

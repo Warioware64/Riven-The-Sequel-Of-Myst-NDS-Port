@@ -11,6 +11,7 @@
 #include "data/StackFile.hpp"
 #include "engine/Script.hpp"
 #include "global_header.hpp"
+#include "render/HintBar.hpp"
 
 using namespace rivendata;
 
@@ -277,7 +278,6 @@ void Engine::drawBitmap(std::uint16_t tbmpId, const Rect &rect)
             // A journal turning its page under the viewer. The window stays
             // where the player put it, and a page that will not load leaves the
             // one on screen rather than a blank.
-            setStatus("zoom: new page");
             zoomView.reopen(picHiPath(tbmpId));
         }
     }
@@ -1370,6 +1370,12 @@ void Engine::playMovieBlocking(std::int32_t slot, bool whole)
     // `full` branch returns early.
     CursorHide hideCursor{*this};
 
+    // B is the only control that means anything for as long as this runs, and
+    // it is the one the card legend cannot advertise -- there is nothing to skip
+    // on a card. Scoped for the same reason CursorHide above it is: the `full`
+    // branch at the bottom returns early.
+    HintScope hint{"B skip"};
+
     // The original blocks the script here, and the game leans on it: a cutscene
     // that returned immediately would have the next command draw over it.
     while (ms.player.isPlaying() && !ms.player.finished() && !quit_)
@@ -1574,6 +1580,9 @@ bool Engine::playMovieUntilClick(std::uint16_t code)
     // held when its CardEnter script reaches this, and without the latch the
     // alert would be cut short by the press that caused it.
     mouseForceUp();
+
+    // A touch ends this as well as B, and both count as "get on with it" below.
+    HintScope hint{"A/touch or B to go on"};
 
     bool clicked = false;
     while (ms.player.isPlaying() && !ms.player.finished() && !quit_)
@@ -2196,7 +2205,11 @@ void Engine::leaveZoom()
 
     zoomGesture_ = ZoomGesture::None;
     inventory_.setSuppressed(false);
-    setStatus("");
+    // Back to the card legend. NOT a HintScope, because the viewer is a flag
+    // rather than a call: toggleZoom returns while the viewer is still up, so
+    // there is no scope to hang it on -- this and the set in toggleZoom are the
+    // pair, and they are hand-written for that reason.
+    hintBar.setPlayHint();
 
     // The pointer has not moved, but what is under it has: it means 2.375 card
     // pixels again. Adopted rather than dispatched -- see seedInsideHotspot.
@@ -2245,9 +2258,16 @@ void Engine::toggleZoom()
     // Riven ever gives that something can be touched at all.
     inventory_.setSuppressed(true);
 
-    // 31 columns is what the status row has (DebugLog::consoleRow clips to it),
-    // and this used to be forty characters of advice that nothing rendered.
-    setStatus("zoom: touch acts, pad pans");
+    // What the viewer's controls are, in the port's own font and for as long as
+    // the viewer is up. R+touch is in here because it is the one binding that
+    // exists ONLY in the viewer and is otherwise undiscoverable.
+    //
+    // The band is the ONLY place this is said now. It used to be said twice: a
+    // setStatus here as well, which is the libnds console printing the same
+    // advice in the console font one row below the band -- the same screen, the
+    // same moment, worse letters. DebugLog::status is not gated by debug mode,
+    // so that duplicate was there in normal play.
+    hintBar.set("X or B exit   L note", "DPAD pan   touch acts", "R+touch drag the view");
 
     // The same still stylus is now over a different hotspot, 2.375 times more
     // precisely. Adopt it rather than dispatch it -- see seedInsideHotspot.

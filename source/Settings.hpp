@@ -45,6 +45,14 @@ public:
     /// bit-for-bit like the old build. The row reads it as 100% either way.
     std::uint8_t masterVolume = 128;
 
+    /// The control legend on the top screen: what the buttons do here, changing
+    /// with what the player is looking at (render/HintBar.hpp).
+    ///
+    /// On, because every control in this port is the port's own invention and
+    /// nothing else ever states them. Off is for a player who knows them and
+    /// would rather have the whole splash back.
+    bool controlHints = true;
+
     /// Trace every card change and every asset load to the top screen and to
     /// <data>/debug.log, turn on the screenshot and VRAM-dump chords, and let
     /// SELECT+START open the command console (engine/DebugConsole.cpp -- which

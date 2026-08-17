@@ -59,10 +59,10 @@ void screenFrame();
 /// rather than the one somebody meant to keep, and endMovieTakeover has already
 /// forgotten the latter by then.
 ///
-/// setScrollY and not setLetterbox: setLetterbox commits with bgUpdate() there
-/// and then (BgSurface::setLetterbox), which would slide the OUTGOING image 14
-/// rows down for the rest of the frame. This way the scroll and the flip reach
-/// the registers together, in the one bgUpdate at the tail of vblank().
+/// The letterbox goes back on UNCOMMITTED, because committing it with its own
+/// bgUpdate() there and then would slide the OUTGOING image thirteen rows down
+/// for the rest of the frame. This way the scroll and the flip reach the
+/// registers together, in the one bgUpdate at the tail of vblank().
 ///
 /// Caller-agnostic on purpose: it is the display half of handing back and
 /// nothing else. Repainting the card -- invalidateAll, applyScreenUpdate -- is

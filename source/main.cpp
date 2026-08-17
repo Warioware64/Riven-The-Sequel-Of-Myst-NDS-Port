@@ -10,6 +10,7 @@
 #include "audio/RivenAudio.hpp"
 #include "engine/Engine.hpp"
 #include "render/BgSurface.hpp"
+#include "render/HintBar.hpp"
 #include "render/TextLayer.hpp"
 #include "render/TopBg.hpp"
 
@@ -31,6 +32,9 @@ namespace
         // has to be read rather than glanced at -- on black it is legible, over
         // a photograph of Riven it is not. This is also the normal-quit path.
         rivenrt::topBg.setVisible(false);
+        // And the legend with it: this screen is read rather than glanced at,
+        // and every control it advertises has just stopped existing.
+        rivenrt::hintBar.set(nullptr);
         // The one print in the port that is never gated. It is the only
         // player-facing error UI there is, and everything it could report has
         // already stopped the game (DebugLog.hpp).
@@ -78,6 +82,12 @@ int main(int argc, char *argv[])
     // than before it only so that a card with no ui/ says so in the same place
     // as the rest of what is missing.
     rivenrt::topBg.load();
+
+    // The control legend, on the layer above the picture. After topBg.load for
+    // no reason of its own -- they touch different halves of bank C and
+    // different halves of the palette -- but before settings.apply below, which
+    // is what switches it on or off.
+    rivenrt::hintBar.create();
 
     RivenAudio::initSystem();
     // The master gain, now that there is an audio system to set it on. The two

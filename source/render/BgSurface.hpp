@@ -106,7 +106,14 @@ public:
     /// Safe only while no transition is running, which is the case for all
     /// three: vblank() writes the scroll registers during a transition and
     /// restores this rest position at the end of one.
-    void setLetterbox(bool on);
+    /// It also RECORDS the rest position, which is what vblank() puts the
+    /// scroll back to when a transition ends -- so a screen that turns the
+    /// letterbox off stays where it put itself.
+    ///
+    /// `commit` false queues the registers without the bgUpdate(), for a caller
+    /// that is about to reach a vblank anyway and wants this to land with the
+    /// flip rather than in the middle of active display (screenHandBack).
+    void setLetterbox(bool on, bool commit = true);
 
     /// Rest the layers at an arbitrary row, so screen row r shows buffer row
     /// (y + r) mod kBufH.
@@ -170,6 +177,11 @@ private:
     int bound_[2] = {0, 1};     ///< buffer shown by each layer
     int front_ = 0;             ///< which of the two layers is on top
     bool flipPending_ = false;
+    /// Where the scroll rests between effects: kRestY with the letterbox on,
+    /// zero with it off. setLetterbox writes it; vblank() reads it to put the
+    /// scroll back when a transition finishes, which is the only place that has
+    /// to know the answer without having been told it.
+    int restY_ = rivendata::kRestY;
 
     /// While a fullscreen movie runs, the buffer holding the card underneath.
     /// -1 when there is no movie. The movie is kept off it by rebinding any

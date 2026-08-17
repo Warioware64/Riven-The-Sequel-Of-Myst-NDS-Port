@@ -28,7 +28,13 @@ void screenHandBack()
 {
     // Queued, not committed: vblank()'s own bgUpdate() at the end takes this and
     // the flip in one write. See the header.
-    bgs.setScrollY(rivendata::kRestY);
+    //
+    // setLetterbox and not setScrollY, even though the two write the same
+    // registers here: only setLetterbox records the REST position, which is
+    // what vblank() puts the scroll back to at the end of the next transition.
+    // Handing the card back with that left saying "zero" tilted every wipe on
+    // the card thirteen rows as it finished.
+    bgs.setLetterbox(true, /*commit=*/false);
     (void)bgs.endMovieTakeover();
 
     if (bgs.flipPending())
@@ -36,8 +42,8 @@ void screenHandBack()
     else
         // endMovieTakeover's no-flip branch: the screen never actually flipped,
         // so the card is still the one being scanned out and there is nothing to
-        // wait for. Only the scroll is left to commit, and setLetterbox is how
-        // you commit it without spending a frame.
+        // wait for. Only the registers above are left to commit, and there is no
+        // vblank coming to do it.
         bgs.setLetterbox(true);
 
     for (int b = 0; b < BgSurface::kBuffers; ++b)

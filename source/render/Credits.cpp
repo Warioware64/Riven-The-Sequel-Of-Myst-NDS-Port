@@ -10,6 +10,7 @@
 #include "engine/Engine.hpp"
 #include "global_header.hpp"
 #include "render/BgSurface.hpp"
+#include "render/HintBar.hpp"
 #include "tonccpy.h"
 
 using namespace rivendata;
@@ -170,6 +171,10 @@ void runCredits(Engine &e, std::uint32_t delayMs)
 
     ScreenTakeover screen;
     Engine::CursorHide hide{e};
+    // ANY button ends the roll, so naming one would be a lie about the other
+    // nine. The band goes blank instead -- this is the last thing in the game
+    // and it should have the screen to itself.
+    HintScope hint{nullptr};
 
     // ANY button ends the roll (skipped(), above), and this loop spins
     // Engine::pumpIdleFrame -- which is where both halves of L are polled. So
@@ -207,9 +212,15 @@ void runCredits(Engine &e, std::uint32_t delayMs)
 
     // --- the two title cards ---------------------------------------------
     // Each fades up and holds. The blend is the hardware's, through the same
-    // door opcode 18 uses -- and it ends by putting the scroll registers back
-    // at the letterbox rest position (BgSurface::vblank), which this screen has
-    // turned off, so the letterbox is turned off again after each one.
+    // door opcode 18 uses.
+    //
+    // The blend ends by putting the scroll registers back where the letterbox
+    // last left them (BgSurface::vblank), which for this screen is zero --
+    // ScreenTakeover turned the letterbox off on the way in. That used to be a
+    // hardcoded kRestY and this loop turned the letterbox off again after every
+    // card to undo it, which could not help being a frame late: the card jumped
+    // thirteen rows down the screen for the gap in between, and the gap grew the
+    // moment the ending's soundtrack started being read off the card in it.
     for (int id = kFirstId; id < kFirstScrollId; ++id)
     {
         RpicImage still;
@@ -225,7 +236,6 @@ void runCredits(Engine &e, std::uint32_t delayMs)
         bgs.beginTransition(Transition::Blend);
         while (bgs.transitionActive() && !e.quitRequested())
             e.pumpIdleFrame();
-        bgs.setLetterbox(false);
 
         for (std::uint32_t f = 0; f < kStillHoldMs * 60 / 1000; ++f)
         {

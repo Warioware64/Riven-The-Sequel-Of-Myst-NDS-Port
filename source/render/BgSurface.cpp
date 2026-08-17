@@ -234,14 +234,19 @@ void BgSurface::beginTransition(Transition t)
     }
 }
 
-void BgSurface::setLetterbox(bool on)
+void BgSurface::setLetterbox(bool on, bool commit)
 {
     if (!exists())
         return;
-    const int y = on ? kRestY : 0;
-    bgSetScroll(bgId_[0], 0, y);
-    bgSetScroll(bgId_[1], 0, y);
-    bgUpdate();
+    // REMEMBERED, because a transition has to be able to put the scroll back
+    // when it finishes and the answer is not always the card view's. See
+    // vblank(): a port screen that has turned the letterbox off rests at zero,
+    // and restoring kRestY there jumped its picture thirteen rows.
+    restY_ = on ? kRestY : 0;
+    bgSetScroll(bgId_[0], 0, restY_);
+    bgSetScroll(bgId_[1], 0, restY_);
+    if (commit)
+        bgUpdate();
 }
 
 void BgSurface::setScrollY(int y)
@@ -284,8 +289,14 @@ void BgSurface::vblank()
         {
             REG_BLDCNT = 0;
             REG_BLDALPHA = 0;
-            bgSetScroll(bgId_[0], 0, kRestY);
-            bgSetScroll(bgId_[1], 0, kRestY);
+            // Back to REST, which is whatever setLetterbox was last told and not
+            // always the card view's thirteen rows: the credits blend their two
+            // title cards up with the letterbox off, and putting kRestY back
+            // under them jumped each card down the screen for the rest of the
+            // frame -- long enough to see, now that the ending's soundtrack is
+            // still being read off the card in that same gap.
+            bgSetScroll(bgId_[0], 0, restY_);
+            bgSetScroll(bgId_[1], 0, restY_);
             frames_ = 0;
             frame_ = 0;
             type_ = Transition::None;

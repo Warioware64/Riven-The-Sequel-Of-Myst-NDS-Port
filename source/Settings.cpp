@@ -7,13 +7,15 @@
 #include "RivenVars.hpp"
 #include "audio/RivenAudio.hpp"
 #include "engine/Engine.hpp"
+#include "render/HintBar.hpp"
 
 Settings settings;
 
 namespace
 {
     // settings.dat: [0] = format version, [1] = zipMode, [2] = transitions,
-    // [3] = water, [4] = masterVolume (0..255), [5] = debugMode.
+    // [3] = water, [4] = masterVolume (0..255), [5] = debugMode,
+    // [6] = controlHints.
     //
     // APPEND ONLY. Every field is gated on the file being long enough AND the
     // version matching, so an older file simply leaves the options it does not
@@ -21,7 +23,7 @@ namespace
     // without a version bump and without invalidating a player's card. Never
     // write a default into a byte an old file lacks, and never repurpose a byte.
     constexpr std::uint8_t kVersion = 1;
-    constexpr std::size_t kBytes = 6;
+    constexpr std::size_t kBytes = 7;
 
     std::string path() { return global.dataDir() + "settings.dat"; }
 } // namespace
@@ -51,6 +53,8 @@ void Settings::load()
         masterVolume = buf[4];
     if (n >= 6)
         debugMode = buf[5] != 0;
+    if (n >= 7)
+        controlHints = buf[6] != 0;
 }
 
 void Settings::save() const
@@ -71,6 +75,7 @@ void Settings::save() const
         static_cast<std::uint8_t>(water ? 1 : 0),
         masterVolume,
         static_cast<std::uint8_t>(debugMode ? 1 : 0),
+        static_cast<std::uint8_t>(controlHints ? 1 : 0),
     };
     std::fwrite(buf, 1, sizeof(buf), f);
     std::fclose(f);
@@ -79,6 +84,10 @@ void Settings::save() const
 void Settings::apply() const
 {
     RivenAudio::setMasterVolume(masterVolume);
+
+    // Live, so the settings row takes effect while the player is looking at it.
+    // A no-op before HintBar::create, and a no-op forever if that bowed out.
+    rivenrt::hintBar.setEnabled(controlHints);
 
     // Two of the options are Riven's own variables rather than the port's, so
     // the scripts see them the way the original's options screen made them see
