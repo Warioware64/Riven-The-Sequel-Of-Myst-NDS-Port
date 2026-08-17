@@ -78,6 +78,11 @@ vcpkg_installed/
 Testing/
 .cache/
 
+# Design notes kept for the author rather than published: the README carries the
+# licensing rules that the rest of the tree cites, and every remaining docs/*.md
+# reference in a comment points at a file that lives in helpSrc/docs/ now.
+docs/
+
 # The ROM. A build artifact: ./make.sh produces it from this tree, and the
 # README says so. It used to be tracked AND listed here, which meant the line
 # did nothing and every rebuild committed another copy of a 435 KB binary.

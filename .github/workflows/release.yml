@@ -1,0 +1,267 @@
+# Builds the three things a release is made of -- the ROM and the two converter
+# executables -- packs them into one archive per platform, and publishes them when
+# the run was started by a version tag.
+#
+# A manual run builds and packs everything and stops before publishing, which is
+# how a change to this workflow is tested without cutting a release.
+#
+# The archive is per-platform rather than per-component on purpose: the converter
+# can copy the ROM to the card itself (--rom / the wizard's checkbox), so putting
+# them in the same download removes the step where someone converts 8 GB onto a
+# card that then boots nothing.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rom:
+    name: ROM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain goes in $HOME instead of /opt so actions/cache can restore
+      # it without root. make.sh reads WONDERFUL_TOOLCHAIN and derives
+      # BLOCKSDS/BLOCKSDSEXT from it with ${VAR:-default}, so setting all three
+      # here is the whole configuration; the latter two are also what the Nitro
+      # Engine build below installs into.
+      - name: Configure the toolchain paths
+        run: |
+          echo "WONDERFUL_TOOLCHAIN=$HOME/wonderful" >> "$GITHUB_ENV"
+          echo "BLOCKSDS=$HOME/wonderful/thirdparty/blocksds/core" >> "$GITHUB_ENV"
+          echo "BLOCKSDSEXT=$HOME/wonderful/thirdparty/blocksds/external" >> "$GITHUB_ENV"
+
+      # Nitro Engine Advanced is not a wf-pacman package, so it is built from
+      # source below. Resolving the branch to a commit first pins the build and
+      # gives the cache a key that changes when the engine does -- otherwise a
+      # cached toolchain would keep serving a stale libNEA.a for ever.
+      - name: Resolve Nitro Engine Advanced revision
+        id: nea
+        run: |
+          sha=$(git ls-remote https://github.com/Warioware64/nitro-engine.git refs/heads/master | cut -f1)
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Restore toolchain
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/wonderful
+          # Bump the "v1" when the toolchain packages themselves need refreshing.
+          key: wonderful-v1-${{ runner.os }}-nea-${{ steps.nea.outputs.sha }}
+
+      - name: Install BlocksDS
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$WONDERFUL_TOOLCHAIN"
+          curl -fsSL https://wonderful.asie.pl/bootstrap/wf-bootstrap-x86_64.tar.gz \
+            | tar xzf - -C "$WONDERFUL_TOOLCHAIN"
+          export PATH="$WONDERFUL_TOOLCHAIN/bin:$PATH"
+          # The BlocksDS repository, enabled by hand: the bootstrap carries only
+          # wf-pacman, and `wf-config repo enable blocksds` cannot run yet because
+          # wf-config itself ships in a package that has to be installed from a
+          # repository first. All that command does is copy this file, which the
+          # bootstrap already includes for the purpose.
+          cp "$WONDERFUL_TOOLCHAIN/pacman/config/10-blocksds.conf" \
+             "$WONDERFUL_TOOLCHAIN/etc/pacman.d/"
+          wf-pacman -Syu --noconfirm
+          # ptexconv is not optional: build.py runs add_ptexconv over
+          # resources/font/, and architectds resolves it at
+          # ${BLOCKSDSEXT}/ptexconv/ptexconv.
+          wf-pacman -S --noconfirm blocksds-toolchain blocksds-ptexconv
+
+      - name: Build Nitro Engine Advanced
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: |
+          git init nea
+          git -C nea remote add origin https://github.com/Warioware64/nitro-engine.git
+          git -C nea fetch --depth 1 origin ${{ steps.nea.outputs.sha }}
+          git -C nea checkout FETCH_HEAD
+          # NEA_MAXMOD=1 to match the ROM, which build.py compiles with
+          # -DNEA_MAXMOD and links mm9 against. `install` puts it in
+          # BLOCKSDSEXT/nitro-engine-advanced/, which is the libdir build.py names.
+          make -C nea install NEA_MAXMOD=1
+
+      - name: Set up the build environment
+        run: ./setup-env.sh
+
+      - name: Build the ROM
+        run: ./make.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rom
+          path: riven-nds-port.nds
+          if-no-files-found: error
+
+  bundle:
+    name: Bundle (${{ matrix.name }})
+    needs: rom
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported runner on purpose: the binaries then also run
+          # against older glibc than the runner's own.
+          - os: ubuntu-22.04
+            name: linux
+          - os: windows-latest
+            name: windows
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # libvaht; the CMake configure hard-errors without it
+
+      # 6.5 rather than the newest: it is what CMakeLists asks for, and pinning
+      # low keeps the binary usable on older distributions.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.5.*'
+          cache: true
+
+      - name: Configure
+        run: >
+          cmake -S tools/riven-convert -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DRIVEN_BUILD_GUI=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # Every test that wants a Riven install skips and passes without
+      # RIVEN_TEST_DATA, so this needs no game data.
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Fetch the ROM
+        uses: actions/download-artifact@v4
+        with:
+          name: rom
+
+      # A tag names itself; a manual run has no version, and calling the archive
+      # after the branch it was dispatched from would look like a release.
+      - name: Name the release
+        id: name
+        shell: bash
+        run: |
+          ver='${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}'
+          echo "dir=riven-ds-$ver-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Pack (Linux)
+        if: runner.os == 'Linux'
+        env:
+          DIR: ${{ steps.name.outputs.dir }}
+        run: |
+          set -eux
+          mkdir -p "dist/$DIR"
+
+          # linuxdeploy bundles the Qt runtime, so the GUI does not depend on the
+          # user's distribution shipping a matching Qt 6. The CLI links no Qt at
+          # all and is copied as it is.
+          #
+          # The two helpers go in a subdirectory, not the working directory: they
+          # are themselves AppImages, and the *.AppImage glob that picks up the
+          # output below has to match exactly one file. PATH is how linuxdeploy
+          # finds its qt plugin.
+          mkdir -p .linuxdeploy
+          wget -q -O .linuxdeploy/linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q -O .linuxdeploy/linuxdeploy-plugin-qt-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x .linuxdeploy/*.AppImage
+          export PATH="$PWD/.linuxdeploy:$PATH"
+
+          cat > riven-convert.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Riven DS Converter
+          Exec=riven-convert-gui
+          Icon=riven-convert
+          Categories=Utility;
+          EOF
+          # The ROM's own icon, so the launcher and the DS agree on what this is.
+          cp Logo.png riven-convert.png
+
+          .linuxdeploy/linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
+            --appdir AppDir \
+            --executable build/gui/riven-convert-gui \
+            --desktop-file riven-convert.desktop \
+            --icon-file riven-convert.png \
+            --plugin qt --output appimage
+
+          # Named without the .AppImage suffix so GUIDE.md can say "run
+          # riven-convert-gui" on either platform. A glob rather than the name
+          # linuxdeploy derives from the desktop file, but it is moved onto a
+          # file target, so more than one match fails here instead of shipping
+          # the wrong binary.
+          mv ./*.AppImage "dist/$DIR/riven-convert-gui"
+          chmod +x "dist/$DIR/riven-convert-gui"
+
+          cp build/riven-convert "dist/$DIR/"
+          cp riven-nds-port.nds GUIDE.md LICENSE "dist/$DIR/"
+          tar czf "$DIR.tar.gz" -C dist "$DIR"
+
+      - name: Pack (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DIR: ${{ steps.name.outputs.dir }}
+        run: |
+          $out = "dist\$env:DIR"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item build\Release\riven-convert.exe $out\
+          Copy-Item build\gui\Release\riven-convert-gui.exe $out\
+          Copy-Item riven-nds-port.nds, GUIDE.md, LICENSE $out\
+          # windeployqt copies the Qt DLLs and plugins next to the exe, which is
+          # also what keeps the LGPL dynamic-linking requirement satisfied.
+          windeployqt --release --no-translations $out\riven-convert-gui.exe
+          Compress-Archive -Path $out -DestinationPath "$env:DIR.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.name }}
+          path: |
+            riven-ds-*.tar.gz
+            riven-ds-*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: bundle
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          fail_on_unmatched_files: true
+          body: |
+            **This download contains no game data.** Take the archive for your
+            system, run `riven-convert-gui`, and point it at your own copy of
+            Riven and at your SD card. The ROM is in the same archive and the
+            converter can copy it to the card for you.
+
+            Set aside a few hours and about 8 GB of card: the movies are stored
+            as the raw pixels the DS draws. The conversion is resumable.
+
+            `GUIDE.md` inside the archive walks through it, and the
+            [README](https://github.com/${{ github.repository }}#getting-it-running)
+            has the controls.

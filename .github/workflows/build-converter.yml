@@ -75,7 +75,7 @@ jobs:
           mkdir -p dist/riven-convert
           cp build/riven-convert dist/riven-convert/
           cp build/gui/riven-convert-gui dist/riven-convert/
-          cp README.md docs/licensing.md dist/riven-convert/
+          cp GUIDE.md LICENSE dist/riven-convert/
           # linuxdeploy bundles the Qt runtime, so the AppImage does not depend
           # on the user's distribution shipping a matching Qt 6.
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
@@ -89,11 +89,11 @@ jobs:
           Icon=riven-convert
           Categories=Utility;
           EOF
-          convert -size 256x256 xc:#204060 riven-convert.png 2>/dev/null || \
-            python3 -c "import struct,zlib,sys;
-w=h=256;raw=b''.join(b'\x00'+bytes([32,64,96])*w for _ in range(h));
-chunk=lambda t,d:struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d));
-open('riven-convert.png','wb').write(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))"
+          # The ROM's own icon, so the launcher and the DS agree on what this is.
+          # This used to generate a placeholder with ImageMagick and an inline
+          # Python fallback, whose unindented continuation lines ran out of the
+          # block scalar and left this whole file invalid YAML.
+          cp Logo.png riven-convert.png
           ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
             --appdir AppDir \
             --executable build/gui/riven-convert-gui \
@@ -110,7 +110,7 @@ open('riven-convert.png','wb').write(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.p
           New-Item -ItemType Directory -Force -Path dist\riven-convert | Out-Null
           Copy-Item build\Release\riven-convert.exe dist\riven-convert\
           Copy-Item build\gui\Release\riven-convert-gui.exe dist\riven-convert\
-          Copy-Item README.md, docs\licensing.md dist\riven-convert\
+          Copy-Item GUIDE.md, LICENSE dist\riven-convert\
           # windeployqt copies the Qt DLLs and plugins next to the exe, which is
           # also what keeps the LGPL dynamic-linking requirement satisfied.
           windeployqt --release --no-translations dist\riven-convert\riven-convert-gui.exe
